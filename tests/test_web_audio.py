@@ -21,6 +21,6 @@ def test_web_audio_resamplers():
         ["node", str(CHECK)], capture_output=True, text=True, timeout=60
     )
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
-    assert "page delegates audio to the SDK: OK" in proc.stdout
+    assert "page uses the SDK ConverseClient: OK" in proc.stdout
     assert "SDK codec: PCM16 both directions: OK" in proc.stdout
     assert "SDK resampler: continuous across chunks: OK" in proc.stdout

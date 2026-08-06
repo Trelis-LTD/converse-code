@@ -21,14 +21,20 @@ const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
 new Function(script.replace(/document\.|window\./g, "globalThis.__unused_"));
 console.log("page script parses: OK");
 
-// 1. The page must use the SDK, not its own audio implementation.
-for (const needed of ["vendor/converse/index.js", "StreamingPlayer", "MicCapture", "binaryToFloat32", "floatToPcm16Bytes"]) {
+// 1. The page must use the SDK's own client, not a hand-rolled driver over its
+// audio pieces. Driving StreamingPlayer/MicCapture/EchoCanceller directly from
+// the page means owning echo cancellation, frame ordering, barge handling and
+// scheduler liveness — responsibilities that produced one bug each.
+for (const needed of ["ConverseClient", "vendor/converse/index.js", "startMic", "unlockAudio", "/proxy"]) {
   if (!script.includes(needed)) throw new Error(`page no longer uses ${needed}`);
 }
-for (const banned of ["new Float32Array(arrayBuffer)", "resamplePhase", "resampleToCtxRate", "MicCaptureProcessor"]) {
-  if (script.includes(banned)) throw new Error(`page reintroduced hand-rolled audio: ${banned}`);
+for (const banned of ["new StreamingPlayer", "new mod.MicCapture", "new mod.EchoCanceller",
+                      "binaryToFloat32", "floatToPcm16Bytes", "resampleToCtxRate", "MicCaptureProcessor"]) {
+  if (script.includes(banned)) throw new Error(`page is hand-driving SDK audio again: ${banned}`);
 }
-console.log("page delegates audio to the SDK: OK");
+// The one exception: the hidden-tab scheduler pump, which the SDK does not do.
+if (!script.includes("createScriptProcessor")) throw new Error("hidden-tab audio pump is missing");
+console.log("page uses the SDK ConverseClient: OK");
 
 // 2/3. Exercise the SDK's own decode + resample.
 const { binaryToFloat32, floatToPcm16Bytes } = await import("../converse_code/web/vendor/converse/audio.js");

@@ -55,11 +55,14 @@ class BrokerClient:
         self.closed = asyncio.Event()
         self._ws: websockets.WebSocketClientProtocol | None = None
 
-    async def connect(self) -> None:
+    async def connect(self, start_frame: dict | None = None) -> None:
         # Cap inbound frames generously (TTS audio chunks are small) rather than
         # disabling the limit — an unbounded cap lets a misbehaving endpoint
         # force arbitrary allocations.
         self._ws = await websockets.connect(self.url, max_size=4 * 1024 * 1024)
+        if start_frame is not None:
+            await self._ws.send(json.dumps(start_frame))
+            return
         await self._ws.send(json.dumps({
             "type": "start",
             "session_id": self.session_id,
@@ -124,3 +127,7 @@ class BrokerClient:
 
     async def send_client_event(self, event: str, **fields) -> None:
         await self._send({"type": "client_event", "event": event, **fields})
+
+    async def send_raw(self, payload: dict | bytes) -> None:
+        """Relay a frame from the browser's SDK client straight through."""
+        await self._send(payload)

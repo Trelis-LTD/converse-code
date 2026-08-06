@@ -28,13 +28,14 @@ def test_help_works():
     assert "Talk to Claude Code by voice" in proc.stdout
 
 
-def test_startup_reaches_broker_connect_and_fails_cleanly():
-    """Exercises the whole startup path: logging setup, key load, local server,
-    broker connect. An unreachable broker must produce a clear message, not a
-    traceback."""
+def test_startup_checks_credentials_before_launching_claude():
+    """Exercises the whole startup path: logging setup, key load, credential
+    check. The broker socket itself is opened later (when the page's SDK client
+    connects), so an unreachable broker must still fail fast here with a clear
+    message rather than a traceback or a silent start."""
     proc = run(["--no-browser", "--headless", "--port", "0", "--broker-url", "ws://127.0.0.1:1"])
     assert proc.returncode == 1
-    assert "Could not connect to Converse" in proc.stderr
+    assert "Could not reach Converse" in proc.stderr
     assert "Claude Code was not started" in proc.stderr
     assert "Traceback" not in proc.stderr
 

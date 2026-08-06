@@ -72,6 +72,20 @@ async def _run(args) -> int:
         return 1
     url = server.url
 
+    # The broker connection is now opened lazily, when the page's SDK client
+    # sends its start frame — so check credentials up front with the free
+    # (non-billable) auth frame rather than letting a bad key surface minutes
+    # later as a banner in the browser.
+    try:
+        if not await brokermod.validate_key(api_key, url=args.broker_url):
+            await server.stop()
+            print("Converse rejected that API key. Run: converse-code login", file=sys.stderr)
+            return 1
+    except Exception as exc:
+        await server.stop()
+        print(f"Could not reach Converse ({exc}). Claude Code was not started.", file=sys.stderr)
+        return 1
+
     scratch = tempfile.mkdtemp(prefix="converse-code-")
     # --settings loads *additional* settings, so the dev's own hooks/config stay.
     settings_path = hooks.write_settings(scratch, server.hook_url("stop"))
@@ -83,40 +97,60 @@ async def _run(args) -> int:
         api_key, session_id=handle, tools=tools.manifest(), url=args.broker_url,
         client_info={"capabilities": []},
     )
-    try:
-        await client.connect()
-    except Exception as exc:
-        await server.stop()
-        shutil.rmtree(scratch, ignore_errors=True)
-        print(f"Could not connect to Converse ({exc}). Claude Code was not started.", file=sys.stderr)
-        return 1
-
     router = tools.ToolRouter(host, client, handle=handle)
     router.on_status = server.send_json_to_tab
     server.on_hook = router.on_hook
-    server.on_tab_audio = client.send_audio
 
-    async def on_tab_json(msg: dict) -> None:
-        if msg.get("type") == "playback_stopped":
-            await client.send_client_event(
-                "playback_stopped",
-                remaining_ms=int(msg.get("remaining_ms", 0)),
-                discarded_ms=int(msg.get("discarded_ms", 0)),
-                barge_seq=int(msg.get("barge_seq", 0)),
-            )
+    # The browser runs the SDK's own ConverseClient — the same code path as the
+    # Converse playground — and this process relays its socket to the broker,
+    # substituting the real API key and adding the tool manifest. Hand-driving the
+    # SDK's audio pieces instead produced a run of composition bugs (missing echo
+    # canceller, missing scheduler pump, wrong frame ordering); the client already
+    # solves all of that, so it owns the audio and this owns the tools.
+    broker_task: asyncio.Task | None = None
+    connected = asyncio.Event()
 
-    server.on_tab_json = on_tab_json
-    client.on_json = server.send_json_to_tab
-    # The SDK decodes PCM16 in the page, so frames need no conversion here.
-    client.on_audio = server.send_audio_to_tab
+    async def on_proxy_json(msg: dict) -> None:
+        nonlocal broker_task
+        if msg.get("type") == "start":
+            frame = dict(msg)
+            frame["api_key"] = api_key
+            frame["session_id"] = handle
+            mode = dict(frame.get("mode") or {})
+            mode["tools"] = tools.manifest()
+            frame["mode"] = mode
+            frame.setdefault("audio", {})["output_encoding"] = audiofmt.OUTPUT_ENCODING
+            try:
+                await client.connect(start_frame=frame)
+            except Exception as exc:
+                log.error("broker connect failed: %s", exc)
+                await server.send_json_to_proxy(
+                    {"type": "bye", "code": 1011, "reason": f"could not reach Converse: {exc}"}
+                )
+                return
+            broker_task = asyncio.create_task(client.run())
+            connected.set()
+            return
+        await client.send_raw(msg)
+
+    async def on_proxy_closed() -> None:
+        await client.close()
+
+    server.on_proxy_json = on_proxy_json
+    server.on_proxy_audio = client.send_raw
+    server.on_proxy_closed = on_proxy_closed
+
+    async def to_page(msg: dict) -> None:
+        await server.send_json_to_proxy(msg)
+
+    client.on_json = to_page
+    client.on_audio = server.send_audio_to_proxy
     client.on_tool_call = lambda call: _spawn_tool(router, call)
 
     print(f"Converse Code — voice tab: {url}   (session: {handle})")
     print(f"Logs: {LOG_PATH}")
     if not args.no_browser:
         webbrowser.open(url)
-
-    broker_task = asyncio.create_task(client.run())
     started_at = asyncio.get_running_loop().time()
     await host.start()
     try:
@@ -124,7 +158,8 @@ async def _run(args) -> int:
     finally:
         host.restore_terminal()
         _report_early_exit(host, asyncio.get_running_loop().time() - started_at)
-        broker_task.cancel()
+        if broker_task is not None:
+            broker_task.cancel()
         await client.close()
         await server.stop()
         shutil.rmtree(scratch, ignore_errors=True)

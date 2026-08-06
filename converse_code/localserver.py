@@ -32,6 +32,14 @@ class LocalServer:
         self.on_tab_audio: Callable[[bytes], Awaitable[None]] | None = None
         self.on_tab_json: Callable[[dict], Awaitable[None]] | None = None
         self.on_hook: Callable[[str, dict], Awaitable[None]] | None = None
+        # The page's SDK client speaks the Converse protocol over /proxy; the
+        # process relays it to the broker, adding the tool manifest. Keeping this
+        # separate from /ws means converse-code's own status messages never enter
+        # the SDK's message stream.
+        self.on_proxy_json: Callable[[dict], Awaitable[None]] | None = None
+        self.on_proxy_audio: Callable[[bytes], Awaitable[None]] | None = None
+        self.on_proxy_closed: Callable[[], Awaitable[None]] | None = None
+        self._proxy_ws: web.WebSocketResponse | None = None
         self._tab: web.WebSocketResponse | None = None
         self._runner: web.AppRunner | None = None
         self._host = "127.0.0.1"
@@ -42,6 +50,7 @@ class LocalServer:
         app = web.Application()
         app.router.add_get("/", self._index)
         app.router.add_get("/ws", self._ws)
+        app.router.add_get("/proxy", self._proxy)
         app.router.add_get("/vendor/converse/{name}", self._vendor)
         app.router.add_post("/hook/{event}", self._hook)
         self._runner = web.AppRunner(app)
@@ -59,8 +68,9 @@ class LocalServer:
         return f"http://{self._host}:{self.port}/hook/{event}?t={self.token}"
 
     async def stop(self) -> None:
-        if self._tab is not None and not self._tab.closed:
-            await self._tab.close()
+        for sock in (self._tab, self._proxy_ws):
+            if sock is not None and not sock.closed:
+                await sock.close()
         if self._runner:
             await self._runner.cleanup()
 
@@ -148,6 +158,43 @@ class LocalServer:
                     log.warning("bad JSON from tab: %.100s", msg.data)
         if self._tab is ws:
             self._tab = None
+        return ws
+
+    async def send_json_to_proxy(self, msg: dict) -> None:
+        if self._proxy_ws is not None and not self._proxy_ws.closed:
+            try:
+                await self._proxy_ws.send_str(json.dumps(msg))
+            except ConnectionError:
+                pass
+
+    async def send_audio_to_proxy(self, data: bytes) -> None:
+        if self._proxy_ws is not None and not self._proxy_ws.closed:
+            try:
+                await self._proxy_ws.send_bytes(data)
+            except ConnectionError:
+                pass
+
+    async def _proxy(self, request: web.Request) -> web.StreamResponse:
+        if not self._authorized(request) or not self._same_origin(request):
+            return web.Response(status=403, text="forbidden")
+        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=4 * 1024 * 1024)
+        await ws.prepare(request)
+        if self._proxy_ws is not None and not self._proxy_ws.closed:
+            await self._proxy_ws.close()
+        self._proxy_ws = ws
+        log.info("SDK client connected")
+        async for msg in ws:
+            if msg.type == WSMsgType.BINARY and self.on_proxy_audio:
+                await self.on_proxy_audio(msg.data)
+            elif msg.type == WSMsgType.TEXT and self.on_proxy_json:
+                try:
+                    await self.on_proxy_json(json.loads(msg.data))
+                except json.JSONDecodeError:
+                    log.warning("bad JSON from SDK client: %.100s", msg.data)
+        if self._proxy_ws is ws:
+            self._proxy_ws = None
+        if self.on_proxy_closed:
+            await self.on_proxy_closed()
         return ws
 
     async def _hook(self, request: web.Request) -> web.Response:

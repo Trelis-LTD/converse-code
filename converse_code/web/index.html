@@ -99,7 +99,7 @@
 (function(){
   "use strict";
 
-  var BUILD = "2026-08-06-hidden-tab-pump";
+  var BUILD = "2026-08-06-webkit-aec";
 
   // ---------- WebSocket connection with auto-reconnect ----------
   var ws = null;
@@ -322,64 +322,40 @@
     statusChip.textContent = label;
   }
 
-  // ---------- Audio: the official @trelis/converse SDK ----------
-  // Microphone capture, echo cancellation, streaming playback and interruption
-  // handling all come from the SDK (vendored under web/vendor/converse). This
-  // replaced a hand-rolled implementation whose defects were, in order: decoding
-  // PCM16 downlink audio as Float32 (pure noise), no jitter buffer, and clicks at
-  // every chunk seam. The SDK is the same audio path the Converse playground
-  // runs, so this page is no longer the place those bugs can live.
+  // ---------- Session + audio: the SDK's own ConverseClient ----------
+  // This is the same client the Converse playground runs. It owns microphone
+  // capture, echo cancellation (including WebKit's WASM canceller, which the
+  // browser cannot do for us on Safari/iOS), streaming playback, barge handling
+  // and reconnects.
   //
-  // The session itself is still owned by the converse-code process — one socket
-  // carries both audio and the tool protocol — so only the SDK's audio pieces
-  // are used here, not its ConverseClient.
+  // It connects to /proxy on this server rather than to Converse directly: the
+  // converse-code process relays that socket to the broker, adding the API key
+  // and the tool manifest, because the tools are answered by the process, not by
+  // this page. A previous version drove the SDK's low-level audio pieces from
+  // here instead and accumulated a bug per missing responsibility.
   var micBtn = document.getElementById("micBtn");
   var micLabel = document.getElementById("micLabel");
   var meterFill = document.getElementById("meterFill");
 
-  var sdk = null;          // loaded module namespace
-  var player = null;       // StreamingPlayer
-  var mic = null;          // MicCapture
+  var client = null;
   var micActive = false;
-
-  function loadSdk(){
-    if(sdk) return Promise.resolve(sdk);
-    // index.js exposes StreamingPlayer/MicCapture/floatToPcm16Bytes; the frame
-    // decoder lives in audio.js and is not re-exported, so take it from there.
-    return Promise.all([
-      import("./vendor/converse/index.js"),
-      import("./vendor/converse/audio.js")
-    ]).then(function(mods){
-      sdk = Object.assign({}, mods[0], {binaryToFloat32: mods[1].binaryToFloat32});
-      return sdk;
-    });
-  }
-
-  function getPlayer(){
-    if(!player && sdk) player = new sdk.StreamingPlayer();
-    return player;
-  }
-
-  // The player drains its queue from a setInterval on the main thread. Chrome
-  // throttles timers to ~1 Hz in a HIDDEN tab, and the SDK only schedules
-  // SCHEDULE_AHEAD (0.2s) of audio per tick — so a backgrounded tab plays 0.2s
-  // of speech, then ~0.8s of silence, repeating. That is exactly the case here:
-  // the dev is watching their terminal, not this page. (The playground never
-  // hits it because you look at the playground while you talk.)
-  //
-  // So drive scheduling from the audio thread instead: a ScriptProcessorNode's
-  // callback is clocked by the audio graph, which keeps running at full rate
-  // while the tab is hidden. It is deprecated but universally supported, needs
-  // no module load, and outputs silence since we never write to its buffer.
   var pump = null;
 
-  function startPump(){
+  function proxyUrl(){
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    var token = new URLSearchParams(location.search).get("t") || "";
+    return proto + "//" + location.host + "/proxy?t=" + encodeURIComponent(token);
+  }
+
+  // The player drains its queue from a main-thread timer, and browsers throttle
+  // timers to ~1 Hz in a HIDDEN tab — which is the normal case here, since the
+  // dev watches their terminal. Clock it from the audio thread instead, which
+  // keeps running at full rate regardless of visibility.
+  function startPump(player){
     if(pump || !player || !player.context) return;
     try{
       var node = player.context.createScriptProcessor(2048, 1, 1);
-      node.onaudioprocess = function(){
-        try{ player._schedule(); }catch(e){}
-      };
+      node.onaudioprocess = function(){ try{ player._schedule(); }catch(e){} };
       node.connect(player.context.destination);
       pump = node;
     }catch(err){
@@ -387,109 +363,79 @@
     }
   }
 
-  // Browsers hold AudioContext.resume() until the page has been interacted with,
-  // so assistant audio is silent until then. Clicking the mic counts, but someone
-  // who only types in the terminal and listens would get nothing and no reason
-  // why — so any click unlocks audio, and a banner says so if audio arrives first.
-  var audioUnlocked = false;
-  var audioBannerShown = false;
-
-  function unlockAudio(){
-    if(audioUnlocked) return;
-    audioUnlocked = true;
-    loadSdk().then(function(){
-      var p = getPlayer();
-      if(p && p.ensureContext) return p.ensureContext().then(startPump);
-    }).catch(function(err){ console.debug("audio unlock failed", err); });
-  }
-
-  document.addEventListener("click", unlockAudio);
-  document.addEventListener("keydown", unlockAudio);
-
-  // Frames MUST be decoded and enqueued strictly in order, one at a time.
-  // enqueue() is async and mutates the player's resampler state (fractional
-  // phase and carry sample), so overlapping calls interleave that state and can
-  // append chunks out of order — audible as garbled, squeaky audio. TTS arrives
-  // in bursts faster than real time, so this happens constantly in practice
-  // (and never in a replay that paces frames 20ms apart, which is how it slipped
-  // through). The SDK's own client serializes the same way via its audioQueue.
-  var audioChain = Promise.resolve();
-
-  function handleAudioFrame(arrayBuffer){
-    if(!arrayBuffer || arrayBuffer.byteLength < 2) return;
-    if(!audioUnlocked && !audioBannerShown){
-      audioBannerShown = true;
-      addBanner("Click anywhere on this page to enable audio playback.");
-    }
-    audioChain = audioChain.then(function(){
-      return loadSdk();
-    }).then(function(mod){
-      // binaryToFloat32 decodes the wire format (PCM16) — the SDK owns that
-      // definition, so this page can't get it wrong again.
-      return mod.binaryToFloat32(arrayBuffer);
-    }).then(function(samples){
-      var p = getPlayer();
-      if(!p) return;
-      return p.enqueue(samples).then(startPump);
-    }).catch(function(err){
-      console.debug("audio frame dropped", err);
-    });
-  }
-
-  function handleInterrupted(msg){
-    // The broker decides a barge happened; the page only stops local playback and
-    // reports how much audio it threw away, which the broker uses to truncate
-    // what it believes was heard.
-    var discarded = 0;
-    if(player){
-      discarded = Math.round(player.pendingMs ? player.pendingMs() : 0);
-      try{ player.clear(); }catch(e){}
-    }
-    sendJson({
-      type: "playback_stopped",
-      remaining_ms: discarded,
-      discarded_ms: discarded,
-      barge_seq: (msg && msg.barge_seq !== undefined) ? msg.barge_seq : 0
-    });
-    freezeAssistant();
-  }
-
   function setMeter(level){
     meterFill.style.width = Math.min(100, Math.round(level * 100)) + "%";
   }
 
-  function frameLevel(frame){
-    var peak = 0;
-    for(var i = 0; i < frame.length; i++){
-      var v = frame[i] < 0 ? -frame[i] : frame[i];
-      if(v > peak) peak = v;
+  function renderEvent(ev){
+    switch(ev.type){
+      case "asr": {
+        if(!currentYouEl) currentYouEl = makeEntry("you", "You");
+        setBody(currentYouEl, pickText(ev));
+        if(isFinal(ev)) freezeYou();
+        break;
+      }
+      case "turn": {
+        freezeYou();
+        currentAssistantEl = makeEntry("assistant", "Assistant");
+        assistantText = "";
+        break;
+      }
+      case "text_delta": {
+        if(!currentAssistantEl){ currentAssistantEl = makeEntry("assistant", "Assistant"); assistantText = ""; }
+        assistantText += (ev.delta || "");
+        setBody(currentAssistantEl, assistantText);
+        break;
+      }
+      case "utterance": {
+        if(!currentAssistantEl) currentAssistantEl = makeEntry("assistant", "Assistant");
+        assistantText = pickText(ev);
+        setBody(currentAssistantEl, assistantText);
+        break;
+      }
+      case "done": { freezeAssistant(); freezeYou(); break; }
+      case "interrupted": { freezeAssistant(); break; }
+      case "bye": { addBanner("Session ended" + (ev.reason ? (": " + ev.reason) : "")); break; }
+      case "error": {
+        console.debug("client error", ev);
+        addBanner("Voice error: " + (ev.error && ev.error.message ? ev.error.message : "see console"));
+        break;
+      }
+      default: break;   // audio frames and everything else: the client handles it
     }
-    return peak;
+  }
+
+  function startSession(){
+    if(client) return Promise.resolve(client);
+    return import("./vendor/converse/index.js").then(function(mod){
+      client = new mod.ConverseClient({
+        url: proxyUrl(),
+        // The process substitutes the real key and session id when it relays the
+        // start frame; nothing secret is ever handed to the browser.
+        apiKey: "relayed-by-converse-code",
+        sessionId: mod.createSessionId(),
+        mode: {kind: "converse", web_search: false}
+      });
+      client.addEventListener("event", function(e){ renderEvent(e.detail || {}); });
+      return client.unlockAudio()
+        .then(function(){ return client.connect(); })
+        .then(function(){
+          startPump(client.player);
+          return client;
+        });
+    });
   }
 
   function startMic(){
     if(micActive) return;
     micLabel.textContent = "…";
-    loadSdk().then(function(mod){
-      var p = getPlayer();
-      // A user gesture is required before audio may play; the mic click is it.
-      if(p && p.ensureContext) return p.ensureContext().then(function(){ return mod; });
-      return mod;
-    }).then(function(mod){
-      mic = new mod.MicCapture({
-        workletUrl: "./vendor/converse/mic-worklet.js",
-        onFrame: function(frame){
-          if(ws && ws.readyState === WebSocket.OPEN){
-            ws.send(mod.floatToPcm16Bytes(frame));
-          }
-          setMeter(frameLevel(frame));
-        }
-      });
-      return mic.start();
+    startSession().then(function(c){
+      return c.startMic({workletUrl: "./vendor/converse/mic-worklet.js"});
     }).then(function(){
       micActive = true;
       micBtn.classList.add("live");
       micLabel.textContent = "live";
+      startPump(client && client.player);
     }).catch(function(err){
       console.debug("mic error", err);
       micLabel.textContent = "off";
@@ -503,8 +449,7 @@
     micBtn.classList.remove("live");
     micLabel.textContent = "off";
     setMeter(0);
-    try{ if(mic) mic.stop(); }catch(e){}
-    mic = null;
+    try{ if(client) client.stopMic(); }catch(e){}
   }
 
   micBtn.addEventListener("click", function(){
