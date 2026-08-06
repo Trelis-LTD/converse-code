@@ -101,20 +101,55 @@ async def _run(args) -> int:
     client.on_tool_call = lambda call: _spawn_tool(router, call)
 
     print(f"Converse Code — voice tab: {url}   (session: {handle})")
+    print(f"Logs: {Path(tempfile.gettempdir()) / 'converse-code.log'}")
     if not args.no_browser:
         webbrowser.open(url)
 
     broker_task = asyncio.create_task(client.run())
+    started_at = asyncio.get_running_loop().time()
     await host.start()
     try:
         await host.exited.wait()
     finally:
         host.restore_terminal()
+        _report_early_exit(host, asyncio.get_running_loop().time() - started_at)
         broker_task.cancel()
         await client.close()
         await server.stop()
         shutil.rmtree(scratch, ignore_errors=True)
     return host.returncode or 0
+
+
+EARLY_EXIT_S = 5.0
+
+
+def _report_early_exit(host: ClaudeHost, elapsed: float) -> None:
+    """Explain a Claude Code session that died on startup.
+
+    Claude Code restores the terminal from its alternate screen as it exits,
+    which erases whatever it printed — so a failed launch otherwise looks like
+    `converse-code` silently doing nothing. Our screen buffer still holds the
+    final frame, so replay it.
+    """
+    if host.returncode == 0 and elapsed >= EARLY_EXIT_S:
+        return
+    lines = [l.rstrip() for l in host.snapshot() if l.strip()]
+    print(
+        f"\nClaude Code exited after {elapsed:.1f}s (exit code {host.returncode}).",
+        file=sys.stderr,
+    )
+    if host.returncode == 127:
+        print(
+            "The `claude` command could not be launched — check it's on your PATH, "
+            "or pass --claude with the right command.",
+            file=sys.stderr,
+        )
+    if lines:
+        print("Its last screen before exiting:", file=sys.stderr)
+        for line in lines[-15:]:
+            print(f"  {line}", file=sys.stderr)
+    else:
+        print("It produced no output at all.", file=sys.stderr)
 
 
 _tool_tasks: set[asyncio.Task] = set()
@@ -139,7 +174,14 @@ def main() -> None:
     sub.add_parser("login", help="store and validate your Converse API key")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+    # Claude Code owns the terminal, so log records written to stderr would be
+    # painted into the middle of its TUI. Send them to a file instead.
+    log_path = Path(tempfile.gettempdir()) / "converse-code.log"
+    logging.basicConfig(
+        level=logging.WARNING,
+        filename=None if args.cmd == "login" or args.headless else str(log_path),
+        stream=sys.stderr if args.cmd == "login" or args.headless else None,
+    )
     if args.cmd == "login":
         raise SystemExit(asyncio.run(_login(args.broker_url)))
     raise SystemExit(asyncio.run(_run(args)))

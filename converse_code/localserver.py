@@ -102,8 +102,13 @@ class LocalServer:
         return web.FileResponse(WEB_DIR / "index.html")
 
     async def _ws(self, request: web.Request) -> web.StreamResponse:
-        if not self._authorized(request) or not self._same_origin(request):
-            log.warning("rejected websocket from origin=%r", request.headers.get("Origin"))
+        if not self._authorized(request):
+            # Usually a stale tab from a previous run retrying with an old token,
+            # not an attack — hence debug, not warning.
+            log.debug("rejected websocket with bad token")
+            return web.Response(status=403, text="stale or missing token — reopen the printed URL")
+        if not self._same_origin(request):
+            log.warning("rejected websocket from foreign origin %r", request.headers.get("Origin"))
             return web.Response(status=403, text="forbidden")
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
