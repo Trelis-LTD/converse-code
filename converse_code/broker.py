@@ -56,6 +56,17 @@ class BrokerClient:
         self._ws: websockets.WebSocketClientProtocol | None = None
 
     async def connect(self, start_frame: dict | None = None) -> None:
+        """Open (or re-open) the broker session.
+
+        One client is reused across reconnects — the page's SDK sends a fresh
+        start frame whenever the tab reloads or its socket blips. `closed` must be
+        reset here: it gates every send, so leaving it set from the previous cycle
+        silently swallows every tool result for the rest of the process's life
+        while everything still *looks* connected.
+        """
+        if self._ws is not None:
+            await self._ws.close()   # no-op if it already closed
+        self.closed.clear()
         # Cap inbound frames generously (TTS audio chunks are small) rather than
         # disabling the limit — an unbounded cap lets a misbehaving endpoint
         # force arbitrary allocations.
