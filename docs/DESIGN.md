@@ -35,6 +35,13 @@ uvx converse-code          # in your project directory
   view of the conversation.
 - The dev talks into the tab. Instructions appear in the terminal as typed text; Claude
   Code works; the voice narrates what happened. Closing the terminal stops everything.
+- The tab shows both sides of the conversation, streamed live: the ASR transcript of what
+  was heard as it firms up, and the assistant's reply text as it's spoken. One static
+  HTML page, vanilla JS, served by `converse-code` itself -- no framework, no build step.
+- Typing is not a browser-tab feature: the terminal *is* the text input. The dev types
+  into Claude Code directly whenever precision beats speech; the state machine treats
+  dev-typed turns identically to injected ones (the Stop hook and transcript don't care
+  who typed).
 
 **What shows in the terminal is not a transcript of the speech — by design.** Speech goes
 to the Converse brain, and what lands in the terminal is the brain's *formulated
@@ -127,10 +134,12 @@ Following the documented shape exactly:
   snapshot the *rendered screen* at any moment. This is used only for structure -- menu and
   queue detection (Section 10) -- never as the source of CC's prose.
 - **Permission prompts inside CC itself**: Claude Code's own tool-approval prompts are a
-  distinct case from the Converse-level `requires_permission` gate -- install a
-  `PermissionRequest` hook, surface it as a `tool_progress` note or hold the call open, and
-  only auto-approve if you've deliberately decided that's safe for this host (default:
-  surface it, don't auto-approve).
+  distinct case from the Converse-level `requires_permission` gate. For the MVP they need
+  *no dedicated mechanism*: a permission prompt is just a menu, so the Section 10 state
+  machine already detects it from the screen buffer, reports its options to the brain, and
+  answers it via `select_option` -- the user hears "it wants to run pytest, allow it?" and
+  says yes. A `PermissionRequest` hook (for reliability/latency) and any scoped
+  auto-approve list are later hardening, not MVP surface. Never auto-approve by default.
 - **Stop**: `stop_long_task` maps to writing Escape to the pty -- that is Claude Code's
   turn-interrupt. Not Ctrl-C (which clears the input line, or exits on a double press) and
   never killing the process -- matches "the host adapter owns the mechanism" language in
@@ -265,11 +274,12 @@ menus, and `data.queue` (the list of pending queued instructions) rides along wi
   `converse-code` drops its audio relay and pairs with the real Converse app. Until that
   exists in the public protocol, the localhost tab is the audio path.
 
-## 12. Open questions
+## 12. MVP surface (decided)
 
-- Whether `check_status` is worth building now or deferred until real usage shows the brain
-  needs it.
-- Exact policy for CC's own internal permission prompts (surface-and-wait vs. scoped
-  auto-approve list).
-- Whether the browser tab needs a text-input fallback (type instead of talk) for noisy
-  environments, or whether the terminal already covers that.
+Ship: `long_task`, `stop_long_task`, `command`, `select_option`, `press_key`. That's the
+whole manifest.
+
+Deferred until real usage demands them: `check_status` (the hold-open call's partials
+already answer "how's it going?" for anything mid-task; add it only if dead-air gaps
+between calls prove annoying), `list_commands`, the `PermissionRequest` hook, tmux
+persistence, Tailscale/remote, official-client pairing.
