@@ -108,7 +108,10 @@
 
   function wsUrl(){
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
-    return proto + "//" + location.host + "/ws";
+    // The run's token arrives in this page's own URL; the server requires it
+    // on the socket too, so other pages can't open one.
+    var token = new URLSearchParams(location.search).get("t") || "";
+    return proto + "//" + location.host + "/ws?t=" + encodeURIComponent(token);
   }
 
   function setDot(state){

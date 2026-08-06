@@ -53,7 +53,10 @@ class BrokerClient:
         self._ws: websockets.WebSocketClientProtocol | None = None
 
     async def connect(self) -> None:
-        self._ws = await websockets.connect(self.url, max_size=None)
+        # Cap inbound frames generously (TTS audio chunks are small) rather than
+        # disabling the limit — an unbounded cap lets a misbehaving endpoint
+        # force arbitrary allocations.
+        self._ws = await websockets.connect(self.url, max_size=4 * 1024 * 1024)
         await self._ws.send(json.dumps({
             "type": "start",
             "session_id": self.session_id,

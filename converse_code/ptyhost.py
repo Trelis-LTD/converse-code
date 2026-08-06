@@ -27,6 +27,19 @@ class _Screen(pyte.Screen):
         pass
 
 
+MAX_INJECT_CHARS = 8000
+
+
+def sanitize(text: str) -> str:
+    """Collapse newlines to spaces and drop control characters (incl. ESC)."""
+    flat = text.replace("\r", "\n").replace("\n", " ")
+    stripped = "".join(
+        ch for ch in flat
+        if ch == "\t" or (ord(ch) >= 0x20 and ord(ch) != 0x7F and not 0x80 <= ord(ch) <= 0x9F)
+    )
+    return " ".join(stripped.split())[:MAX_INJECT_CHARS]
+
+
 KEYMAP = {
     "escape": b"\x1b",
     "enter": b"\r",
@@ -49,6 +62,7 @@ class ClaudeHost:
         self._pid: int | None = None
         self._master_fd: int | None = None
         self._saved_termios = None
+        self._stdin_was_blocking: bool | None = None
         self._screen = _Screen(cols, rows)
         self._stream = pyte.ByteStream(self._screen)
         self.exited = asyncio.Event()
@@ -80,6 +94,7 @@ class ClaudeHost:
         loop.add_reader(master_fd, self._on_child_output)
         if self.attach_terminal:
             self._saved_termios = termios.tcgetattr(sys.stdin.fileno())
+            self._stdin_was_blocking = os.get_blocking(sys.stdin.fileno())
             tty.setraw(sys.stdin.fileno())
             os.set_blocking(sys.stdin.fileno(), False)
             loop.add_reader(sys.stdin.fileno(), self._on_terminal_input)
@@ -124,13 +139,24 @@ class ClaudeHost:
                 self.returncode = os.waitstatus_to_exitcode(status)
             except ChildProcessError:
                 self.returncode = -1
+        if self._master_fd is not None:
+            try:
+                os.close(self._master_fd)
+            except OSError:
+                pass
+            self._master_fd = None
         self.restore_terminal()
         self.exited.set()
 
     def restore_terminal(self) -> None:
+        """Undo everything start() did to the dev's terminal — including stdin's
+        blocking mode, or the shell we return to sees spurious EAGAIN reads."""
         if self._saved_termios is not None:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, self._saved_termios)
             self._saved_termios = None
+        if self._stdin_was_blocking is not None:
+            os.set_blocking(sys.stdin.fileno(), self._stdin_was_blocking)
+            self._stdin_was_blocking = None
 
     async def stop(self) -> None:
         if self._pid and not self.exited.is_set():
@@ -143,12 +169,22 @@ class ClaudeHost:
     # -- injection & snapshots -----------------------------------------------
 
     def inject(self, text: str) -> None:
-        """Type an instruction into Claude Code and submit it."""
-        flat = " ".join(text.replace("\r", "\n").split("\n")).strip()
-        os.write(self._master_fd, flat.encode() + b"\r")
+        """Type an instruction into Claude Code and submit it.
+
+        Text arrives from the far side of the WebSocket and is written to the
+        dev's real controlling terminal, so control bytes are stripped first:
+        an embedded ESC sequence would otherwise be a terminal-escape injection
+        (prompt spoofing, OSC-52 clipboard writes) against the dev's emulator.
+        """
+        self._write(sanitize(text).encode() + b"\r")
 
     def send_key(self, name: str) -> None:
-        os.write(self._master_fd, KEYMAP[name])
+        self._write(KEYMAP[name])
+
+    def _write(self, data: bytes) -> None:
+        if self._master_fd is None:
+            raise OSError("Claude Code session has exited")
+        os.write(self._master_fd, data)
 
     def snapshot(self) -> list[str]:
         """Current rendered screen, one string per row."""

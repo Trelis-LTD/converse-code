@@ -78,8 +78,7 @@ async def test_full_loop(tmp_path):
             "message": {"content": [{"type": "text", "text": "Echoed the greeting."}]},
         }) + "\n")
         async with aiohttp.ClientSession() as http:
-            await http.post(f"http://127.0.0.1:{port}/hook/stop",
-                            json={"transcript_path": str(transcript)})
+            await http.post(server.hook_url("stop"), json={"transcript_path": str(transcript)})
 
         # 3. terminal result lands at the broker
         deadline = asyncio.get_running_loop().time() + 5

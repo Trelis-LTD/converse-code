@@ -6,6 +6,7 @@ import asyncio
 import getpass
 import logging
 import os
+import shutil
 import sys
 import tempfile
 import webbrowser
@@ -58,11 +59,12 @@ async def _run(args) -> int:
         return 1
 
     server = LocalServer()
-    port = await server.start(port=args.port)
-    url = f"http://127.0.0.1:{port}"
+    await server.start(port=args.port)
+    url = server.url
 
     scratch = tempfile.mkdtemp(prefix="converse-code-")
-    settings_path = hooks.write_settings(scratch, port)
+    # --settings loads *additional* settings, so the dev's own hooks/config stay.
+    settings_path = hooks.write_settings(scratch, server.hook_url("stop"))
     claude_argv = args.claude.split() + ["--settings", str(settings_path)]
     host = ClaudeHost(claude_argv, attach_terminal=not args.headless)
 
@@ -75,6 +77,7 @@ async def _run(args) -> int:
         await client.connect()
     except Exception as exc:
         await server.stop()
+        shutil.rmtree(scratch, ignore_errors=True)
         print(f"Could not connect to Converse ({exc}). Claude Code was not started.", file=sys.stderr)
         return 1
 
@@ -110,6 +113,7 @@ async def _run(args) -> int:
         broker_task.cancel()
         await client.close()
         await server.stop()
+        shutil.rmtree(scratch, ignore_errors=True)
     return host.returncode or 0
 
 

@@ -100,6 +100,7 @@ class ToolRouter:
         self.working = False
         self.queue: list[str] = []
         self.transcript_path: Path | None = None
+        self.session_id: str | None = None
         self.last_assistant_text = ""
         self._offset = 0
         self._turn_done = asyncio.Event()
@@ -111,9 +112,17 @@ class ToolRouter:
     async def on_hook(self, event: str, payload: dict) -> None:
         if event != "stop":
             return
+        # The hook tells us authoritatively which session/file is ours; that
+        # replaces the mtime guess _ensure_transcript had to make beforehand.
+        session_id = payload.get("session_id")
         path = payload.get("transcript_path")
         if path:
-            self.transcript_path = Path(path)
+            new_path = Path(path)
+            if new_path != self.transcript_path:
+                self._offset = 0
+            self.transcript_path = new_path
+        if session_id:
+            self.session_id = session_id
         # The Stop hook can fire before the final assistant entry is flushed to
         # the transcript file — the payload carries the text directly.
         msg = payload.get("last_assistant_message")
@@ -327,16 +336,30 @@ class ToolRouter:
     # -- transcript tailing ----------------------------------------------------
 
     def _ensure_transcript(self) -> None:
-        """Before the first Stop hook we don't have transcript_path yet — find the
-        newest transcript for this project under ~/.claude/projects/."""
+        """Locate our transcript before the first Stop hook has told us where it
+        is. Once `session_id` is known the file is named after it; until then we
+        fall back to the newest transcript in this project directory, which can
+        pick another concurrent session's file — progress notes may be off for
+        the first turn, but the turn's own result never depends on this (the hook
+        supplies both the real path and `last_assistant_message`)."""
+        if self.session_id:
+            by_session = self._project_transcript_dir() / f"{self.session_id}.jsonl"
+            if by_session.exists():
+                if by_session != self.transcript_path:
+                    self.transcript_path, self._offset = by_session, 0
+                return
         if self.transcript_path and self.transcript_path.exists():
             return
-        munged = str(self.project_dir.resolve()).replace("/", "-").replace(".", "-").replace("_", "-")
-        project_dir = Path.home() / ".claude" / "projects" / munged
-        candidates = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+        candidates = sorted(
+            self._project_transcript_dir().glob("*.jsonl"), key=lambda p: p.stat().st_mtime
+        )
         if candidates:
             self.transcript_path = candidates[-1]
             self._offset = 0
+
+    def _project_transcript_dir(self) -> Path:
+        munged = str(self.project_dir.resolve()).replace("/", "-").replace(".", "-").replace("_", "-")
+        return Path.home() / ".claude" / "projects" / munged
 
     def _read_from(self, offset: int) -> tuple[list[dict], int]:
         if not self.transcript_path:
