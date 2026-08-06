@@ -12,6 +12,7 @@ import tempfile
 import webbrowser
 from pathlib import Path
 
+from . import audio as audiofmt
 from . import broker as brokermod
 from . import config, hooks, tools
 from .localserver import LocalServer
@@ -106,7 +107,8 @@ async def _run(args) -> int:
 
     server.on_tab_json = on_tab_json
     client.on_json = server.send_json_to_tab
-    client.on_audio = server.send_audio_to_tab
+    # The page's SDK decoder expects Float32; the broker sends PCM16 (see audio.py).
+    client.on_audio = lambda frame: server.send_audio_to_tab(audiofmt.pcm16_to_f32le(frame))
     client.on_tool_call = lambda call: _spawn_tool(router, call)
 
     print(f"Converse Code — voice tab: {url}   (session: {handle})")

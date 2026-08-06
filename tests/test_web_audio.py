@@ -1,9 +1,9 @@
-"""Verify the voice tab's audio math by running it in Node.
+"""Verify the voice tab's audio wiring by running it in Node.
 
-The page's resamplers are where crackle comes from: a chunk-boundary
-discontinuity is a click, and a dropped fractional remainder drifts the sample
-rate. web_audio_check.mjs extracts the real functions from index.html (no
-copies) and checks continuity and rate against a synthesized sine.
+Audio is now the vendored @trelis/converse SDK's job. This asserts the page
+still delegates to it (rather than growing a hand-rolled implementation again),
+that the SDK's codec expectations match what converse_code/audio.py feeds it,
+and that its resampler stays seam-continuous on real captured speech.
 """
 
 import shutil
@@ -21,6 +21,6 @@ def test_web_audio_resamplers():
         ["node", str(CHECK)], capture_output=True, text=True, timeout=60
     )
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
-    assert "mic resampler: continuous, no drift: OK" in proc.stdout
-    assert "TTS decoder: PCM16 -> Float32 in [-1,1]: OK" in proc.stdout
-    assert "playback resampler: continuous across chunks: OK" in proc.stdout
+    assert "page delegates audio to the SDK: OK" in proc.stdout
+    assert "SDK codec: f32 downlink (converted server-side), PCM16 uplink: OK" in proc.stdout
+    assert "SDK resampler: continuous across chunks: OK" in proc.stdout

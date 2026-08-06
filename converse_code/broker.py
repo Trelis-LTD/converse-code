@@ -4,8 +4,9 @@
   up:   start frame (audio 16k PCM16 + mode.tools), binary mic frames,
         tool_result / tool_progress / tool_partial_result / tool_cancel,
         client_event (playback_stopped), auth (validation only)
-  down: tool_call, binary Float32 TTS frames, asr / turn / utterance / done /
-        interrupted / bye (passed through to whoever wants them)
+  down: tool_call, binary PCM16 assistant-audio frames (see audio.py — the
+        encoding is pinned in the start frame, not inferred), asr / turn /
+        text_delta / utterance / done / interrupted / bye (passed through)
 """
 
 import asyncio
@@ -14,6 +15,8 @@ import logging
 from typing import Awaitable, Callable
 
 import websockets
+
+from . import audio as audiofmt
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +64,9 @@ class BrokerClient:
             "type": "start",
             "session_id": self.session_id,
             "api_key": self.api_key,
-            "audio": {"sr": 16000},
+            # Pin the downlink encoding rather than relying on the server default,
+            # which has changed once already (pcm_f32le -> pcm16).
+            "audio": {"sr": audiofmt.SAMPLE_RATE, "output_encoding": audiofmt.OUTPUT_ENCODING},
             "mode": {"kind": "converse", "web_search": False, "tools": self.tools},
             "client": self.client_info,
         }))

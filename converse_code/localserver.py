@@ -42,6 +42,7 @@ class LocalServer:
         app = web.Application()
         app.router.add_get("/", self._index)
         app.router.add_get("/ws", self._ws)
+        app.router.add_get("/vendor/converse/{name}", self._vendor)
         app.router.add_post("/hook/{event}", self._hook)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -96,10 +97,31 @@ class LocalServer:
 
     # -- handlers ----------------------------------------------------------
 
+    # A cached page is indistinguishable from a fixed one, which has already cost
+    # a debugging round — never let the browser keep these.
+    NO_STORE = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
+
     async def _index(self, request: web.Request) -> web.StreamResponse:
         if not self._authorized(request):
             return web.Response(status=403, text="missing or bad token")
-        return web.FileResponse(WEB_DIR / "index.html")
+        return web.FileResponse(WEB_DIR / "index.html", headers=self.NO_STORE)
+
+    async def _vendor(self, request: web.Request) -> web.StreamResponse:
+        """Serve the vendored @trelis/converse SDK modules to the page.
+
+        Deliberately not token-gated: an ES module's own static imports can't
+        carry a query string, and these files are public npm code containing no
+        secrets. The token still guards the page, the socket and the hook.
+        """
+        name = request.match_info["name"]
+        if not name.endswith(".js") or "/" in name or ".." in name:
+            return web.Response(status=404, text="not found")
+        path = WEB_DIR / "vendor" / "converse" / name
+        if not path.is_file():
+            return web.Response(status=404, text="not found")
+        return web.FileResponse(
+            path, headers={**self.NO_STORE, "Content-Type": "application/javascript"}
+        )
 
     async def _ws(self, request: web.Request) -> web.StreamResponse:
         if not self._authorized(request):

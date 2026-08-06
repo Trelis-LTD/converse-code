@@ -71,7 +71,7 @@ async def test_start_frame_and_tool_roundtrip(mock_broker):
     # start frame carries auth, 16k audio, and the full tool manifest
     sf = mock_broker.start_frame
     assert sf["api_key"] == "ck_test"
-    assert sf["audio"] == {"sr": 16000}
+    assert sf["audio"] == {"sr": 16000, "output_encoding": "pcm16"}
     assert [t["name"] for t in sf["mode"]["tools"]] == [t["name"] for t in manifest()]
 
     # mic audio up
