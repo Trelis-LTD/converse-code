@@ -22,4 +22,5 @@ def test_web_audio_resamplers():
     )
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     assert "mic resampler: continuous, no drift: OK" in proc.stdout
+    assert "TTS decoder: PCM16 -> Float32 in [-1,1]: OK" in proc.stdout
     assert "playback resampler: continuous across chunks: OK" in proc.stdout

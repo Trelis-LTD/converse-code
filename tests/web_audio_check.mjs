@@ -70,7 +70,26 @@ if (maxStep > expectedStep * 2) {
 }
 console.log("mic resampler: continuous, no drift: OK");
 
-// 3. Playback resampler: 16k stream -> 48k device, chunk by chunk. The carry
+// 3. TTS frames are PCM16, not Float32. Decoding them as Float32 produces
+// astronomically-scaled garbage (verified against the live broker: RMS ~8e37
+// with NaNs), which is heard as pure noise.
+const pcmFnSrc = script.match(/function pcm16ToFloat32\(arrayBuffer\)\{[\s\S]*?\n  \}/)[0];
+const pcm16ToFloat32 = new Function(`${pcmFnSrc}; return pcm16ToFloat32;`)();
+
+const int16 = new Int16Array([0, 16384, -16384, 32767, -32768]);
+const decoded = pcm16ToFloat32(int16.buffer);
+const expected = [0, 16384 / 32767, -0.5, 1, -1];
+decoded.forEach((v, i) => {
+  if (Math.abs(v - expected[i]) > 1e-4) {
+    throw new Error(`pcm16 decode wrong at ${i}: got ${v}, want ${expected[i]}`);
+  }
+});
+if (decoded.length !== 5) throw new Error(`expected 5 samples, got ${decoded.length}`);
+// An odd trailing byte must not throw.
+pcm16ToFloat32(new Uint8Array([1, 2, 3]).buffer);
+console.log("TTS decoder: PCM16 -> Float32 in [-1,1]: OK");
+
+// 4. Playback resampler: 16k stream -> 48k device, chunk by chunk. The carry
 // sample is what keeps chunk boundaries continuous.
 const fnSrc = script.match(/function resampleToCtxRate\(input\)\{[\s\S]*?\n  \}/)[0];
 const makeResampler = new Function(

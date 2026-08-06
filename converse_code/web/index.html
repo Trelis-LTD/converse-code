@@ -177,6 +177,7 @@
 
   var currentYouEl = null;
   var currentAssistantEl = null;
+  var assistantText = "";  // accumulates text_delta chunks for the live caption
 
   function makeEntry(kind, labelText){
     var div = document.createElement("div");
@@ -265,15 +266,29 @@
         break;
       }
       case "turn": {
+        // Carries the full reply text already, but text_delta streams it word by
+        // word — start empty and let the deltas fill in, so captions animate.
         freezeYou();
         currentAssistantEl = makeEntry("assistant", "Assistant");
+        assistantText = "";
+        break;
+      }
+      case "text_delta": {
+        if(!currentAssistantEl){
+          currentAssistantEl = makeEntry("assistant", "Assistant");
+          assistantText = "";
+        }
+        assistantText += (msg.delta || "");
+        setBody(currentAssistantEl, assistantText);
         break;
       }
       case "utterance": {
+        // Authoritative final text — replaces whatever the deltas assembled.
         var atext = pickText(msg);
         if(!currentAssistantEl){
           currentAssistantEl = makeEntry("assistant", "Assistant");
         }
+        assistantText = atext;
         setBody(currentAssistantEl, atext);
         break;
       }
@@ -306,8 +321,10 @@
   }
 
   // ---------- Playback (Web Audio API) ----------
-  // TTS arrives as Float32 mono 16 kHz. Two things matter for clean audio and
-  // both were learned the hard way (crackle):
+  // TTS arrives as PCM16 little-endian, mono, 16 kHz — same encoding as the mic
+  // uplink. (Reinterpreting those bytes as Float32 is not "slightly wrong", it
+  // is pure noise: the exponent bits become the waveform.)
+  // Two more things matter for clean audio:
   //  1. A jitter buffer. Scheduling each chunk to start "now" means any network
   //     jitter is an audible gap; lead the playhead by JITTER_LEAD and re-lead
   //     after an underrun.
@@ -358,8 +375,20 @@
     return out;
   }
 
+  function pcm16ToFloat32(arrayBuffer){
+    var pcm = new Int16Array(arrayBuffer.byteLength - (arrayBuffer.byteLength % 2)
+      ? arrayBuffer.slice(0, arrayBuffer.byteLength - (arrayBuffer.byteLength % 2))
+      : arrayBuffer);
+    var out = new Float32Array(pcm.length);
+    for(var i=0;i<pcm.length;i++){
+      out[i] = pcm[i] / (pcm[i] < 0 ? 32768 : 32767);
+    }
+    return out;
+  }
+
   function handleAudioFrame(arrayBuffer){
-    var floatData = new Float32Array(arrayBuffer);
+    if(arrayBuffer.byteLength < 2) return;
+    var floatData = pcm16ToFloat32(arrayBuffer);
     if(floatData.length === 0) return;
     getPlayCtx();
     playQueue.push(resampleToCtxRate(floatData));
