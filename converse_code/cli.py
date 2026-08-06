@@ -59,7 +59,16 @@ async def _run(args) -> int:
         return 1
 
     server = LocalServer()
-    await server.start(port=args.port)
+    try:
+        await server.start(port=args.port)
+    except OSError as exc:
+        print(
+            f"Could not start the voice tab server on port {args.port}: {exc}\n"
+            "Another converse-code may already be running — stop it, or pass "
+            "--port <other> (or --port 0 to pick a free one).",
+            file=sys.stderr,
+        )
+        return 1
     url = server.url
 
     scratch = tempfile.mkdtemp(prefix="converse-code-")

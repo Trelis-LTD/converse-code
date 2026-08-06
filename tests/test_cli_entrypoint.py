@@ -32,11 +32,29 @@ def test_startup_reaches_broker_connect_and_fails_cleanly():
     """Exercises the whole startup path: logging setup, key load, local server,
     broker connect. An unreachable broker must produce a clear message, not a
     traceback."""
-    proc = run(["--no-browser", "--headless", "--broker-url", "ws://127.0.0.1:1"])
+    proc = run(["--no-browser", "--headless", "--port", "0", "--broker-url", "ws://127.0.0.1:1"])
     assert proc.returncode == 1
     assert "Could not connect to Converse" in proc.stderr
     assert "Claude Code was not started" in proc.stderr
     assert "Traceback" not in proc.stderr
+
+
+def test_port_in_use_reports_cleanly():
+    """A second instance on the same port must explain itself, not traceback."""
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+    busy_port = sock.getsockname()[1]
+    try:
+        proc = run(["--no-browser", "--headless", "--port", str(busy_port)])
+        assert proc.returncode == 1
+        assert "Could not start the voice tab server" in proc.stderr
+        assert "--port" in proc.stderr
+        assert "Traceback" not in proc.stderr
+    finally:
+        sock.close()
 
 
 @pytest.mark.parametrize("owns_terminal", [True, False])

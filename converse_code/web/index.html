@@ -306,54 +306,120 @@
   }
 
   // ---------- Playback (Web Audio API) ----------
+  // TTS arrives as Float32 mono 16 kHz. Two things matter for clean audio and
+  // both were learned the hard way (crackle):
+  //  1. A jitter buffer. Scheduling each chunk to start "now" means any network
+  //     jitter is an audible gap; lead the playhead by JITTER_LEAD and re-lead
+  //     after an underrun.
+  //  2. Resample into the *device's* native rate ourselves, carrying the last
+  //     input sample across chunk boundaries. Forcing a 16 kHz AudioContext (or
+  //     interpolating each chunk from zero) leaves a discontinuity — a click —
+  //     at every chunk edge.
+  var STREAM_RATE = 16000;
+  var JITTER_LEAD = 0.1;     // seconds of buffer before the first chunk plays
+  var SCHEDULE_AHEAD = 0.2;  // don't schedule further ahead than this
+  var CLEAR_FADE = 0.02;     // fade out on barge instead of a hard cut
+
   var playCtx = null;
+  var playGain = null;
   var scheduledSources = [];
+  var playQueue = [];        // Float32Array chunks, already at context rate
   var nextPlayTime = 0;
-  var scheduledEndTime = 0; // absolute ctx time when last scheduled buffer ends
+  var resampleRatio = 1;
+  var resampleCarry = 0;
+  var playTimer = null;
 
   function getPlayCtx(){
     if(!playCtx){
-      playCtx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 16000});
+      playCtx = new (window.AudioContext || window.webkitAudioContext)();
+      playGain = playCtx.createGain();
+      playGain.connect(playCtx.destination);
+      resampleRatio = playCtx.sampleRate / STREAM_RATE;
       nextPlayTime = playCtx.currentTime;
-      scheduledEndTime = playCtx.currentTime;
     }
+    if(playCtx.state === "suspended") playCtx.resume();
     return playCtx;
   }
 
+  function resampleToCtxRate(input){
+    if(resampleRatio === 1) return Float32Array.from(input);
+    var outLen = Math.floor(input.length * resampleRatio);
+    var out = new Float32Array(outLen);
+    var step = 1 / resampleRatio;
+    for(var i = 0; i < outLen; i++){
+      var pos = i * step;
+      var idx = Math.floor(pos);
+      var frac = pos - idx;
+      var prev = idx === 0 ? resampleCarry : input[idx - 1];
+      var cur = input[idx] !== undefined ? input[idx] : prev;
+      out[i] = prev + (cur - prev) * frac;
+    }
+    resampleCarry = input[input.length - 1];
+    return out;
+  }
+
   function handleAudioFrame(arrayBuffer){
-    var ctx = getPlayCtx();
     var floatData = new Float32Array(arrayBuffer);
     if(floatData.length === 0) return;
-    var buffer = ctx.createBuffer(1, floatData.length, 16000);
-    buffer.copyToChannel(floatData, 0);
+    getPlayCtx();
+    playQueue.push(resampleToCtxRate(floatData));
+    schedulePlayback();
+    if(!playTimer) playTimer = setInterval(schedulePlayback, 25);
+  }
 
-    var src = ctx.createBufferSource();
-    src.buffer = buffer;
-    src.connect(ctx.destination);
+  function schedulePlayback(){
+    if(!playCtx) return;
+    var now = playCtx.currentTime;
+    if(playQueue.length === 0){
+      if(nextPlayTime <= now && playTimer){ clearInterval(playTimer); playTimer = null; }
+      return;
+    }
+    playGain.gain.cancelScheduledValues(now);
+    playGain.gain.setValueAtTime(1, now);
+    // Underrun (or first chunk): re-establish the jitter lead.
+    if(nextPlayTime <= now) nextPlayTime = now + JITTER_LEAD;
+    while(playQueue.length && nextPlayTime < now + SCHEDULE_AHEAD){
+      var data = playQueue.shift();
+      var buffer = playCtx.createBuffer(1, data.length, playCtx.sampleRate);
+      buffer.copyToChannel(data, 0);
+      var src = playCtx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(playGain);
+      var startAt = Math.max(now, nextPlayTime);
+      src.start(startAt);
+      nextPlayTime = startAt + buffer.duration;
+      scheduledSources.push(src);
+      src.onended = function(){
+        var idx = scheduledSources.indexOf(this);
+        if(idx >= 0) scheduledSources.splice(idx, 1);
+      }.bind(src);
+    }
+  }
 
-    var startAt = Math.max(nextPlayTime, ctx.currentTime);
-    src.start(startAt);
-    nextPlayTime = startAt + buffer.duration;
-    scheduledEndTime = nextPlayTime;
-
-    scheduledSources.push(src);
-    src.onended = function(){
-      var idx = scheduledSources.indexOf(src);
-      if(idx >= 0) scheduledSources.splice(idx, 1);
-    };
+  function pendingPlaybackMs(){
+    if(!playCtx) return 0;
+    var scheduled = Math.max(0, nextPlayTime - playCtx.currentTime);
+    var queued = playQueue.reduce(function(s, c){ return s + c.length; }, 0) / playCtx.sampleRate;
+    return (scheduled + queued) * 1000;
   }
 
   function handleInterrupted(msg){
     var ctx = playCtx;
     var remainingMs = 0;
     if(ctx){
-      remainingMs = Math.max(0, (scheduledEndTime - ctx.currentTime) * 1000);
+      remainingMs = pendingPlaybackMs();
+      // Short fade so the cut isn't itself a click, then drop everything.
+      var now = ctx.currentTime;
+      playGain.gain.cancelScheduledValues(now);
+      playGain.gain.setValueAtTime(playGain.gain.value, now);
+      playGain.gain.linearRampToValueAtTime(0, now + CLEAR_FADE);
       scheduledSources.forEach(function(src){
-        try{ src.onended = null; src.stop(0); }catch(e){}
+        try{ src.onended = null; src.stop(now + CLEAR_FADE); }catch(e){}
       });
       scheduledSources = [];
+      playQueue = [];
       nextPlayTime = ctx.currentTime;
-      scheduledEndTime = ctx.currentTime;
+      resampleCarry = 0;
     }
     var ms = Math.round(remainingMs);
     var bargeSeq = (msg && msg.barge_seq !== undefined) ? msg.barge_seq : 0;
@@ -388,18 +454,27 @@
     "    this.frameSize = 640;",
     "    this.outBuf = new Float32Array(0);",
     "    this.pos = 0;",
+    "    this.inBuf = new Float32Array(0);",
+    "    this.cursor = 0;",
     "  }",
+    // Resamples with a cursor that persists across process() blocks: restarting
+    // per block would put a discontinuity (click) at every 128-sample boundary
+    // and discard the fractional remainder, drifting the sample rate.
     "  appendResampled(input){",
-    "    var inLen = input.length;",
-    "    var outLen = Math.floor(inLen / this.ratio);",
-    "    var resampled = new Float32Array(outLen);",
-    "    for(var i=0;i<outLen;i++){",
-    "      var srcPos = i * this.ratio;",
-    "      var i0 = Math.floor(srcPos);",
-    "      var i1 = Math.min(i0+1, inLen-1);",
-    "      var frac = srcPos - i0;",
-    "      resampled[i] = input[i0]*(1-frac) + input[i1]*frac;",
+    "    var buf = new Float32Array(this.inBuf.length + input.length);",
+    "    buf.set(this.inBuf);",
+    "    buf.set(input, this.inBuf.length);",
+    "    var out = [];",
+    "    while(this.cursor + 1 < buf.length){",
+    "      var i0 = Math.floor(this.cursor);",
+    "      var frac = this.cursor - i0;",
+    "      out.push(buf[i0]*(1-frac) + buf[i0+1]*frac);",
+    "      this.cursor += this.ratio;",
     "    }",
+    "    var consumed = Math.floor(this.cursor);",
+    "    this.inBuf = buf.slice(consumed);",
+    "    this.cursor -= consumed;",
+    "    var resampled = Float32Array.from(out);",
     "    var merged = new Float32Array(this.outBuf.length - this.pos + resampled.length);",
     "    merged.set(this.outBuf.subarray(this.pos));",
     "    merged.set(resampled, this.outBuf.length - this.pos);",
