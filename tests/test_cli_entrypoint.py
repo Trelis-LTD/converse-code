@@ -26,6 +26,7 @@ def test_help_works():
     proc = run(["--help"])
     assert proc.returncode == 0
     assert "Talk to Claude Code by voice" in proc.stdout
+    assert "--record-audio" in proc.stdout
 
 
 def test_startup_checks_credentials_before_launching_claude():

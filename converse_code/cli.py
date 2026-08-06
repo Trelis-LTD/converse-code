@@ -13,7 +13,8 @@ import webbrowser
 from pathlib import Path
 
 from . import broker as brokermod
-from . import config, hooks, relay, tools
+from . import config, hooks, relay, selftest, tools
+from .record import WavRecorder
 from .localserver import LocalServer
 from .ptyhost import ClaudeHost
 
@@ -135,7 +136,14 @@ async def _run(args) -> int:
         await server.send_json_to_proxy(msg)
 
     client.on_json = to_page
-    client.on_audio = server.send_audio_to_proxy
+    recorder: WavRecorder | None = None
+    if args.record_audio:
+        rec_path = Path(tempfile.gettempdir()) / f"converse-code-downlink-{os.getpid()}.wav"
+        recorder = WavRecorder(rec_path)
+        print(f"Recording assistant audio to: {rec_path}")
+        client.on_audio = lambda frame: _record_and_relay_audio(recorder, server, frame)
+    else:
+        client.on_audio = server.send_audio_to_proxy
     client.on_tool_call = lambda call: _spawn_tool(router, call)
 
     print(f"Converse Code — voice tab: {url}   (session: {handle})")
@@ -154,7 +162,18 @@ async def _run(args) -> int:
         await client.close()
         await server.stop()
         shutil.rmtree(scratch, ignore_errors=True)
+        if recorder is not None:
+            recorder.close()
+            print(f"\nRecorded {recorder.seconds:.1f}s of assistant audio: {recorder.path}")
+            print("Play it: if it sounds clean, the problem is the browser or the "
+                  "audio device, not the session.")
     return host.returncode or 0
+
+
+async def _record_and_relay_audio(recorder: WavRecorder, server: LocalServer, frame: bytes) -> None:
+    """Record the same downlink frame that is handed to the browser page."""
+    recorder.add(frame)
+    await server.send_audio_to_proxy(frame)
 
 
 LOG_PATH = Path(tempfile.gettempdir()) / "converse-code.log"
@@ -220,14 +239,19 @@ def main() -> None:
                         help="command used to launch Claude Code")
     parser.add_argument("--broker-url", default=os.environ.get("CONVERSE_URL", brokermod.DEFAULT_URL))
     parser.add_argument("--no-browser", action="store_true", help="don't auto-open the voice tab")
+    parser.add_argument("--record-audio", action="store_true",
+                        help="save the assistant audio relayed to the page as a WAV (for diagnosing playback)")
     parser.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)  # tests only
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("login", help="store and validate your Converse API key")
+    sub.add_parser("selftest", help="check the audio path end to end, without a browser")
     args = parser.parse_args()
 
-    _configure_logging(owns_terminal=not (args.cmd == "login" or args.headless))
+    _configure_logging(owns_terminal=not (args.cmd in ("login", "selftest") or args.headless))
     if args.cmd == "login":
         raise SystemExit(asyncio.run(_login(args.broker_url)))
+    if args.cmd == "selftest":
+        raise SystemExit(asyncio.run(selftest.run(args.broker_url)))
     raise SystemExit(asyncio.run(_run(args)))
 
 
