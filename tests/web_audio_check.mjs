@@ -32,8 +32,15 @@ for (const banned of ["new StreamingPlayer", "new mod.MicCapture", "new mod.Echo
                       "binaryToFloat32", "floatToPcm16Bytes", "resampleToCtxRate", "MicCaptureProcessor"]) {
   if (script.includes(banned)) throw new Error(`page is hand-driving SDK audio again: ${banned}`);
 }
-// The one exception: the hidden-tab scheduler pump, which the SDK does not do.
-if (!script.includes("createScriptProcessor")) throw new Error("hidden-tab audio pump is missing");
+// Hidden-tab playback is the SDK's job as of 0.6.0 (2.5s horizon while hidden),
+// so the page must NOT carry its own scheduler pump any more.
+if (script.includes("createScriptProcessor")) {
+  throw new Error("page still carries the hidden-tab pump; SDK >=0.6.0 handles it");
+}
+const playerSrc = readFileSync(new URL("../converse_code/web/vendor/converse/player.js", import.meta.url), "utf8");
+if (!/visibilityState/.test(playerSrc)) {
+  throw new Error("vendored SDK predates the hidden-tab playback fix (needs >=0.6.0)");
+}
 console.log("page uses the SDK ConverseClient: OK");
 
 // 2/3. Exercise the SDK's own decode + resample.

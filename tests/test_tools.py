@@ -27,7 +27,7 @@ def test_manifest_shape():
     assert names == ["long_task", "stop_long_task", "command", "select_option", "press_key"]
     long_task = tools[0]
     assert long_task["requires_permission"] is True
-    assert long_task["timeout"] == 120
+    assert long_task["timeout"] == 600  # server ceiling, verified against prod
     assert "request" in long_task["parameters"]["properties"]
 
 

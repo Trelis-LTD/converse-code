@@ -1,6 +1,6 @@
 # Vendored `@trelis/converse` browser SDK
 
-Copied verbatim from npm `@trelis/converse@0.5.0` (`package/src/`). Do not edit
+Copied verbatim from npm `@trelis/converse@0.6.0` (`package/src/`). Do not edit
 these files — re-vendor from npm to update, and bump the version noted here.
 
 Why vendored rather than a CDN or an npm dependency: the voice tab is served by
@@ -15,7 +15,14 @@ buffer); the SDK is the same code the Converse playground runs.
 `package.json` is retained for the version/licence record. The package is
 published `UNLICENSED` — it is used here as first-party Trelis code.
 
-0.5.0 decodes the downlink as PCM16, matching the broker's current wire default.
-(0.4.5 still decoded the older `pcm_f32le` and produced pure noise against the
-live server; if the vendored version is ever rolled back, tests/web_audio_check.mjs
-fails loudly rather than letting that reach anyone's ears.)
+Version history that matters here, all found the hard way:
+- 0.4.5 decoded the downlink as `pcm_f32le` after the server default became
+  PCM16 — pure noise against a live server.
+- 0.5.0 fixed that, and fails `connect()` loudly if the server announces an
+  unexpected format instead of playing garbage.
+- 0.6.0 fixed hidden-tab playback (a 2.5s scheduling horizon while the tab is
+  hidden, replacing a workaround this page used to carry) and added
+  `sendToolResult`/`sendToolProgress`/`sendToolPartialResult`/`sendToolCancel`.
+
+`tests/web_audio_check.mjs` pins both: the page must not reintroduce its own
+audio handling, and the vendored player must contain the hidden-tab fix.

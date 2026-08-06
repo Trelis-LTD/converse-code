@@ -16,6 +16,11 @@ from .ptyhost import KEYMAP
 
 log = logging.getLogger(__name__)
 
+# The broker's per-tool ceiling rose from 120s to 600s; 600 is accepted by prod
+# today and 601+ is rejected with invalid_tools. Hold the call slightly inside it.
+TOOL_TIMEOUT_S = 600
+HOLD_MARGIN_S = 30
+
 LONG_TASK_DESCRIPTION = (
     "Send a coding instruction to Claude Code, an AI coding agent working in the user's "
     "project, and wait for it to finish (or report back if it is still working). Use for "
@@ -70,7 +75,7 @@ def manifest() -> list[dict]:
     return [
         tool("long_task", LONG_TASK_DESCRIPTION,
              {"request": {"type": "string", "description": "The coding instruction."}},
-             ["request"], requires_permission=True, timeout=120),
+             ["request"], requires_permission=True, timeout=TOOL_TIMEOUT_S),
         tool("stop_long_task", STOP_DESCRIPTION, timeout=15),
         tool("command", COMMAND_DESCRIPTION,
              {"command": {"type": "string", "description": "Slash command, starting with '/'."}},
@@ -85,7 +90,7 @@ def manifest() -> list[dict]:
 
 
 class ToolRouter:
-    HOLD_S = 110.0          # hold long_task open this long before resolving "still working"
+    HOLD_S = TOOL_TIMEOUT_S - HOLD_MARGIN_S   # resolve before the broker times the call out
     POLL_S = 2.0            # transcript/menu poll cadence while holding
     SETTLE_S = 1.2          # wait after command/select before reading the screen
     MAX_PROGRESS = 10       # protocol cap is 12/call; keep headroom

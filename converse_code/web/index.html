@@ -99,7 +99,7 @@
 (function(){
   "use strict";
 
-  var BUILD = "2026-08-06-webkit-aec";
+  var BUILD = "2026-08-06-sdk-0.6.0";
 
   // ---------- WebSocket connection with auto-reconnect ----------
   var ws = null;
@@ -339,28 +339,11 @@
 
   var client = null;
   var micActive = false;
-  var pump = null;
 
   function proxyUrl(){
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
     var token = new URLSearchParams(location.search).get("t") || "";
     return proto + "//" + location.host + "/proxy?t=" + encodeURIComponent(token);
-  }
-
-  // The player drains its queue from a main-thread timer, and browsers throttle
-  // timers to ~1 Hz in a HIDDEN tab — which is the normal case here, since the
-  // dev watches their terminal. Clock it from the audio thread instead, which
-  // keeps running at full rate regardless of visibility.
-  function startPump(player){
-    if(pump || !player || !player.context) return;
-    try{
-      var node = player.context.createScriptProcessor(2048, 1, 1);
-      node.onaudioprocess = function(){ try{ player._schedule(); }catch(e){} };
-      node.connect(player.context.destination);
-      pump = node;
-    }catch(err){
-      console.debug("audio pump unavailable; playback may stall in a hidden tab", err);
-    }
   }
 
   function setMeter(level){
@@ -419,10 +402,7 @@
       client.addEventListener("event", function(e){ renderEvent(e.detail || {}); });
       return client.unlockAudio()
         .then(function(){ return client.connect(); })
-        .then(function(){
-          startPump(client.player);
-          return client;
-        });
+        .then(function(){ return client; });
     });
   }
 
@@ -435,7 +415,6 @@
       micActive = true;
       micBtn.classList.add("live");
       micLabel.textContent = "live";
-      startPump(client && client.player);
     }).catch(function(err){
       console.debug("mic error", err);
       micLabel.textContent = "off";
@@ -459,7 +438,7 @@
   // ---------- Boot ----------
   // Printed so it is always possible to tell which page a browser has loaded —
   // a cached page previously looked identical to a fixed one.
-  console.info("converse-code voice tab | audio: @trelis/converse SDK 0.5.0 | build " + BUILD);
+  console.info("converse-code voice tab | audio: @trelis/converse SDK 0.6.0 | build " + BUILD);
   connect();
 })();
 </script>

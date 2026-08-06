@@ -8,6 +8,12 @@ const JITTER_LEAD = 0.1;
 // How far ahead of the playhead we keep audio scheduled. Committing only a small horizon keeps
 // clear() (barge/interrupt) responsive — little audio is locked into already-started sources.
 const SCHEDULE_AHEAD = 0.2;
+// Hidden tabs throttle setInterval to ~1 Hz (and the AudioContext keeps running), so the visible
+// horizon starves playback into 0.2 s bursts with ~0.8 s gaps. When the page is hidden, commit a
+// horizon comfortably past one throttled tick instead. clear() stays sound at any horizon — it
+// stops every tracked source, started or not — so the only cost is barge fade granularity in a
+// tab nobody is looking at.
+const HIDDEN_SCHEDULE_AHEAD = 2.5;
 const TICK_MS = 25;
 
 // clear() fades the master bus out over this long before stopping sources — a hard stop() cuts
@@ -51,6 +57,7 @@ export class StreamingPlayer {
     this.timer = null;
     this.paused = false;      // reversible server-side backchannel hold
     this.pauseGen = 0;        // invalidates a fade overtaken by clear/stop/resume
+    this._onVisibility = () => this._schedule();
   }
 
   async ensureContext() {
@@ -109,7 +116,9 @@ export class StreamingPlayer {
     // Re-buffer JITTER_LEAD when the queue had drained (first chunk or underrun) — and never
     // start inside a clear()'s fade, however the two constants are tuned relative to each other.
     if (this.nextTime <= now) this.nextTime = Math.max(now + JITTER_LEAD, this.fadeEnd);
-    while (this.queue.length && this.nextTime < now + SCHEDULE_AHEAD) {
+    const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    const horizon = hidden ? HIDDEN_SCHEDULE_AHEAD : SCHEDULE_AHEAD;
+    while (this.queue.length && this.nextTime < now + horizon) {
       const { data, src } = this.queue.shift();
       const buffer = this.context.createBuffer(1, data.length, this.context.sampleRate);
       buffer.copyToChannel(data, 0);
@@ -151,12 +160,21 @@ export class StreamingPlayer {
   _ensureTimer() {
     if (this.timer != null) return;
     this.timer = setInterval(() => this._schedule(), TICK_MS);
+    // Top up the schedule the instant the tab hides — the first throttled tick can be a full
+    // second away, which would otherwise leave a one-off gap at the visibility transition.
+    // (visibilitychange itself fires unthrottled; document is absent under node tests.)
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this._onVisibility);
+    }
   }
 
   _clearTimer() {
     if (this.timer != null) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this._onVisibility);
     }
   }
 

@@ -1,6 +1,6 @@
 {
   "name": "@trelis/converse",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "description": "Browser SDK for the Trelis Converse v2.1 WebSocket voice API",
   "license": "UNLICENSED",

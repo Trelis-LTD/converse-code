@@ -98,7 +98,7 @@ since it lands in the dev's real terminal where an escape sequence would be an i
 
 Following the documented shape exactly:
 
-- **`long_task`** -- `requires_permission: true`, `timeout: 120` (the protocol's current
+- **`long_task`** -- `requires_permission: true`, `timeout: 600` (the protocol's current
   hard cap -- see Section 8 below). Description field carries the *guidance prose* the brain
   uses to decide when to call it, including the preserve-the-user's-technical-wording
   instruction from Section 2.
@@ -199,17 +199,14 @@ context whenever it arrives.
 
 ## 8. Constraints to design around now, not later
 
-- **120s timeout ceiling**: `timeout` in the tool manifest is still hard-capped at 120s.
-  (The underlying STT-recycling blocker has been fixed broker-side -- rotation now happens
-  concurrently with an in-flight tool call -- but the cap is deliberately unchanged while
-  that mechanism soaks in production.) A real coding task can easily exceed 120s, so the
-  pattern is: hold `long_task` open for up to ~110s streaming partial results, resolve
-  early when the Stop hook fires, and otherwise resolve at the deadline with the `handle`
-  and a "still working" status so the brain can issue a follow-up call against the same
-  session. Note the in-flight call is also `converse-code`'s *only* push channel to the
-  brain -- there is no host-initiated message outside a call -- which is the other reason to
-  keep one open while CC works rather than resolving instantly and forcing the brain to
-  poll.
+- **600s tool timeout ceiling**: the per-tool `timeout` cap is 600s (raised from 120s once the
+  broker could rotate its STT stream mid-tool-call). Verified against production: 600 is
+  accepted, 601+ is rejected with `invalid_tools`. So `long_task` holds open for up to 570s and
+  most coding tasks now finish inside a single call, resolving early when the Stop hook fires.
+  Tasks longer than that still resolve with the `handle` and a "still working" status for the
+  brain to follow up on. The in-flight call remains converse-code's only push channel to the
+  brain -- there is no host-initiated message outside a call -- which is the other reason to hold
+  one open while Claude Code works.
 - **No stop keyword-matching** -- stopping is a judgement call made by the brain from
   context, expressed via the tool call, never via string-matching "stop" anywhere in
   `converse-code`.

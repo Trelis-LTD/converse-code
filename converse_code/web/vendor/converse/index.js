@@ -9,7 +9,8 @@ import { MicCapture } from './mic.js';
 import { TrackFeeder, WebRtcSession } from './webrtc.js';
 
 export {
-  FRAME_SAMPLES, SAMPLE_RATE, createSessionId, encodeTaggedPcm16, floatToPcm16Bytes,
+  FRAME_SAMPLES, SAMPLE_RATE, binaryToFloat32, createSessionId, encodeTaggedPcm16,
+  floatToPcm16Bytes, toWebSocketUrl,
   UPLINK_CHANNEL_PROCESSED, UPLINK_CHANNEL_RAW, UPLINK_FORMAT_TAGGED,
 } from './audio.js';
 export { StreamingPlayer } from './player.js';
@@ -843,6 +844,33 @@ export class ConverseClient extends EventTarget {
    *  timeline as a preference signal; has no effect on the audio pipeline. */
   sendAmbienceState(active) {
     this._sendControl({ type: 'ambience', active: !!active });
+  }
+
+  /** Resolve a `tool_call` event with JSON content. Keep results compact: the server enforces
+   *  its configured UTF-8 JSON byte ceiling and replaces oversized content with a bounded
+   *  truncation marker and preview. Listen for calls via `client.addEventListener('tool_call', …)`;
+   *  the content itself may be produced anywhere (e.g. relayed from your backend). */
+  sendToolResult(id, content) {
+    this._sendControl({ type: 'tool_result', id, content });
+  }
+
+  /** Report human-readable progress on an in-flight tool call (docs/client-tool-protocol.md §3):
+   *  appends to the brain's context so the next turn can speak to it; never resolves the call. */
+  sendToolProgress(id, note) {
+    this._sendControl({ type: 'tool_progress', id, note });
+  }
+
+  /** Deliver a structured segment of an in-flight call's eventual answer
+   *  (docs/client-tool-protocol.md §3a): capped like a result envelope, and `reply: true` asks
+   *  the broker to proactively narrate it now. Never resolves the call — the terminal
+   *  sendToolResult is still required exactly once. */
+  sendToolPartialResult(id, content, { reply = false } = {}) {
+    this._sendControl({ type: 'tool_partial_result', id, content, ...(reply ? { reply: true } : {}) });
+  }
+
+  /** Cancel an in-flight tool call. */
+  sendToolCancel(id) {
+    this._sendControl({ type: 'tool_cancel', id });
   }
 
   /** Switch character voice mid-session. Applies from the next reply; Converse mode only. */
