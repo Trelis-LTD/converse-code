@@ -21,8 +21,11 @@ directions.
 ## 2. Developer experience
 
 ```
-uvx converse-code          # in your project directory
+converse-code              # in your project directory
 ```
+
+(Installed with `uv tool install .` from a clone today; `uvx converse-code` once it's
+published to PyPI — the name is unclaimed.)
 
 - **First run**: prompts for a Converse API key (from the converse.trelis.com dashboard),
   validates it with the free `{"type": "auth"}` frame, and stores it in the OS keychain
@@ -81,6 +84,16 @@ holds the tools. The localhost browser tab is the simplest way to do that — no
 app, no pairing. (Remote/phone use later is just opening that same page over Tailscale;
 see Section 11.)
 
+**Local surface is authenticated.** Localhost is not a trust boundary: browsers don't apply
+same-origin policy to WebSocket connections, and a POST with a simple content type needs no
+preflight — so any page the dev happens to have open could otherwise reach these endpoints.
+Each run mints a random token that appears in the tab's URL and is required on the page, the
+WebSocket, and the hook endpoint; WebSocket upgrades must additionally come from a localhost
+origin. This matters most for the hook endpoint: its payload becomes spoken words, so an
+unauthenticated one would let any local process put sentences in Claude's mouth. Text
+arriving from the broker is also stripped of control characters before reaching the pty,
+since it lands in the dev's real terminal where an escape sequence would be an injection.
+
 ## 4. Tool manifest (sent in the `start` frame)
 
 Following the documented shape exactly:
@@ -109,9 +122,9 @@ Following the documented shape exactly:
 - **`select_option`** -- fast. Used when the screen is in a menu state (Section 10): takes
   the chosen option's text, and `converse-code` translates it into the right arrow-key
   presses + Enter itself. The brain never counts keystrokes.
-- **`press_key`** -- fast, low-level fallback: one of a small enum (escape, up, down, enter,
-  tab, ctrl-c, shift-tab). For anything the higher-level tools didn't anticipate. Its
-  description should steer the brain toward the high-level tools first.
+- **`press_key`** -- fast, low-level fallback: one of a small enum (escape, up, down, left,
+  right, enter, tab, ctrl-c, shift-tab). For anything the higher-level tools didn't
+  anticipate. Its description should steer the brain toward the high-level tools first.
 
 ## 5. Claude Code driver mechanics
 
