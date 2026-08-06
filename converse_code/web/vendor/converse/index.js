@@ -6,6 +6,7 @@ import {
 import { StreamingPlayer } from './player.js';
 import { EchoCanceller, needsSdkAec } from './aec.js';
 import { MicCapture } from './mic.js';
+import { TrackFeeder, WebRtcSession } from './webrtc.js';
 
 export {
   FRAME_SAMPLES, SAMPLE_RATE, createSessionId, encodeTaggedPcm16, floatToPcm16Bytes,
@@ -14,6 +15,7 @@ export {
 export { StreamingPlayer } from './player.js';
 export { EchoCanceller, needsSdkAec } from './aec.js';
 export { MicCapture } from './mic.js';
+export { TrackFeeder, WebRtcSession } from './webrtc.js';
 
 // NO OUTPUT-ROUTING CODE, BY EXPERIMENT (2026-07-30): never touch navigator.audioSession —
 // 'playback' breaks getUserMedia on real iPhones (a mic outage), and an 11-configuration
@@ -154,14 +156,32 @@ export class ConverseClient extends EventTarget {
     playAcknowledgements = true, WebSocketImpl = globalThis.WebSocket,
     echoCancellerFactory = () => new EchoCanceller(),
     autoReconnect = true, reconnectBaseMs = 500, reconnectMaxMs = 5000,
-    maxReconnectAttempts = 12, listeningWarmupFrames = LISTENING_WARMUP_FRAMES } = {}) {
+    maxReconnectAttempts = 12, listeningWarmupFrames = LISTENING_WARMUP_FRAMES,
+    transport = 'ws', RTCPeerConnectionImpl = globalThis.RTCPeerConnection } = {}) {
     super();
     if (!url) throw new Error('url is required');
     if (!WebSocketImpl) throw new Error('WebSocket is required');
+    if (transport !== 'ws' && transport !== 'webrtc') {
+      throw new TypeError('transport must be "ws" or "webrtc"');
+    }
+    if (transport === 'webrtc' && needsSdkAec()) {
+      // WebKit's echo cancellation is the SDK's own AEC3 canceller, and its far-end reference
+      // comes from the WS player's scheduled chunks — assistant audio over webrtc bypasses that
+      // player, which would leave Safari/iOS with NO echo cancellation at all (barge-in and ASR
+      // both break against speaker bleed). Fall back to the WS transport until the webrtc path
+      // grows a remote-track far-end tap (tracked TODO).
+      console.warn('[converse] webrtc transport is not yet supported on WebKit — using ws');
+      transport = 'ws';
+    }
     this.url = toWebSocketUrl(url);
+    this.transport = transport;
+    this._RTCPeerConnectionImpl = RTCPeerConnectionImpl;
     this.sessionId = sessionId;
     this.player = player || new StreamingPlayer();
     this.apiKey = apiKey || null;
+    // Dual real-time capture channels (tagged binary uplink) ride WS binary frames; webrtc has a
+    // single outbound audio track, so raw_assist ablation isn't representable there yet (TODO).
+    if (transport === 'webrtc' && rawAssist) rawAssist = false;
     this._mode = Object.freeze(validatedMode(mode));
     // Optional stable user identifier (e.g. a persistent anonymous id) — recorded server-side so
     // captures can be grouped per user across sessions. Never used for auth.
@@ -202,6 +222,16 @@ export class ConverseClient extends EventTarget {
     this._rawAssistActive = false;
     this._audioFrontend = null;  // actual SDK-owned mic/AEC path, persisted across reconnects
     this._audioFrontendFallback = false;
+    // webrtc-transport-only state (see _openOnceWebRtc): the peer connection, its "control" data
+    // channel (the send-a-control-frame primitive's destination instead of `this.ws`), the mic's
+    // re-injection feeder (src/webrtc.js), and the hidden <audio> element assistant audio plays
+    // through. None of these are touched when transport === 'ws'.
+    this._rtcSession = null;
+    this._channel = null;
+    this._trackFeeder = null;
+    this._micSender = null;           // the pc's outbound-audio RTCRtpSender (see startMic below)
+    this._directMicTrackEngaged = false;  // true once startMic() swapped the raw device track in
+    this._remoteAudioEl = null;
   }
 
   // The default mic path: owns getUserMedia under the locked AEC-only front-end spec (AEC on,
@@ -280,6 +310,24 @@ export class ConverseClient extends EventTarget {
       this._rawAssistActive = rawAssist;
       this._audioFrontend = sdkAec ? 'sdk-aec3' : 'platform-aec';
       this._audioFrontendFallback = aecFallback;
+      // The normal webrtc path: swap the getUserMedia track straight into the RTCPeerConnection's
+      // sender instead of leaving the JS TrackFeeder re-injection in the loop. webrtc only ever
+      // runs on non-WebKit platforms (WebKit forces ws — see needsSdkAec() above this class), so
+      // `!sdkAec` here means native platform echo cancellation already produced this exact track's
+      // audio — it's the SAME processed audio the feeder would otherwise have re-encoded, with zero
+      // extra JS hops/queueing/latency. replaceTrack() needs no renegotiation (the sender/m-line
+      // were already established by the initial offer in _openOnceWebRtc). Only the SDK's own AEC3
+      // canceller (sdkAec, WebKit-only in practice) or a custom-capture caller (no startMic() at
+      // all) still needs the feeder — see _uplinkFrame.
+      if (this.transport === 'webrtc' && !sdkAec && this._micSender) {
+        const rawTrack = mic.stream?.getAudioTracks?.()[0];
+        if (rawTrack) {
+          this._micSender.replaceTrack(rawTrack)
+            .then(() => { this._directMicTrackEngaged = true; })
+            .catch((err) => console.warn(
+              '[voice-loop] webrtc direct mic track swap failed; staying on the feeder', err));
+        }
+      }
       this._sendRawAssistStatus(rawAssist);
       this._sendAudioFrontendStatus();
       return { sdkAec, aecFallback, rawAssist };
@@ -291,8 +339,14 @@ export class ConverseClient extends EventTarget {
 
   // Safari requires audio playback to be unlocked from the user's gesture. Call this before any
   // async connect / mic-permission wait so later streamed assistant audio can actually play.
+  // Over webrtc the StreamingPlayer is unused (see _attachRemoteAudio) — the hidden <audio> element
+  // needs the same gesture-unlock treatment, so this also nudges it to play if one already exists
+  // (e.g. unlockAudio() called again after a reconnect established a new remote track).
   unlockAudio() {
-    return this.player?.ensureContext?.();
+    return Promise.all([
+      this.player?.ensureContext?.(),
+      this._remoteAudioEl?.play?.().catch(() => {}),
+    ].filter(Boolean));
   }
 
   // Release the SDK-owned mic + AEC (no-op if startMic was never used). Safe to call repeatedly;
@@ -310,7 +364,15 @@ export class ConverseClient extends EventTarget {
     this._sendAudioFrontendStatus();
     this._aec?.close();
     this._aec = null;
-    return Promise.allSettled([mic?.stop(), rawMic?.stop()]);
+    // Hand the sender back to the feeder BEFORE the capture's own track is stopped below, so the
+    // peer connection never ends up pointing at an ended track (and any later pushMicFrame() from
+    // a custom-capture caller has somewhere to go again).
+    let handoff = Promise.resolve();
+    if (this._directMicTrackEngaged && this._micSender) {
+      this._directMicTrackEngaged = false;
+      handoff = this._micSender.replaceTrack(this._trackFeeder?.track || null).catch(() => {});
+    }
+    return handoff.then(() => Promise.allSettled([mic?.stop(), rawMic?.stop()]));
   }
 
   /** Temporarily gate live microphone tracks without reopening the device. This is a transport
@@ -323,6 +385,10 @@ export class ConverseClient extends EventTarget {
       const tracks = stream?.getAudioTracks?.() || stream?.getTracks?.() || [];
       for (const track of tracks) track.enabled = active;
     }
+    // webrtc: the outbound track is the feeder's synthetic MediaStreamTrack, not the capture's own
+    // getUserMedia track (see src/webrtc.js) — mute it directly so custom-capture apps (which call
+    // pushMicFrame() without startMic() and so have no capture track above) still get silence.
+    this._trackFeeder?.setMuted(!active);
   }
 
   connect({ temperature, noGreeting = false } = {}) {
@@ -331,7 +397,7 @@ export class ConverseClient extends EventTarget {
     this._closedByUser = false;
     this._temperature = temperature;
     this._noGreeting = noGreeting;
-    const opening = this._openOnce();
+    const opening = this.transport === 'webrtc' ? this._openOnceWebRtc() : this._openOnce();
     this.opened = opening;
     // Initial connect failed (not a live drop, so no reconnect) — clear so a later connect() retries.
     // `_openOnce` never touches `this.opened` itself, so this and `_scheduleReconnect` are its sole
@@ -340,10 +406,12 @@ export class ConverseClient extends EventTarget {
     return this.opened;
   }
 
-  // One connection attempt. Resolves on `ready`; rejects if the socket fails or closes before ready.
-  // If an already-live socket later drops (and the user didn't close it), kicks off auto-reconnect.
-  // Owns only its own promise — never mutates `this.opened` (see connect()/_scheduleReconnect).
-  _openOnce() {
+  // Shared start-frame construction (mode/temperature/greeting/capabilities/rawAssist) for both
+  // transports. webrtc mode-kind capability advertising: reversible playback_pause/resume needs a
+  // player the client can actually pause on command, which the remote-track path doesn't implement
+  // yet (see _applyReflex's transport guards) — so webrtc never advertises playback_pause_v1
+  // regardless of the configured player (TODO once/if reversible pause targets the <audio> element).
+  _buildStartFrame() {
     let mode = validatedMode(this._mode);
     if (mode.kind === 'converse') {
       if (this._temperature != null) mode.temperature = this._temperature;
@@ -353,14 +421,13 @@ export class ConverseClient extends EventTarget {
     const start = {
       type: 'start',
       session_id: this.sessionId,
-      audio: { sr: SAMPLE_RATE },
+      audio: { sr: SAMPLE_RATE, output_encoding: 'pcm16' },
       mode,
     };
     if (this.apiKey) start.api_key = this.apiKey;
     const client = {};
-    // Advertise reversible arbitration only when the supplied player really implements it.
-    // A false capability delays genuine barges while audio continues playing.
-    client.capabilities = this._supportsReversiblePlayback() ? ['playback_pause_v1'] : [];
+    client.capabilities = (this.transport !== 'webrtc' && this._supportsReversiblePlayback())
+      ? ['playback_pause_v1'] : [];
     client.audio_frontend = this._audioFrontend || 'unknown';
     if (this.user) client.user = this.user;
     if (this.timezone) client.timezone = this.timezone;
@@ -369,6 +436,14 @@ export class ConverseClient extends EventTarget {
       start.audio.raw_assist = true;
       start.audio.uplink_format = UPLINK_FORMAT_TAGGED;
     }
+    return start;
+  }
+
+  // One connection attempt. Resolves on `ready`; rejects if the socket fails or closes before ready.
+  // If an already-live socket later drops (and the user didn't close it), kicks off auto-reconnect.
+  // Owns only its own promise — never mutates `this.opened` (see connect()/_scheduleReconnect).
+  _openOnce() {
+    const start = this._buildStartFrame();
     // Validate and serialize before opening a network resource. A circular/custom tool schema must
     // fail locally without leaking a connecting WebSocket.
     const startPayload = JSON.stringify(start);
@@ -380,6 +455,11 @@ export class ConverseClient extends EventTarget {
       const fail = (err) => {
         if (!settled) {
           settled = true;
+          // Don't leak a live socket when connect() rejects (error frame, format mismatch):
+          // the server would keep the session open while the app believes connect failed.
+          if (ws.readyState === 0 || ws.readyState === 1) {
+            try { ws.close(1000, 'client rejected session'); } catch { /* already closing */ }
+          }
           reject(err instanceof Error ? err : new Error(String(err)));
         }
       };
@@ -406,6 +486,14 @@ export class ConverseClient extends EventTarget {
         try {
           const detail = await this._message(ev.data);
           if (!settled && detail?.type === 'ready') {
+            // The ready frame states the negotiated downlink format; a mismatch here would
+            // otherwise surface as noise in the speakers, so fail the connect loudly instead.
+            const fmt = detail.audio;
+            if (fmt && (fmt.output_encoding !== 'pcm16' || fmt.output_sr !== SAMPLE_RATE)) {
+              fail(new Error(`server negotiated unsupported downlink audio ${JSON.stringify(fmt)}; `
+                + `this SDK plays pcm16 at ${SAMPLE_RATE} Hz`));
+              return;
+            }
             settled = true;
             this._live = true;
             this._listeningFired = false;   // re-arm: this session emits `listening` after warmup
@@ -422,6 +510,179 @@ export class ConverseClient extends EventTarget {
         }
       });
     });
+  }
+
+  // The webrtc counterpart of _openOnce(): signaling still rides a plain WebSocket to the same
+  // /ws URL (see serving/broker_webrtc.py), but only long enough to exchange the SDP offer/answer —
+  // once the "control" data channel is open, every protocol frame this class sends/receives moves
+  // through _sendControl()/_message() over the channel instead, unchanged.
+  //
+  // Reconnect TODO: unlike _openOnce, this never calls _scheduleReconnect() — autoReconnect stays a
+  // WS-transport-only feature for this first implementation (no ICE-restart support yet). A
+  // dropped/failed peer connection surfaces exactly the events a dead WS with autoReconnect:false
+  // would (see the channel/connectionstatechange handlers below), so callers see a consistent
+  // "terminal" shape either way; a future revision can add ICE-restart-based reconnect here without
+  // changing that external contract.
+  async _openOnceWebRtc() {
+    const start = this._buildStartFrame();
+    start.transport = { kind: 'webrtc' };   // no sdp yet — TURN creds must exist before we gather
+    this._teardownWebRtc();   // a stale peer connection/feeder from a previous failed attempt
+
+    const startPayload = JSON.stringify(start);
+    const ws = new this.WebSocketImpl(this.url);   // signaling only — closed once the answer lands
+    this.ws = ws;
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let session = null;
+      let feeder = null;
+      let channel = null;
+      // The signaling socket is deliberately self-closed right after the answer is applied (its
+      // job is done — wire contract note #5); that close must NOT be mistaken for the signaling
+      // socket dying before an answer ever arrived.
+      let signalingDone = false;
+      const fail = (err) => {
+        if (!settled) {
+          settled = true;
+          this._teardownWebRtc();
+          try { ws.close(); } catch { /* already closing/closed */ }
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      };
+
+      ws.addEventListener('open', () => { ws.send(startPayload); }, { once: true });
+      ws.addEventListener('error', () => fail(new Error('Converse signaling WebSocket failed')), { once: true });
+      ws.addEventListener('close', () => {
+        if (this.ws === ws) this.ws = null;
+        if (!settled && !signalingDone) fail(new Error('signaling socket closed before webrtc_answer'));
+        // Once settled (or once we closed it ourselves post-answer) the signaling socket has done
+        // its job — a close here, expected or not, has no bearing on the live call.
+      });
+      ws.addEventListener('message', async (ev) => {
+        if (typeof ev.data !== 'string') return;   // signaling only ever carries JSON
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (err) { fail(err); return; }
+        if (msg.type === 'webrtc_ice') {
+          // Step 1 of signaling: build the peer connection WITH the server's (possibly
+          // TURN-bearing) ice_servers, gather, then offer — see the module-level wire contract
+          // note. Building the RTCPeerConnection any earlier would gather before TURN creds
+          // exist, making TURN permanently unusable.
+          if (session) return;   // duplicate webrtc_ice — ignore, first one wins
+          session = new WebRtcSession({
+            RTCPeerConnectionImpl: this._RTCPeerConnectionImpl,
+            iceServers: Array.isArray(msg.ice_servers) && msg.ice_servers.length
+              ? msg.ice_servers : undefined,
+          });
+          this._rtcSession = session;
+          session.onRemoteTrack((stream) => this._attachRemoteAudio(stream));
+          session.onConnectionStateChange((state) => {
+            if (state === 'failed' || state === 'closed') fail(new Error(`webrtc connection ${state}`));
+          });
+          feeder = new TrackFeeder();
+          this._trackFeeder = feeder;
+          try {
+            await feeder.start();
+            channel = session.createControlChannel();
+            // This feeder track is what negotiates the offer's audio m-line (startMic() hasn't
+            // necessarily run yet — connect() resolves before the app calls it). Keep the sender
+            // so a later startMic() can replaceTrack() the real getUserMedia track in directly,
+            // with no renegotiation needed (see startMic()).
+            this._micSender = session.addAudioTrack(feeder.track);
+            const sdp = await session.createOfferWithGatheredIce();
+            ws.send(JSON.stringify({ type: 'webrtc_offer', sdp }));
+          } catch (err) { fail(err); return; }
+          channel.addEventListener('message', async (chEv) => {
+            let detail;
+            try { detail = await this._message(chEv.data); } catch (err) { fail(err); return; }
+            if (detail?.type === 'bye') {
+              // Server-initiated close over the channel — treat exactly like a WS close with
+              // that code (wire contract note #5a).
+              if (!settled) fail(new Error(detail.reason || 'webrtc session closed'));
+              else this._handleTransportClose(detail.code, detail.reason);
+              return;
+            }
+            if (!settled && detail?.type === 'ready') {
+              settled = true;
+              this._channel = channel;
+              this._live = true;
+              this._listeningFired = false;
+              this._listeningFrames = 0;
+              this._uplinkSeq = [0, 0];
+              if (this.rawAssist) this._sendRawAssistStatus(this._rawAssistActive);
+              this._sendAudioFrontendStatus();
+              resolve(this);
+            } else if (!settled && detail?.type === 'error') {
+              fail(new Error(detail.detail || 'Converse webrtc session rejected'));
+            }
+          });
+          channel.addEventListener('close', () => {
+            if (!settled) { fail(new Error('control channel closed before ready')); return; }
+            if (!this._closedByUser) this._handleTransportClose(1006, '');  // abnormal drop, no reconnect (see TODO above)
+          });
+        } else if (msg.type === 'webrtc_answer') {
+          if (!session) { fail(new Error('webrtc_answer before webrtc_ice')); return; }
+          try {
+            await session.applyAnswer(msg.sdp);
+          } catch (err) { fail(err); return; }
+          signalingDone = true;
+          try { ws.close(1000); } catch { /* noop */ }   // signaling's job is done
+        } else if (msg.type === 'error') {
+          fail(new Error(msg.detail || 'Converse webrtc connect rejected'));
+        }
+      });
+    });
+  }
+
+  // Mirrors the WS 'close' handler's non-reconnect branches (autoReconnect:false shape) for a
+  // channel/PC teardown that happens after `ready` — see _openOnceWebRtc's reconnect TODO.
+  _handleTransportClose(code, reason) {
+    if (!this._live) return;   // already handled (e.g. 'bye' then the channel's own 'close' event)
+    this._live = false;
+    this._channel = null;
+    this.opened = null;
+    if (code === 1000) {
+      // Only an intentional server end closes 1000 (mirrors the WS idle sign-off) — surface it the
+      // same way so app code doesn't need transport-specific handling.
+      this._responding = false;
+      this._dropAck();
+      this._dispatch({ type: 'session_end', code, reason: reason || '' });
+    }
+    this._teardownWebRtc();
+  }
+
+  // Assistant audio over webrtc arrives as a remote Opus track, not binary WS frames — StreamingPlayer
+  // is unused here. Attach it to a hidden <audio> element instead; unlockAudio() also nudges this
+  // element's play() for browsers that gate autoplay on a user gesture.
+  _attachRemoteAudio(stream) {
+    if (typeof document === 'undefined') return;   // non-browser test environment
+    if (!this._remoteAudioEl) {
+      const el = document.createElement('audio');
+      el.autoplay = true;
+      el.playsInline = true;
+      el.style.display = 'none';
+      (document.body || document.documentElement)?.appendChild(el);
+      this._remoteAudioEl = el;
+    }
+    this._remoteAudioEl.srcObject = stream;
+    this._remoteAudioEl.play?.().catch(() => {});   // best-effort; unlockAudio() retries post-gesture
+  }
+
+  _teardownWebRtc() {
+    this._channel = null;
+    const session = this._rtcSession;
+    const feeder = this._trackFeeder;
+    this._rtcSession = null;
+    this._trackFeeder = null;
+    this._micSender = null;
+    this._directMicTrackEngaged = false;
+    session?.close();
+    feeder?.stop().catch(() => {});
+    if (this._remoteAudioEl) {
+      try { this._remoteAudioEl.pause?.(); } catch { /* noop */ }
+      this._remoteAudioEl.srcObject = null;
+      this._remoteAudioEl.remove?.();
+      this._remoteAudioEl = null;
+    }
   }
 
   // A live socket dropped unexpectedly. Reconnect with exponential backoff. `this.opened` tracks the
@@ -467,22 +728,29 @@ export class ConverseClient extends EventTarget {
     return typeof this.player?.pause === 'function' && typeof this.player?.resume === 'function';
   }
 
-  _sendAudioFrontendStatus() {
-    const ws = this.ws;
-    if (ws?.readyState === 1) {
-      ws.send(JSON.stringify({
-        type: 'client_event', event: 'audio_frontend',
-        frontend: this._audioFrontend || 'unknown',
-        fallback: this._audioFrontendFallback,
-      }));
+  // The one primitive every caller uses to send protocol JSON, so index.js has exactly one place
+  // that knows the wire differs by transport: over 'ws' it's ws.send(); over 'webrtc' every frame
+  // that would have gone over the socket instead rides the "control" RTCDataChannel byte-for-byte
+  // (see serving/broker_webrtc.py's module docstring). Silently no-ops if neither is open —
+  // callers already treat that as "dropped mid-flight, best-effort".
+  _sendControl(obj) {
+    if (this.transport === 'webrtc') {
+      if (this._channel?.readyState === 'open') this._channel.send(JSON.stringify(obj));
+    } else if (this.ws?.readyState === 1) {
+      this.ws.send(JSON.stringify(obj));
     }
   }
 
+  _sendAudioFrontendStatus() {
+    this._sendControl({
+      type: 'client_event', event: 'audio_frontend',
+      frontend: this._audioFrontend || 'unknown',
+      fallback: this._audioFrontendFallback,
+    });
+  }
+
   _sendRawAssistStatus(active) {
-    const ws = this.ws;
-    if (ws?.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'raw_assist_status', active: !!active }));
-    }
+    this._sendControl({ type: 'raw_assist_status', active: !!active });
   }
 
   _uplink(frame, channel, captureMs) {
@@ -491,31 +759,48 @@ export class ConverseClient extends EventTarget {
     return encodeTaggedPcm16(frame, { channel, sequence, captureMs });
   }
 
-  async appendAudio(frame, { temperature, captureMs = captureClockMs() } = {}) {
-    await this.connect({ temperature });
-    if (this.ws?.readyState !== 1) return;   // dropped mid-flight — skip this realtime frame
-    if (temperature != null) this.ws.send(JSON.stringify({ type: 'config', temperature }));
+  // Push one mic frame onto the wire: WS binary frame, or (webrtc) into the TrackFeeder that backs
+  // the outbound RTCPeerConnection audio track. rawAssist's dual tagged channel is WS-only (see the
+  // constructor), so webrtc always takes the plain branch here.
+  // Once startMic() has swapped the raw getUserMedia track directly into the peer connection (see
+  // startMic()), the outbound audio no longer depends on this re-injection at all — pushing these
+  // frames into the feeder too would just be wasted work, since its output track is no longer the
+  // one actually wired to the sender. Only a custom-capture caller (pushMicFrame()/appendAudio()
+  // without startMic()) or the SDK's own AEC3 canceller path still needs the feeder engaged.
+  _uplinkFrame(frame, captureMs) {
+    if (this.transport === 'webrtc') {
+      if (!this._directMicTrackEngaged) this._trackFeeder?.push(frame);
+      return;
+    }
     this.ws.send(this.rawAssist
       ? this._uplink(frame, UPLINK_CHANNEL_PROCESSED, captureMs)
       : floatToPcm16Bytes(frame));
   }
 
+  async appendAudio(frame, { temperature, captureMs = captureClockMs() } = {}) {
+    await this.connect({ temperature });
+    if (!this._live) return;   // dropped mid-flight — skip this realtime frame
+    if (temperature != null) this._sendControl({ type: 'config', temperature });
+    this._uplinkFrame(frame, captureMs);
+  }
+
   // Optional DEV ablation: send an UN-processed mic frame (a parallel getUserMedia track with
   // browser DSP off) on a `raw_audio` control. The server records it to raw.wav only — it never
   // drives the conversation. Fire-and-forget; silently no-ops if the socket isn't open.
+  // rawAssist is forced off over webrtc (constructor), so only the plain `raw_audio` control frame
+  // path applies there — it still works since it's a data-channel JSON frame like any other.
   sendRawFrame(frame, { captureMs = captureClockMs() } = {}) {
-    const ws = this.ws;
-    if (!ws || ws.readyState !== 1) return;
     if (this.rawAssist) {
+      if (this.transport === 'webrtc' || !this.ws || this.ws.readyState !== 1) return;
       // Custom capture integrations do not call startMic(), so the first actual raw frame is
       // their availability signal. This keeps the server fail-closed until both channels exist.
       if (!this._rawAssistActive) {
         this._rawAssistActive = true;
         this._sendRawAssistStatus(true);
       }
-      ws.send(this._uplink(frame, UPLINK_CHANNEL_RAW, captureMs));
+      this.ws.send(this._uplink(frame, UPLINK_CHANNEL_RAW, captureMs));
     } else {
-      ws.send(JSON.stringify({ type: 'raw_audio', pcm_b64: bytesToBase64(floatToPcm16Bytes(frame)) }));
+      this._sendControl({ type: 'raw_audio', pcm_b64: bytesToBase64(floatToPcm16Bytes(frame)) });
     }
   }
 
@@ -538,10 +823,8 @@ export class ConverseClient extends EventTarget {
     // This path is already live, so send synchronously. Besides avoiding a needless microtask,
     // this guarantees that WebKit's processed frame is on the wire before the raw tee from the
     // same capture callback. Desktop's independent captures remain correlated by capture_ms.
-    if (temperature != null) this.ws.send(JSON.stringify({ type: 'config', temperature }));
-    this.ws.send(this.rawAssist
-      ? this._uplink(frame, UPLINK_CHANNEL_PROCESSED, captureMs)
-      : floatToPcm16Bytes(frame));
+    if (temperature != null) this._sendControl({ type: 'config', temperature });
+    this._uplinkFrame(frame, captureMs);
   }
 
   get mode() { return this._mode; }
@@ -553,15 +836,13 @@ export class ConverseClient extends EventTarget {
     this._responding = false;
     this._dropAck();
     await this.connect();
-    if (this.ws?.readyState === 1) this.ws.send(JSON.stringify({ type: 'reset' }));
+    this._sendControl({ type: 'reset' });
   }
 
   /** Tell the server the client's ambience layer went on/off. Recorded in the session
    *  timeline as a preference signal; has no effect on the audio pipeline. */
   sendAmbienceState(active) {
-    if (this.ws?.readyState === 1) {
-      this.ws.send(JSON.stringify({ type: 'ambience', active: !!active }));
-    }
+    this._sendControl({ type: 'ambience', active: !!active });
   }
 
   /** Switch character voice mid-session. Applies from the next reply; Converse mode only. */
@@ -570,9 +851,7 @@ export class ConverseClient extends EventTarget {
     // this control. Converse reconnects replay the selected voice.
     if (this._mode.kind !== 'converse') return;
     this._mode = Object.freeze(validatedMode({ ...this._mode, voice }));
-    if (this.ws?.readyState === 1) {
-      this.ws.send(JSON.stringify({ type: 'set_voice', voice }));
-    }
+    this._sendControl({ type: 'set_voice', voice });
   }
 
   close() {
@@ -582,6 +861,7 @@ export class ConverseClient extends EventTarget {
 
     this.stopMic();              // release the SDK-owned mic (no-op for custom-capture apps)
     this.player?.stop?.();
+    if (this.transport === 'webrtc') this._teardownWebRtc();
     try { this.ws?.close(1000); } catch { /* closing a CONNECTING socket is allowed and harmless */ }
   }
 
@@ -616,13 +896,24 @@ export class ConverseClient extends EventTarget {
 
   // Drive playback state off each server event, before re-dispatching it.
   _applyReflex(event) {
+    const webrtc = this.transport === 'webrtc';
     switch (event.type) {
       case 'turn':
         this._responding = true;
         this._playbackPauseSeq = null;
         this._dropAck();
+        if (webrtc) {
+          // No per-chunk binary audio frames arrive over webrtc (assistant audio is a remote RTP
+          // track — see _attachRemoteAudio), so app.js's `case "audio": if (client.responding && ...)
+          // setState(SPEAKING)` would never fire. Rather than reinvent per-chunk detection (the
+          // remote track already started/will start playing immediately), synthesize the one
+          // 'audio' event apps actually key off of, right when a reply — and therefore audio — is
+          // known to start. `samples` is null: there is no decoded PCM to hand a custom consumer.
+          this._dispatch({ type: 'audio', sr: SAMPLE_RATE, samples: null, synthetic: true });
+        }
         break;
       case 'playback_pause': {
+        if (webrtc) break;   // not advertised as a capability over webrtc (see _buildStartFrame) — TODO
         const seq = Number.isInteger(event.pause_seq) ? event.pause_seq : 0;
         this._playbackPauseSeq = seq;
         this.audioQueue = this.audioQueue.catch(() => {}).then(async () => {
@@ -651,6 +942,7 @@ export class ConverseClient extends EventTarget {
         break;
       }
       case 'playback_resume': {
+        if (webrtc) break;
         const seq = Number.isInteger(event.pause_seq) ? event.pause_seq : 0;
         if (this._playbackPauseSeq !== seq) break;
         this._playbackPauseSeq = null;
@@ -666,7 +958,9 @@ export class ConverseClient extends EventTarget {
       }
       case 'canceled':    // eager speculation retracted — the audio was a mistake, clear it
         this._playbackPauseSeq = null;
-        this.player?.clear?.();
+        // Over webrtc the server owns playout and already stopped sending on its own retraction —
+        // there is no local queue for this client to clear.
+        if (!webrtc) this.player?.clear?.();
         this._responding = false;
         this._dropAck();
         break;
@@ -674,6 +968,11 @@ export class ConverseClient extends EventTarget {
         this._playbackPauseSeq = null;
         this._responding = false;
         this._dropAck();
+        // Over webrtc the server measures and reports its own discarded audio on a hard-clear barge
+        // (see broker_webrtc.py's WebRtcTransport.send_json) and there is no local player queue to
+        // drain/fade — the wire contract explicitly forbids the client sending playback_stopped here
+        // (note #5b), so webrtc takes none of the WS path's measurement/report below.
+        if (webrtc) break;
         // Report the stop so the server can timestamp actual silence at the speaker
         // (barge_detected -> playback_stopped = the stop half of barge latency) and, on a
         // clear, re-truncate its committed text by discarded_ms (audio the user never heard);

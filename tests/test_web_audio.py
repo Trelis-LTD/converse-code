@@ -22,5 +22,5 @@ def test_web_audio_resamplers():
     )
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
     assert "page delegates audio to the SDK: OK" in proc.stdout
-    assert "SDK codec: f32 downlink (converted server-side), PCM16 uplink: OK" in proc.stdout
+    assert "SDK codec: PCM16 both directions: OK" in proc.stdout
     assert "SDK resampler: continuous across chunks: OK" in proc.stdout

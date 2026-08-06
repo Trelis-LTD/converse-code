@@ -43,6 +43,11 @@ export function bytesToBase64(bytes) {
   return btoa(bin);
 }
 
+// Decodes assistant audio binary frames into Web-Audio-ready Float32 samples. The server's wire
+// default is now pcm16 (audio.output_encoding defaults to "pcm16" when the start frame omits it —
+// see serving/broker_ws.py); this client never sends that field, so it always gets pcm16 and must
+// decode int16 samples, not float32. (A client wanting the old always-float wire format would
+// send start.audio.output_encoding="pcm_f32le" and decode differently — not needed here.)
 export async function binaryToFloat32(data) {
   let bytes;
   if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
@@ -50,8 +55,13 @@ export async function binaryToFloat32(data) {
   else if (ArrayBuffer.isView(data)) bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   else if (data instanceof Blob) bytes = new Uint8Array(await data.arrayBuffer());
   else throw new TypeError('unsupported binary audio payload');
-  if (bytes.byteLength % 4 !== 0) throw new Error('pcm_f32le payload must be divisible by 4');
-  return new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  if (bytes.byteLength % 2 !== 0) throw new Error('pcm16 payload must be divisible by 2');
+  const pcm16 = new Int16Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  const out = new Float32Array(pcm16.length);
+  for (let i = 0; i < pcm16.length; i += 1) {
+    out[i] = pcm16[i] / (pcm16[i] < 0 ? 32768 : 32767);
+  }
+  return out;
 }
 
 export function toWebSocketUrl(url) {

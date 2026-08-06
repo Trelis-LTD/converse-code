@@ -1,6 +1,6 @@
 # Vendored `@trelis/converse` browser SDK
 
-Copied verbatim from npm `@trelis/converse@0.4.5` (`package/src/`). Do not edit
+Copied verbatim from npm `@trelis/converse@0.5.0` (`package/src/`). Do not edit
 these files — re-vendor from npm to update, and bump the version noted here.
 
 Why vendored rather than a CDN or an npm dependency: the voice tab is served by
@@ -14,3 +14,8 @@ buffer); the SDK is the same code the Converse playground runs.
 
 `package.json` is retained for the version/licence record. The package is
 published `UNLICENSED` — it is used here as first-party Trelis code.
+
+0.5.0 decodes the downlink as PCM16, matching the broker's current wire default.
+(0.4.5 still decoded the older `pcm_f32le` and produced pure noise against the
+live server; if the vendored version is ever rolled back, tests/web_audio_check.mjs
+fails loudly rather than letting that reach anyone's ears.)
