@@ -12,9 +12,8 @@ import tempfile
 import webbrowser
 from pathlib import Path
 
-from . import audio as audiofmt
 from . import broker as brokermod
-from . import config, hooks, tools
+from . import config, hooks, relay, tools
 from .localserver import LocalServer
 from .ptyhost import ClaudeHost
 
@@ -108,18 +107,11 @@ async def _run(args) -> int:
     # canceller, missing scheduler pump, wrong frame ordering); the client already
     # solves all of that, so it owns the audio and this owns the tools.
     broker_task: asyncio.Task | None = None
-    connected = asyncio.Event()
 
     async def on_proxy_json(msg: dict) -> None:
         nonlocal broker_task
-        if msg.get("type") == "start":
-            frame = dict(msg)
-            frame["api_key"] = api_key
-            frame["session_id"] = handle
-            mode = dict(frame.get("mode") or {})
-            mode["tools"] = tools.manifest()
-            frame["mode"] = mode
-            frame.setdefault("audio", {})["output_encoding"] = audiofmt.OUTPUT_ENCODING
+        if relay.is_start(msg):
+            frame = relay.rewrite_start_frame(msg, api_key, handle, tools.manifest())
             try:
                 await client.connect(start_frame=frame)
             except Exception as exc:
@@ -129,7 +121,6 @@ async def _run(args) -> int:
                 )
                 return
             broker_task = asyncio.create_task(client.run())
-            connected.set()
             return
         await client.send_raw(msg)
 

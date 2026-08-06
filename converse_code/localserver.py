@@ -1,5 +1,10 @@
-"""Local HTTP + WebSocket server: serves the browser tab, relays audio and
-captions to/from it, and receives Claude Code hook POSTs.
+"""Local HTTP + WebSocket server. Three channels:
+
+  /ws     status only — Claude Code's state/queue and the text injected into the
+          terminal (JSON, this process -> page)
+  /proxy  the Converse protocol, relayed between the page's SDK client and the
+          broker (JSON + binary audio, both directions)
+  /hook   Claude Code's Stop hook POSTs its payload here
 
 Everything here is reachable from any web page the dev happens to have open —
 browsers don't apply same-origin policy to WebSockets, and a simple-content-type
@@ -29,7 +34,6 @@ class LocalServer:
 
     def __init__(self, token: str | None = None) -> None:
         self.token = token or secrets.token_urlsafe(24)
-        self.on_tab_audio: Callable[[bytes], Awaitable[None]] | None = None
         self.on_tab_json: Callable[[dict], Awaitable[None]] | None = None
         self.on_hook: Callable[[str, dict], Awaitable[None]] | None = None
         # The page's SDK client speaks the Converse protocol over /proxy; the
@@ -98,13 +102,6 @@ class LocalServer:
             except ConnectionError:
                 pass
 
-    async def send_audio_to_tab(self, data: bytes) -> None:
-        if self._tab is not None and not self._tab.closed:
-            try:
-                await self._tab.send_bytes(data)
-            except ConnectionError:
-                pass
-
     # -- handlers ----------------------------------------------------------
 
     # A cached page is indistinguishable from a fixed one, which has already cost
@@ -149,9 +146,7 @@ class LocalServer:
         self._tab = ws
         log.info("browser tab connected")
         async for msg in ws:
-            if msg.type == WSMsgType.BINARY and self.on_tab_audio:
-                await self.on_tab_audio(msg.data)
-            elif msg.type == WSMsgType.TEXT and self.on_tab_json:
+            if msg.type == WSMsgType.TEXT and self.on_tab_json:
                 try:
                     await self.on_tab_json(json.loads(msg.data))
                 except json.JSONDecodeError:

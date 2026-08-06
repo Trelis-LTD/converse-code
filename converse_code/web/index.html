@@ -11,7 +11,6 @@
     --danger:#d0403b; --you:#1c1e21; --asst:#245c3b; --inject:#8a5a00;
     --dot-connecting:#d9a400; --dot-open:#2e9e4f; --dot-closed:#c0392b;
     --chip-idle:#3b6fe0; --chip-working:#d9a400; --chip-menu:#7a4fd1;
-    --meter-bg:#e6e8eb; --meter-fill:#3b6fe0;
   }
   @media (prefers-color-scheme: dark){
     :root{
@@ -20,7 +19,6 @@
       --danger:#ef5f5a; --you:#e7e9ec; --asst:#6fd39a; --inject:#f0c15a;
       --dot-connecting:#e0b23a; --dot-open:#4bcf78; --dot-closed:#e0625c;
       --chip-idle:#5a8dff; --chip-working:#e0b23a; --chip-menu:#a988f0;
-      --meter-bg:#2a2d33; --meter-fill:#5a8dff;
     }
   }
   *{box-sizing:border-box;}
@@ -75,8 +73,7 @@
   }
   #micBtn:active{transform:scale(.94);}
   #micBtn.live{background:var(--danger);}
-  #meterWrap{flex:1 1 auto; height:.5rem; border-radius:999px; background:var(--meter-bg); overflow:hidden;}
-  #meterFill{height:100%; width:0%; background:var(--meter-fill); transition:width .06s linear;}
+  #micHint{flex:1 1 auto; font-size:.8rem; color:var(--muted);}
   #micLabel{font-size:.78rem; color:var(--muted); flex:0 0 auto; min-width:3.2rem; text-align:right;}
 </style>
 </head>
@@ -92,7 +89,7 @@
 </main>
 <footer>
   <button id="micBtn" title="Toggle microphone">&#127908;</button>
-  <div id="meterWrap"><div id="meterFill"></div></div>
+  <span id="micHint">Click the mic and talk. Instructions appear in your terminal.</span>
   <span id="micLabel">off</span>
 </footer>
 <script>
@@ -128,7 +125,6 @@
       scheduleReconnect();
       return;
     }
-    ws.binaryType = "arraybuffer";
     ws.onopen = function(){
       setDot("open");
     };
@@ -140,11 +136,7 @@
       try{ ws.close(); }catch(e){}
     };
     ws.onmessage = function(ev){
-      if(typeof ev.data === "string"){
-        handleJson(ev.data);
-      } else {
-        handleAudioFrame(ev.data);
-      }
+      if(typeof ev.data === "string") handleJson(ev.data);
     };
   }
 
@@ -237,6 +229,10 @@
     return !!f;
   }
 
+  // The /ws channel carries only converse-code's own status — Claude Code's
+  // state, its queue, and the text injected into the terminal. Everything from
+  // Converse itself (transcripts, replies, audio) arrives through the SDK client
+  // on /proxy and is rendered by renderEvent().
   function handleJson(raw){
     var msg;
     try{
@@ -245,70 +241,14 @@
       console.debug("bad json frame", raw);
       return;
     }
-
-    if(msg.type === "local"){
-      if(msg.event === "status"){
-        updateStatusChip(msg.state, msg.queue);
-      } else if(msg.event === "injected"){
-        addInjected(msg.text || "");
-      }
+    if(msg.type !== "local"){
+      console.debug("unexpected message on the status channel", msg);
       return;
     }
-
-    switch(msg.type){
-      case "asr": {
-        var text = pickText(msg);
-        if(!currentYouEl){
-          currentYouEl = makeEntry("you", "You");
-        }
-        setBody(currentYouEl, text);
-        if(isFinal(msg)){
-          freezeYou();
-        }
-        break;
-      }
-      case "turn": {
-        // Carries the full reply text already, but text_delta streams it word by
-        // word — start empty and let the deltas fill in, so captions animate.
-        freezeYou();
-        currentAssistantEl = makeEntry("assistant", "Assistant");
-        assistantText = "";
-        break;
-      }
-      case "text_delta": {
-        if(!currentAssistantEl){
-          currentAssistantEl = makeEntry("assistant", "Assistant");
-          assistantText = "";
-        }
-        assistantText += (msg.delta || "");
-        setBody(currentAssistantEl, assistantText);
-        break;
-      }
-      case "utterance": {
-        // Authoritative final text — replaces whatever the deltas assembled.
-        var atext = pickText(msg);
-        if(!currentAssistantEl){
-          currentAssistantEl = makeEntry("assistant", "Assistant");
-        }
-        assistantText = atext;
-        setBody(currentAssistantEl, atext);
-        break;
-      }
-      case "done": {
-        freezeAssistant();
-        freezeYou();
-        break;
-      }
-      case "interrupted": {
-        handleInterrupted(msg);
-        break;
-      }
-      case "bye": {
-        addBanner("Session ended" + (msg.reason ? (": " + msg.reason) : ""));
-        break;
-      }
-      default:
-        console.debug("ignored message type", msg.type, msg);
+    if(msg.event === "status"){
+      updateStatusChip(msg.state, msg.queue);
+    } else if(msg.event === "injected"){
+      addInjected(msg.text || "");
     }
   }
 
@@ -335,7 +275,6 @@
   // here instead and accumulated a bug per missing responsibility.
   var micBtn = document.getElementById("micBtn");
   var micLabel = document.getElementById("micLabel");
-  var meterFill = document.getElementById("meterFill");
 
   var client = null;
   var micActive = false;
@@ -344,10 +283,6 @@
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
     var token = new URLSearchParams(location.search).get("t") || "";
     return proto + "//" + location.host + "/proxy?t=" + encodeURIComponent(token);
-  }
-
-  function setMeter(level){
-    meterFill.style.width = Math.min(100, Math.round(level * 100)) + "%";
   }
 
   function renderEvent(ev){
@@ -427,7 +362,6 @@
     micActive = false;
     micBtn.classList.remove("live");
     micLabel.textContent = "off";
-    setMeter(0);
     try{ if(client) client.stopMic(); }catch(e){}
   }
 

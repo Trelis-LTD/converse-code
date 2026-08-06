@@ -64,7 +64,10 @@ const back = await binaryToFloat32(up.buffer ?? up);
 if (Math.abs(back[1] - 0.5) > 1e-3) throw new Error("PCM16 round-trip is wrong");
 console.log("SDK codec: PCM16 both directions: OK");
 
-const rawPath = new URL("../tmp/tts_raw.bin", import.meta.url);
+// A real captured utterance, committed so this check has the same teeth on any
+// clone. Synthetic tones hid a defect once: a low sine's chunk-seam error is
+// small enough to pass a threshold that real speech fails.
+const rawPath = new URL("./fixtures/assistant_audio_pcm16.bin", import.meta.url);
 let stream;
 if (existsSync(rawPath)) {
   // tts_raw.bin is untouched wire capture (PCM16) — exactly what the SDK's
@@ -75,9 +78,7 @@ if (existsSync(rawPath)) {
   );
   console.log(`resampler source: real captured TTS (${(stream.length / 16000).toFixed(1)}s)`);
 } else {
-  stream = new Float32Array(16000);
-  for (let i = 0; i < stream.length; i++) stream[i] = Math.sin((2 * Math.PI * 3000 * i) / 16000);
-  console.log("resampler source: 3 kHz sine (no capture present)");
+  throw new Error("missing tests/fixtures/assistant_audio_pcm16.bin — the check needs real audio");
 }
 
 // Drive the SDK player's resampler directly: no AudioContext needed, just its
