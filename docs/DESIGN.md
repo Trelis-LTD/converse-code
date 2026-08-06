@@ -21,8 +21,11 @@ directions.
 ## 2. Developer experience
 
 ```
-uvx converse-code          # in your project directory
+converse-code              # in your project directory
 ```
+
+(Installed with `uv tool install .` from a clone today; `uvx converse-code` once it's
+published to PyPI — the name is unclaimed.)
 
 - **First run**: prompts for a Converse API key (from the converse.trelis.com dashboard),
   validates it with the free `{"type": "auth"}` frame, and stores it in the OS keychain
