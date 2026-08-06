@@ -58,6 +58,14 @@ def test_recorder_writes_exact_complete_pcm16_frames(tmp_path):
         assert wav.readframes(wav.getnframes()) == b"\x01\x02\x04\x05"
 
 
+def test_recorder_duration_uses_its_configured_sample_rate(tmp_path):
+    recorder = WavRecorder(tmp_path / "eight-khz.wav", rate=8_000)
+    recorder.add(b"\x00\x00" * 4_000)
+    recorder.close()
+
+    assert recorder.seconds == 0.5
+
+
 async def test_record_audio_relay_captures_the_exact_bytes_sent_to_page(tmp_path):
     class FakeServer:
         def __init__(self):

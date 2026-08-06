@@ -19,6 +19,7 @@ class WavRecorder:
 
     def __init__(self, path: str | Path, rate: int = SAMPLE_RATE):
         self.path = Path(path)
+        self.rate = rate
         self._wav = wave.open(str(self.path), "wb")
         self._wav.setnchannels(1)
         self._wav.setsampwidth(2)
@@ -43,7 +44,7 @@ class WavRecorder:
 
     @property
     def seconds(self) -> float:
-        return self.bytes_written / 2 / SAMPLE_RATE
+        return self.bytes_written / 2 / self.rate
 
 
 @dataclass
