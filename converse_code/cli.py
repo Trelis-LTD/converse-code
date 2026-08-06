@@ -101,7 +101,7 @@ async def _run(args) -> int:
     client.on_tool_call = lambda call: _spawn_tool(router, call)
 
     print(f"Converse Code — voice tab: {url}   (session: {handle})")
-    print(f"Logs: {Path(tempfile.gettempdir()) / 'converse-code.log'}")
+    print(f"Logs: {LOG_PATH}")
     if not args.no_browser:
         webbrowser.open(url)
 
@@ -120,7 +120,21 @@ async def _run(args) -> int:
     return host.returncode or 0
 
 
+LOG_PATH = Path(tempfile.gettempdir()) / "converse-code.log"
 EARLY_EXIT_S = 5.0
+
+
+def _configure_logging(owns_terminal: bool) -> None:
+    """Claude Code owns the terminal, so log records written to stderr would be
+    painted into the middle of its TUI — write them to a file in that case.
+
+    basicConfig rejects `filename` and `stream` together even when one is None,
+    so only ever pass one.
+    """
+    if owns_terminal:
+        logging.basicConfig(level=logging.WARNING, filename=str(LOG_PATH))
+    else:
+        logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
 
 
 def _report_early_exit(host: ClaudeHost, elapsed: float) -> None:
@@ -174,14 +188,7 @@ def main() -> None:
     sub.add_parser("login", help="store and validate your Converse API key")
     args = parser.parse_args()
 
-    # Claude Code owns the terminal, so log records written to stderr would be
-    # painted into the middle of its TUI. Send them to a file instead.
-    log_path = Path(tempfile.gettempdir()) / "converse-code.log"
-    logging.basicConfig(
-        level=logging.WARNING,
-        filename=None if args.cmd == "login" or args.headless else str(log_path),
-        stream=sys.stderr if args.cmd == "login" or args.headless else None,
-    )
+    _configure_logging(owns_terminal=not (args.cmd == "login" or args.headless))
     if args.cmd == "login":
         raise SystemExit(asyncio.run(_login(args.broker_url)))
     raise SystemExit(asyncio.run(_run(args)))
