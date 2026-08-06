@@ -52,7 +52,15 @@ Following the documented shape exactly:
   speculatively/early for "how's it going?" without waiting for turn commit. Returns
   whatever the last progress checkpoint said plus the current pane state (see Section 10),
   cheaply, without touching the CC session.
-- **`select_option`** -- fast. Used when the pane is in a menu state (Section 10): takes the
+- **`command`** -- fast. Takes a raw slash-command string (`/clear`, `/model`, `/compact`,
+  ...) and injects it verbatim. One generic tool, not one tool per command: Claude Code's
+  command set is open-ended (skills, plugins, project commands), so hardcoding a manifest
+  entry per command would go stale immediately. The description prose names the handful of
+  common ones and says any `/command` the user asks for can be passed through; whatever UI
+  the command opens is handled by the state machine (Section 9). Optionally paired with a
+  `read_only` `list_commands` that scrapes the available commands so the brain can answer
+  "what can it do" -- deferrable until asked for.
+- **`select_option`** -- fast. Used when the pane is in a menu state (Section 9): takes the
   chosen option's text, and the Bridge translates it into the right arrow-key presses +
   Enter itself. The brain never counts keystrokes.
 - **`press_key`** -- fast, low-level fallback: one of a small enum (escape, up, down, enter,
@@ -178,7 +186,38 @@ and returns them in `data` so the brain can read them out; selection then goes t
 (Section 3). If a `long_task` arrives while state is `menu`, the Bridge refuses it with a
 result explaining what's on screen instead of typing into the menu.
 
-## 10. Open questions for the new repo
+**The queue is part of state.** Claude Code natively queues input submitted while it's
+mid-turn (queued messages render below the input box), so a `long_task` arriving in
+`working` state is *not* an error -- the Bridge injects it and immediately reports "queued
+behind the current task" as a partial. But the brain must be able to see that queue, or it
+can't explain why nothing is coming back quickly. Queued items live only on screen, never
+in the transcript, so they're read from the same `capture-pane` snapshots as menus, and
+`data.queue` (the list of pending queued instructions) rides along with `data.state` on
+every result, partial, and `check_status` response.
+
+## 10. What enters the voice brain's context
+
+The Bridge fully controls what the brain ever sees of Claude Code, and the design goal is
+a *thin* brain context: CC's own session (reachable via `handle`) is the durable, verbose
+memory; the brain holds only enough to converse about the work. Everything that crosses
+the boundary, exhaustively:
+
+- the tool manifest descriptions (static prose, written once)
+- `speak` fields -- one or two sentences each
+- `data` -- state, queue, files touched, test outcome, last milestone; small named facts
+- `tool_progress` notes -- short free-text checkpoints
+
+Never: raw transcripts, diffs, logs, file contents, or CC's tool-call dumps. The 16 KiB
+terminal / 2 KiB partial caps enforce a ceiling, but the target is far below them --
+per-result payloads in the low hundreds of bytes, because every byte lands in the brain's
+context permanently and voice conversations are long-lived.
+
+When the user genuinely wants detail ("what exactly did it change?"), the answer is not to
+ship traces -- it's a follow-up `long_task` asking CC itself to summarize ("describe what
+you changed in two sentences"). CC already holds the full context, is good at compressing
+it, and the answer comes back through the same thin `speak` channel.
+
+## 11. Open questions for the new repo
 
 - Whether `check_status` is worth building now or deferred until real usage shows the brain
   needs it.
