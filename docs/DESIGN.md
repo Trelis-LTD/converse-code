@@ -50,7 +50,14 @@ Following the documented shape exactly:
   progress questions or added instructions, ask if ambiguous.
 - **`check_status`** *(optional, recommended)* -- `read_only: true`. Lets the broker fire it
   speculatively/early for "how's it going?" without waiting for turn commit. Returns
-  whatever the last `tool_progress` note said, cheaply, without touching the CC session.
+  whatever the last progress checkpoint said plus the current pane state (see Section 10),
+  cheaply, without touching the CC session.
+- **`select_option`** -- fast. Used when the pane is in a menu state (Section 10): takes the
+  chosen option's text, and the Bridge translates it into the right arrow-key presses +
+  Enter itself. The brain never counts keystrokes.
+- **`press_key`** -- fast, low-level fallback: one of a small enum (escape, up, down, enter,
+  tab, ctrl-c, shift-tab). For anything the higher-level tools didn't anticipate. Its
+  description should steer the brain toward the high-level tools first.
 
 ## 4. Claude Code driver mechanics
 
@@ -71,9 +78,10 @@ Following the documented shape exactly:
   `PermissionRequest` hook, surface it as a `tool_progress` note or hold the call open, and
   only auto-approve if you've deliberately decided that's safe for this host (default:
   surface it, don't auto-approve).
-- **Stop**: `stop_long_task` maps to the Ctrl-C equivalent in the tmux pane (send the
-  interrupt keystroke), not killing the process -- matches "the host adapter owns the
-  mechanism" language in Section 4.
+- **Stop**: `stop_long_task` maps to sending Escape in the tmux pane -- that is Claude
+  Code's turn-interrupt. Not Ctrl-C (which clears the input line, or exits on a double
+  press) and never killing the process -- matches "the host adapter owns the mechanism"
+  language in Section 4 of the protocol docs.
 
 ## 5. Result shape (strict, per protocol Section 2)
 
@@ -95,20 +103,37 @@ Following the documented shape exactly:
 
 ## 6. Progress while CC works
 
-Send `tool_progress` notes (<=500 chars, <=12 per call) at meaningful checkpoints -- e.g.
-"running the test suite," "editing auth.py" -- pulled from the transcript tail, not raw
-tool-call dumps. These don't interrupt playback and don't resolve the call; the brain
-narrates them naturally only if asked ("how's it going?"). Don't try to stream every line --
-pick the moments worth mentioning.
+Two channels exist while a call is in flight (protocol docs Sections 3/3a); neither
+interrupts playback and neither resolves the call:
+
+- **`tool_progress`** -- free-text note, <=500 chars, <=12 per call. Available if the user
+  asks ("how's it going?"), otherwise silent.
+- **`tool_partial_result`** -- structured partial in the same `{speak, data, handle}` shape
+  as a terminal result, capped at 2 KiB each / 8 per call (much smaller than the 16 KiB
+  terminal cap -- never push diffs or logs through it). Optional `reply: true` makes the
+  broker proactively narrate that milestone right away, best-effort. Use `reply: true`
+  sparingly -- one or two genuine milestones per task ("tests passing", "done") -- and leave
+  it false (the default, surfaced on the next natural turn) for everything else.
+
+Pull checkpoints from the transcript tail, not raw tool-call dumps. Don't try to stream
+every line -- pick the moments worth mentioning.
+
+Barge/orphan semantics (protocol Section 4) are unchanged: a barge never cancels tool work,
+progress and partials keep landing after a barge, and a late terminal result still lands in
+context whenever it arrives.
 
 ## 7. Constraints to design around now, not later
 
-- **120s timeout ceiling**: the protocol caps tool timeout at 120s because the broker can't
-  yet recycle its STT stream while awaiting a tool (documented as the top item to fix before
-  "genuinely long tools"). A real coding task can easily exceed this. Until that's fixed
-  broker-side, design `long_task` to return *fast* with progress notes and a `handle`, and
-  let the brain issue a follow-up call to check on / continue the same session rather than
-  blocking one call for the full task duration.
+- **120s timeout ceiling**: `timeout` in the tool manifest is still hard-capped at 120s.
+  (The underlying STT-recycling blocker has been fixed broker-side -- rotation now happens
+  concurrently with an in-flight tool call -- but the cap is deliberately unchanged while
+  that mechanism soaks in production.) A real coding task can easily exceed 120s, so the
+  pattern is: hold `long_task` open for up to ~110s streaming partial results, resolve
+  early when the Stop hook fires, and otherwise resolve at the deadline with the `handle`
+  and a "still working" status so the brain can issue a follow-up call against the same
+  session. Note the in-flight call is also the Bridge's *only* push channel to the brain
+  -- there is no host-initiated message outside a call -- which is the other reason to keep
+  one open while CC works rather than resolving instantly and forcing the brain to poll.
 - **No stop keyword-matching** -- stopping is a judgement call made by the brain from
   context, expressed via the tool call, never via string-matching "stop" anywhere in the
   Bridge.
@@ -125,7 +150,35 @@ remote/phone viewing, a ttyd-over-Tailscale setup (bound to the tailnet IP, basi
 protected) attaches as a second read/write viewer of the same tmux session -- no separate
 mechanism needed.
 
-## 9. Open questions for the new repo
+## 9. TUI state machine
+
+Most of the Bridge's tools are instant keystroke/text injections -- the long-running thing
+is Claude Code itself, and Section 7's hold-open pattern covers that. What the Bridge must
+get right instead is *state*: several slash commands (`/model`, `/config`), permission
+prompts, and trust dialogs open interactive selectors that swallow the next keystrokes, so
+blindly `send-keys`ing a new instruction would type it into a menu.
+
+Minimum viable states:
+
+- **idle** -- prompt ready, safe to inject text or slash commands
+- **working** -- CC is mid-turn (between input injection and the Stop hook firing)
+- **menu** -- an interactive selector or dialog is open (model picker, permission prompt,
+  trust dialog, ...)
+
+Detection: the JSONL transcript + Stop hook cover idle<->working, but menus never touch the
+transcript -- detect them from `tmux capture-pane` snapshots (menus have a stable visual
+signature: an option list with a selection cursor). This is the one place screen-scraping
+is unavoidable, and it's scraping for *structure* (which options exist, which is
+highlighted), not for CC's prose output.
+
+Every tool result and partial carries `data.state`, so the brain always knows what it's
+talking to. When a menu opens, the Bridge parses the visible options from the pane capture
+and returns them in `data` so the brain can read them out; selection then goes through
+`select_option` (high-level, by option text) with `press_key` as the low-level fallback
+(Section 3). If a `long_task` arrives while state is `menu`, the Bridge refuses it with a
+result explaining what's on screen instead of typing into the menu.
+
+## 10. Open questions for the new repo
 
 - Whether `check_status` is worth building now or deferred until real usage shows the brain
   needs it.
