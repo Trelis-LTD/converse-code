@@ -14,8 +14,7 @@ def rewrite_start_frame(
     page_frame: dict, api_key: str, session_id: str, tools: list[dict]
 ) -> dict:
     """Turn the page's start frame into ours, preserving what it chose."""
-    frame = dict(page_frame)
-    frame["type"] = "start"
+    frame = dict(page_frame)   # callers gate on is_start(), so "type" is already right
     frame["api_key"] = api_key
     frame["session_id"] = session_id
 

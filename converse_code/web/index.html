@@ -313,7 +313,11 @@
       }
       case "done": { freezeAssistant(); freezeYou(); break; }
       case "interrupted": { freezeAssistant(); break; }
-      case "bye": { addBanner("Session ended" + (ev.reason ? (": " + ev.reason) : "")); break; }
+      case "bye": {
+        addBanner("Session ended" + (ev.reason ? (": " + ev.reason) : "") + " — click the mic to start again.");
+        resetSession();
+        break;
+      }
       case "error": {
         console.debug("client error", ev);
         addBanner("Voice error: " + (ev.error && ev.error.message ? ev.error.message : "see console"));
@@ -321,6 +325,17 @@
       }
       default: break;   // audio frames and everything else: the client handles it
     }
+  }
+
+  // Without this, a session that ends (bye, or a broker-side error) leaves the
+  // old client cached, so startSession() hands the dead one back and clicking the
+  // mic does nothing until the page is manually reloaded.
+  function resetSession(){
+    try{ if(client) client.close(); }catch(e){}
+    client = null;
+    micActive = false;
+    micBtn.classList.remove("live");
+    micLabel.textContent = "off";
   }
 
   function startSession(){

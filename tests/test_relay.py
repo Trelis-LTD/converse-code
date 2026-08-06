@@ -56,6 +56,8 @@ def test_the_pages_frame_is_not_mutated():
 
 def test_missing_mode_and_audio_get_sane_defaults():
     frame = rewrite_start_frame({"type": "start"}, "ck_x", "s1", manifest())
+    assert frame["type"] == "start"
+    assert [t["name"] for t in frame["mode"]["tools"]] == [t["name"] for t in manifest()]
     assert frame["mode"]["kind"] == "converse"
     assert frame["audio"]["sr"] == 16000
     assert frame["audio"]["output_encoding"] == "pcm16"
