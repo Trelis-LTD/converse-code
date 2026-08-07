@@ -181,13 +181,16 @@ class ToolRouter:
         except Exception:
             log.exception("tool %s failed", name)
             content = self._result("Something went wrong driving Claude Code; the session itself is still alive.")
+        # The host work is complete before its result crosses the network. Stop
+        # treating it as cancellable now, so a late cancel cannot press Escape
+        # against a queued/following Claude turn while this send is in flight.
+        if self._active_call_id == call_id:
+            self._active_call_id = None
         if call_id in self._server_canceled:
             self._server_canceled.discard(call_id)
             self._interrupted = False
         else:
             await self.sender.send_tool_result(call_id, content)
-        if self._active_call_id == call_id:
-            self._active_call_id = None
         await self._push_status()
 
     async def handle_tool_cancel(self, call: dict) -> None:

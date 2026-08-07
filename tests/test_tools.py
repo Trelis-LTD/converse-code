@@ -161,6 +161,34 @@ async def test_server_tool_cancel_ignores_an_unrelated_call(router, fake_driver)
     await t1
 
 
+async def test_cancel_is_ignored_once_completed_result_is_being_sent(
+    router, fake_driver, fake_sender,
+):
+    sending = asyncio.Event()
+    release = asyncio.Event()
+    original_send = fake_sender.send_tool_result
+
+    async def blocked_send(call_id, content):
+        sending.set()
+        await release.wait()
+        await original_send(call_id, content)
+
+    fake_sender.send_tool_result = blocked_send
+    task = asyncio.create_task(router.handle_tool_call(
+        {"id": "c1", "name": "long_task", "args": {"request": "quick task"}}
+    ))
+    await asyncio.sleep(0.1)
+    await router.on_hook("stop", {"last_assistant_message": "Done."})
+    await sending.wait()
+
+    await router.handle_tool_cancel({"type": "tool_cancel", "id": "c1"})
+    release.set()
+    await task
+
+    assert fake_driver.keys == []
+    assert fake_sender.results[0][1]["speak"] == "Done."
+
+
 async def test_canceled_turn_does_not_suppress_the_next_terminal_completion(
     router, fake_sender,
 ):
