@@ -313,7 +313,13 @@
       }
       case "error": {
         console.debug("client error", ev);
-        addBanner("Voice error: " + (ev.error && ev.error.message ? ev.error.message : "see console"));
+        var detail = ev.detail || (ev.error && ev.error.message) || "unknown error";
+        if(ev.retryable){
+          addBanner("Voice error: " + detail + ". Click the mic to reconnect.");
+          resetSession();
+        } else {
+          addBanner("Voice error: " + detail);
+        }
         break;
       }
       default: break;   // audio frames and everything else: the client handles it
@@ -341,7 +347,7 @@
         // start frame; nothing secret is ever handed to the browser.
         apiKey: "relayed-by-converse-code",
         sessionId: mod.createSessionId(),
-        mode: {kind: "converse", web_search: false}
+        mode: {kind: "converse", voice: "classic", web_search: false}
       });
       client.addEventListener("event", function(e){ renderEvent(e.detail || {}); });
       return client.unlockAudio()

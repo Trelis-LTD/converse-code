@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 CHECK = Path(__file__).parent / "web_audio_check.mjs"
+PAGE = Path(__file__).parents[1] / "converse_code" / "web" / "index.html"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
@@ -24,3 +25,12 @@ def test_web_audio_resamplers():
     assert "page uses the SDK ConverseClient: OK" in proc.stdout
     assert "SDK codec: PCM16 both directions: OK" in proc.stdout
     assert "SDK resampler: continuous across chunks: OK" in proc.stdout
+
+
+def test_voice_session_pins_classic_and_explains_retryable_pipeline_errors():
+    page = PAGE.read_text()
+
+    assert 'voice: "classic"' in page
+    assert 'ev.detail ||' in page
+    assert "ev.retryable" in page
+    assert "Click the mic to reconnect" in page
