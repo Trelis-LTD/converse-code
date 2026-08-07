@@ -5,6 +5,7 @@
     constructor(view){
       this.view = view;
       this.entries = new Map();
+      this.interruptedTurns = new Map();
       this.currentTurnId = null;
       this.anonymousSequence = 0;
     }
@@ -28,6 +29,7 @@
 
     reset(){
       this.entries.clear();
+      this.interruptedTurns.clear();
       this.currentTurnId = null;
     }
 
@@ -48,7 +50,10 @@
           break;
         }
         case "utterance": {
-          var utteranceId = this._turnId(event, true);
+          var correctionId = event.barge_seq != null
+            ? this.interruptedTurns.get(String(event.barge_seq))
+            : null;
+          var utteranceId = correctionId || this._turnId(event, true);
           var utteranceState = this._entry(utteranceId);
           utteranceState.text = this.view.pickText(event);
           this.view.setText(utteranceState.element, utteranceState.text);
@@ -57,6 +62,9 @@
         case "done":
         case "interrupted": {
           var finishedId = this._turnId(event, false);
+          if(finishedId && event.barge_seq != null){
+            this.interruptedTurns.set(String(event.barge_seq), finishedId);
+          }
           if(!finishedId || finishedId === this.currentTurnId) this.currentTurnId = null;
           break;
         }

@@ -16,7 +16,12 @@ const transcript = new globalThis.AssistantTranscript({
 transcript.handle({ type: "turn", turn_id: "turn-1" });
 transcript.handle({ type: "text_delta", turn_id: "turn-1", delta: "It's a lovely day to be chatting." });
 transcript.handle({ type: "interrupted", turn_id: "turn-1", barge_seq: 3 });
-transcript.handle({ type: "utterance", turn_id: "turn-1", text: "It's a lovely day to be chattin [interrupted]" });
+// The corrected event is identified by interruption sequence in the browser
+// protocol and does not reliably repeat the original turn_id.
+transcript.handle({
+  type: "utterance", barge_seq: 3,
+  text: "It's a lovely day to be chattin [interrupted]",
+});
 
 if (rows.length !== 1) {
   throw new Error(`corrected interrupted turn created ${rows.length} rows instead of replacing one`);

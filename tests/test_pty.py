@@ -9,6 +9,20 @@ import pytest
 from converse_code.ptyhost import ClaudeHost
 from converse_code.screen import detect_menu
 
+
+SIZE_REPORTER = str(Path(__file__).parent / "print_terminal_size.py")
+
+
+async def test_child_sees_requested_terminal_size_on_its_first_paint():
+    host = ClaudeHost(
+        [sys.executable, SIZE_REPORTER], attach_terminal=False, cols=91, rows=27
+    )
+
+    await host.start()
+    await asyncio.wait_for(host.exited.wait(), 5)
+
+    assert any("91x27" in line for line in host.snapshot())
+
 FAKE_TUI = str(Path(__file__).parent / "fake_tui.py")
 
 

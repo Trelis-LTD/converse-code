@@ -74,8 +74,17 @@ class ClaudeHost:
         if self.attach_terminal:
             cols, rows = os.get_terminal_size()
             self._screen.resize(rows, cols)
+        else:
+            cols, rows = self._screen.columns, self._screen.lines
         pid, master_fd = pty.fork()
         if pid == 0:  # child
+            # Set the slave PTY size before exec, so Claude's very first TUI
+            # paint sees the real dimensions. Waiting for the parent's later
+            # SIGWINCH can leave the initial screen clipped until a relaunch.
+            fcntl.ioctl(
+                0, termios.TIOCSWINSZ,
+                struct.pack("HHHH", rows, cols, 0, 0),
+            )
             env = dict(os.environ if self.env is None else self.env)
             # If converse-code itself was launched from inside a Claude Code
             # session, the inherited child-session marker makes the wrapped

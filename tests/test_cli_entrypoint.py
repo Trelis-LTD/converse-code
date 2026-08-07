@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from converse_code.cli import _configure_logging
+from converse_code.cli import DEFAULT_CLAUDE_CMD, _configure_logging
 
 ENTRY = [sys.executable, "-m", "converse_code.cli"]
 
@@ -27,6 +27,10 @@ def test_help_works():
     assert proc.returncode == 0
     assert "Talk to Claude Code by voice" in proc.stdout
     assert "--record-audio" in proc.stdout
+
+
+def test_default_claude_command_uses_auto_permission_mode():
+    assert DEFAULT_CLAUDE_CMD == "claude --permission-mode auto"
 
 
 def test_startup_checks_credentials_before_launching_claude():
