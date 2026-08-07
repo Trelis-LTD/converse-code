@@ -40,6 +40,7 @@ async def main() -> None:
         server.hook_url("stop"),
         server.hook_url("user_prompt_submit"),
         server.hook_url("permission_request"),
+        server.hook_url("stop_failure"),
     )
 
     host = ClaudeHost(
@@ -106,6 +107,8 @@ async def main() -> None:
                 print("\n".join(line for line in host.snapshot() if line.strip()))
         print("menu navigation:", "PASS" if menu_ok else "FAIL")
         print("REAL-CLAUDE SMOKE:", "PASS" if ok and menu_ok else "FAIL")
+        if not (ok and menu_ok):
+            raise RuntimeError("real Claude smoke assertions failed")
     finally:
         host.inject("/exit")
         try:

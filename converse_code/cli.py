@@ -95,6 +95,7 @@ async def _run(args) -> int:
         server.hook_url("stop"),
         server.hook_url("user_prompt_submit"),
         server.hook_url("permission_request"),
+        server.hook_url("stop_failure"),
     )
     claude_argv = shlex.split(args.claude) + ["--settings", str(settings_path)]
     host = ClaudeHost(claude_argv, attach_terminal=not args.headless)

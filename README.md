@@ -77,8 +77,9 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full design spec.
   confirms that Claude accepted the prompt; swallowed submissions get two bounded Enter retries
   instead of an open tool call that silently waits for minutes.
 - Claude Code's `Stop` hook resolves voice-started work and proactively wakes Converse when work
-  typed directly in the terminal finishes. A `PermissionRequest` hook wakes voice when terminal
-  work needs a menu decision, but never approves on the user's behalf.
+  typed directly in the terminal finishes. `StopFailure` resolves errors immediately rather than
+  waiting for the long tool deadline. A `PermissionRequest` hook wakes voice when terminal work
+  needs a menu decision, but never approves on the user's behalf.
 - Trust dialogs, model pickers, and permission menus are detected from the rendered terminal
   structure. Prompt-history cursors are excluded so a closed menu cannot be mistaken for an open
   one. Converse's managed pending-job cancellation interrupts only the matching Claude turn.

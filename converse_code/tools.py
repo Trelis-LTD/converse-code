@@ -121,6 +121,7 @@ class ToolRouter:
         self._submit_lock = asyncio.Lock()
         self._prompt_submitted = asyncio.Event()
         self._expected_prompt: str | None = None
+        self._turn_failure = ""
         self.on_status = None  # async callback(dict) → browser tab
 
     # -- events from the Stop hook -------------------------------------------
@@ -136,6 +137,9 @@ class ToolRouter:
             # promptly, then inspect the settled screen and wake voice only for
             # terminal-originated work; an open long_task already polls menus.
             asyncio.create_task(self._announce_permission_request(payload))
+            return
+        if event == "stop_failure":
+            await self._on_stop_failure(payload)
             return
         if event != "stop":
             return
@@ -168,6 +172,22 @@ class ToolRouter:
         await self._push_status()
         if not voice_call_was_waiting and not suppress_notification:
             await self._wake_voice_for_terminal_turn(hook_text)
+
+    async def _on_stop_failure(self, payload: dict) -> None:
+        waiting = self._active_call_id is not None
+        detail = payload.get("error_details") or payload.get("error") or "unknown Claude error"
+        self._turn_failure = str(detail)
+        self.working = False
+        self.queue.clear()
+        self._turn_done.set()
+        await self._push_status()
+        if not waiting:
+            await self.sender.send_context(
+                f"Claude Code stopped because of an error: {self._turn_failure}. "
+                "Tell the user briefly and suggest trying again after fixing the error.",
+                role="context",
+                reply=True,
+            )
 
     async def _wake_voice_for_terminal_turn(self, hook_text: str = "") -> None:
         """Narrate a turn that did not originate from an open voice tool call.
@@ -303,6 +323,7 @@ class ToolRouter:
             self._interrupted = False
             self._turn_done.clear()
             self.last_assistant_text = ""
+            self._turn_failure = ""
             self._active_call_id = call_id
             self._ensure_transcript()
             start_offset, start_path = self._offset, self.transcript_path
@@ -367,6 +388,9 @@ class ToolRouter:
             if self._turn_done.is_set():
                 if self._interrupted:
                     return self._result("Stopped — the task was interrupted before finishing.")
+                if self._turn_failure:
+                    detail, self._turn_failure = self._turn_failure, ""
+                    return self._result(f"Claude Code stopped because of an error: {detail}")
                 return self._turn_result(start_offset, start_path)
 
             menu = self.menu()

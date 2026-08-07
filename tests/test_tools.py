@@ -71,6 +71,22 @@ async def test_long_task_falls_back_to_hook_message(router, fake_sender):
     assert fake_sender.results[0][1]["speak"] == "pong"
 
 
+async def test_long_task_resolves_immediately_on_claude_stop_failure(router, fake_sender):
+    task = asyncio.create_task(router.handle_tool_call(
+        {"id": "c1", "name": "long_task", "args": {"request": "quick thing"}}
+    ))
+    await asyncio.sleep(0.05)
+    await router.on_hook("stop_failure", {
+        "error": "authentication_failed",
+        "error_details": "Claude session expired",
+    })
+    await task
+
+    content = fake_sender.results[0][1]
+    assert "Claude session expired" in content["speak"]
+    assert content["data"]["state"] == "idle"
+
+
 async def test_long_task_emits_progress_notes(router, fake_sender):
     async def work():
         await asyncio.sleep(0.2)
@@ -290,6 +306,17 @@ async def test_permission_hook_does_not_announce_auto_mode_denial(router, fake_s
     await asyncio.sleep(router.SETTLE_S * 2)
 
     assert fake_sender.context == []
+
+
+async def test_stop_failure_wakes_voice_for_terminal_typed_work(router, fake_sender):
+    await router.on_hook("stop_failure", {
+        "error": "rate_limit",
+        "error_details": "Try again later",
+    })
+
+    assert fake_sender.context
+    assert "Try again later" in fake_sender.context[0][0]
+    assert fake_sender.context[0][2] is True
 
 
 async def test_terminal_completion_does_not_reuse_stale_voice_result(router, fake_sender):

@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 def write_settings(dir_path: str | Path, stop_url: str, prompt_submit_url: str,
-                   permission_request_url: str) -> Path:
+                   permission_request_url: str, stop_failure_url: str) -> Path:
     def http_hook(url: str) -> dict:
         return {"type": "http", "url": url, "timeout": 5}
 
@@ -24,6 +24,7 @@ def write_settings(dir_path: str | Path, stop_url: str, prompt_submit_url: str,
             "Stop": [{"hooks": [http_hook(stop_url)]}],
             "UserPromptSubmit": [{"hooks": [http_hook(prompt_submit_url)]}],
             "PermissionRequest": [{"hooks": [http_hook(permission_request_url)]}],
+            "StopFailure": [{"hooks": [http_hook(stop_failure_url)]}],
         }
     }
     path = Path(dir_path) / "converse-code-settings.json"
