@@ -145,6 +145,7 @@ async def _run(args) -> int:
     else:
         client.on_audio = server.send_audio_to_proxy
     client.on_tool_call = lambda call: _spawn_tool(router, call)
+    client.on_tool_cancel = router.handle_tool_cancel
 
     print(f"Converse Code — voice tab: {url}   (session: {handle})")
     print(f"Logs: {LOG_PATH}")
