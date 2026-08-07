@@ -2,7 +2,7 @@
 (converse.trelis.com/docs/api/websocket/). No SDK — the wire contract is small:
 
   up:   start frame (audio 16k PCM16 + mode.tools), binary mic frames,
-        tool_result / tool_progress / tool_partial_result / tool_cancel,
+        tool_result / tool_progress / tool_cancel / inject_context,
         client_event (playback_stopped), auth (validation only)
   down: tool_call, binary PCM16 assistant-audio frames (see audio.py — the
         encoding is pinned in the start frame, not inferred), asr / turn /
@@ -50,6 +50,7 @@ class BrokerClient:
         self.url = url
         self.client_info = client_info or {}
         self.on_tool_call: Callable[[dict], Awaitable[None]] | None = None
+        self.on_tool_cancel: Callable[[dict], Awaitable[None]] | None = None
         self.on_json: Callable[[dict], Awaitable[None]] | None = None  # non-tool messages
         self.on_audio: Callable[[bytes], Awaitable[None]] | None = None
         self.closed = asyncio.Event()
@@ -100,6 +101,8 @@ class BrokerClient:
                     continue
                 if data.get("type") == "tool_call" and self.on_tool_call:
                     await self.on_tool_call(data)
+                elif data.get("type") == "tool_cancel" and self.on_tool_cancel:
+                    await self.on_tool_cancel(data)
                 elif self.on_json:
                     await self.on_json(data)
         except websockets.ConnectionClosed as exc:
@@ -127,9 +130,6 @@ class BrokerClient:
     async def send_tool_result(self, call_id: str, content: dict) -> None:
         await self._send({"type": "tool_result", "id": call_id, "content": content})
 
-    async def send_tool_partial_result(self, call_id: str, content: dict, reply: bool = False) -> None:
-        await self._send({"type": "tool_partial_result", "id": call_id, "content": content, "reply": reply})
-
     async def send_tool_progress(self, call_id: str, note: str) -> None:
         await self._send({"type": "tool_progress", "id": call_id, "note": note[:500]})
 
@@ -138,6 +138,15 @@ class BrokerClient:
 
     async def send_client_event(self, event: str, **fields) -> None:
         await self._send({"type": "client_event", "event": event, **fields})
+
+    async def send_context(self, text: str, role: str = "context", reply: bool = False) -> None:
+        """Push host context into the conversation and optionally trigger a reply."""
+        await self._send({
+            "type": "inject_context",
+            "text": text[:2000],
+            "role": role,
+            "reply": reply,
+        })
 
     async def send_raw(self, payload: dict | bytes) -> None:
         """Relay a frame from the browser's SDK client straight through."""

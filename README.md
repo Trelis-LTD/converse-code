@@ -56,5 +56,8 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the full design spec.
 
 - Nothing about voice reaches Claude Code directly; nothing about Claude Code's raw
   output reaches the user directly. `converse-code` translates in both directions.
+- Claude Code's `Stop` hook resolves voice-started work and proactively wakes Converse
+  when work typed directly in the terminal finishes. Converse's managed pending-job
+  cancellation interrupts the matching Claude turn with Escape.
 - Built entirely against the public Converse tool contract
   (`converse.trelis.com/docs/api/websocket/#tools`).

@@ -1,4 +1,4 @@
-"""The five Converse tools and the idle/working/menu state machine.
+"""The Converse tools and the idle/working/menu state machine.
 
 Everything the voice brain can do to Claude Code goes through here; everything
 it learns comes back as small {speak, data, handle} payloads (see DESIGN.md
@@ -29,14 +29,7 @@ LONG_TASK_DESCRIPTION = (
     "function names, flags, error text — compress filler, never editorialize. If Claude "
     "Code is already working, the instruction is queued behind the current task. Not for "
     "questions about progress (the latest status arrives with each result) and not for "
-    "stopping work (use stop_long_task)."
-)
-
-STOP_DESCRIPTION = (
-    "Interrupt Claude Code's current task immediately. This loses unfinished work — use it "
-    "only when the user clearly wants the work stopped or redirected, never for progress "
-    "questions or for adding instructions (long_task queues those safely). If it is "
-    "ambiguous whether the user wants to stop, ask them first."
+    "stopping work (Converse manages cancellation of the pending job)."
 )
 
 COMMAND_DESCRIPTION = (
@@ -75,8 +68,8 @@ def manifest() -> list[dict]:
     return [
         tool("long_task", LONG_TASK_DESCRIPTION,
              {"request": {"type": "string", "description": "The coding instruction."}},
-             ["request"], requires_permission=True, timeout=TOOL_TIMEOUT_S),
-        tool("stop_long_task", STOP_DESCRIPTION, timeout=15),
+             ["request"], requires_permission=True, timeout=TOOL_TIMEOUT_S,
+             status_label="Claude Code task"),
         tool("command", COMMAND_DESCRIPTION,
              {"command": {"type": "string", "description": "Slash command, starting with '/'."}},
              ["command"], timeout=15),
@@ -97,7 +90,7 @@ class ToolRouter:
 
     def __init__(self, driver, sender, handle: str, project_dir: str | Path | None = None):
         """driver: ClaudeHost-like (inject/send_key/snapshot).
-        sender: BrokerClient-like (send_tool_result/_partial_result/_progress)."""
+        sender: BrokerClient-like (tool results/progress and context injection)."""
         self.driver = driver
         self.sender = sender
         self.handle = handle
@@ -110,6 +103,9 @@ class ToolRouter:
         self._offset = 0
         self._turn_done = asyncio.Event()
         self._interrupted = False
+        self._active_call_id: str | None = None
+        self._server_canceled: set[str] = set()
+        self._suppress_next_stop_notification = False
         self.on_status = None  # async callback(dict) → browser tab
 
     # -- events from the Stop hook -------------------------------------------
@@ -117,6 +113,9 @@ class ToolRouter:
     async def on_hook(self, event: str, payload: dict) -> None:
         if event != "stop":
             return
+        voice_call_was_waiting = self._active_call_id is not None
+        suppress_notification = self._suppress_next_stop_notification
+        self._suppress_next_stop_notification = False
         # The hook tells us authoritatively which session/file is ours; that
         # replaces the mtime guess _ensure_transcript had to make beforehand.
         session_id = payload.get("session_id")
@@ -131,8 +130,9 @@ class ToolRouter:
         # The Stop hook can fire before the final assistant entry is flushed to
         # the transcript file — the payload carries the text directly.
         msg = payload.get("last_assistant_message")
-        if isinstance(msg, str) and msg.strip():
-            self.last_assistant_text = msg.strip()
+        hook_text = msg.strip() if isinstance(msg, str) and msg.strip() else ""
+        if hook_text:
+            self.last_assistant_text = hook_text
         if self.queue:
             self.queue.pop(0)  # next queued instruction starts automatically
             self.working = True
@@ -140,6 +140,27 @@ class ToolRouter:
             self.working = False
         self._turn_done.set()
         await self._push_status()
+        if not voice_call_was_waiting and not suppress_notification:
+            await self._wake_voice_for_terminal_turn(hook_text)
+
+    async def _wake_voice_for_terminal_turn(self, hook_text: str = "") -> None:
+        """Narrate a turn that did not originate from an open voice tool call.
+
+        `inject_context` is the Converse host-push path: context is added without
+        pretending the user said it, and reply=True asks the voice brain to wake
+        and briefly report the completion.
+        """
+        text = hook_text
+        if not text:
+            entries, self._offset = self._read_from(self._offset)
+            text = tmod.summarize_entries(entries).text
+        summary = tmod.speak_summary(text) if text else "Claude Code finished the terminal task."
+        await self.sender.send_context(
+            "Claude Code finished work entered directly in the terminal. "
+            f"Briefly tell the user it finished and summarize this update: {summary}",
+            role="context",
+            reply=True,
+        )
 
     # -- dispatch --------------------------------------------------------------
 
@@ -147,7 +168,6 @@ class ToolRouter:
         name, call_id, args = call.get("name"), call.get("id"), call.get("args") or {}
         handlers = {
             "long_task": self._long_task,
-            "stop_long_task": self._stop_long_task,
             "command": self._command,
             "select_option": self._select_option,
             "press_key": self._press_key,
@@ -161,7 +181,27 @@ class ToolRouter:
         except Exception:
             log.exception("tool %s failed", name)
             content = self._result("Something went wrong driving Claude Code; the session itself is still alive.")
-        await self.sender.send_tool_result(call_id, content)
+        if call_id in self._server_canceled:
+            self._server_canceled.discard(call_id)
+            self._interrupted = False
+        else:
+            await self.sender.send_tool_result(call_id, content)
+        if self._active_call_id == call_id:
+            self._active_call_id = None
+        await self._push_status()
+
+    async def handle_tool_cancel(self, call: dict) -> None:
+        """Honor Converse's managed cancellation for the matching pending job."""
+        call_id = call.get("id")
+        if not call_id or call_id != self._active_call_id:
+            return
+        self._server_canceled.add(call_id)
+        self._interrupted = True
+        self._suppress_next_stop_notification = True
+        self.driver.send_key("escape")
+        self.working = False
+        self.queue.clear()
+        self._turn_done.set()
         await self._push_status()
 
     # -- state ------------------------------------------------------------------
@@ -217,6 +257,7 @@ class ToolRouter:
         self._interrupted = False
         self._turn_done.clear()
         self.last_assistant_text = ""
+        self._active_call_id = call_id
         self._ensure_transcript()
         return await self._await_turn(call_id, self._offset, self.transcript_path)
 
@@ -225,7 +266,6 @@ class ToolRouter:
         Stop hook, a menu appearing, interruption, or the hold deadline."""
         deadline = asyncio.get_running_loop().time() + self.HOLD_S
         sent_progress = 0
-        sent_midway_partial = False
         while True:
             try:
                 await asyncio.wait_for(self._turn_done.wait(), timeout=self.POLL_S)
@@ -251,15 +291,10 @@ class ToolRouter:
                         break
 
             now = asyncio.get_running_loop().time()
-            if not sent_midway_partial and now > deadline - self.HOLD_S / 2:
-                await self.sender.send_tool_partial_result(
-                    call_id, self._result("Still working."), reply=False
-                )
-                sent_midway_partial = True
             if now >= deadline:
                 return self._result(
-                    "Still working on it — this is taking a while. Call long_task again with "
-                    "a follow-up (or just to keep waiting) using the same handle."
+                    "Still working on it — this is taking a while. Completion will be "
+                    "announced automatically; no follow-up call is needed just to wait."
                 )
 
     def _turn_result(self, start_offset: int, start_path) -> dict:
@@ -276,16 +311,6 @@ class ToolRouter:
         if summary.files:
             extra["files"] = summary.files[:10]
         return self._result(speak, **extra)
-
-    async def _stop_long_task(self, _call_id: str, _args: dict) -> dict:
-        if not self.working and not self.queue:
-            return self._result("Nothing is running.")
-        self._interrupted = True
-        self.driver.send_key("escape")
-        self.working = False
-        self.queue.clear()
-        self._turn_done.set()
-        return self._result("Stopped. Unfinished work from that task is discarded.")
 
     async def _command(self, _call_id: str, args: dict) -> dict:
         cmd = (args.get("command") or "").strip()

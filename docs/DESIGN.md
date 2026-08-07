@@ -71,7 +71,7 @@ directly; voice for intent, keyboard for precision.
                            |
                            |  ONE Converse WebSocket carrying both the audio
                            |  stream and the tool protocol (start / tool_call /
-                           |  tool_result / tool_progress / tool_partial_result /
+                           |  tool_result / tool_progress /
                            |  tool_cancel)
                            v
               Converse broker (unchanged)
@@ -101,12 +101,8 @@ Following the documented shape exactly:
 - **`long_task`** -- `requires_permission: true`, `timeout: 600` (the protocol's current
   hard cap -- see Section 8 below). Description field carries the *guidance prose* the brain
   uses to decide when to call it, including the preserve-the-user's-technical-wording
-  instruction from Section 2.
-- **`stop_long_task`** -- fast tool, no permission gate needed (interrupting is generally
-  lower-risk than starting), used only when the *brain* judges the user actually wants work
-  stopped (never fired on a bare barge -- barge only stops speech, per Section 4 of the protocol).
-  Its description prose should state plainly: this loses unfinished work, don't use it for
-  progress questions or added instructions, ask if ambiguous.
+  instruction from Section 2. Its `status_label` is `Claude Code task`, which Converse can
+  use when the user asks about the managed pending job.
 - **`check_status`** *(optional, recommended)* -- `read_only: true`. Lets the broker fire it
   speculatively/early for "how's it going?" without waiting for turn commit. Returns
   whatever the last progress checkpoint said plus the current screen state (see Section 10),
@@ -153,10 +149,9 @@ Following the documented shape exactly:
   answers it via `select_option` -- the user hears "it wants to run pytest, allow it?" and
   says yes. A `PermissionRequest` hook (for reliability/latency) and any scoped
   auto-approve list are later hardening, not MVP surface. Never auto-approve by default.
-- **Stop**: `stop_long_task` maps to writing Escape to the pty -- that is Claude Code's
-  turn-interrupt. Not Ctrl-C (which clears the input line, or exits on a double press) and
-  never killing the process -- matches "the host adapter owns the mechanism" language in
-  Section 4 of the protocol docs.
+- **Stop**: Converse owns the semantic decision to cancel a pending job and sends the host
+  `tool_cancel` for that exact call. `converse-code` maps a matching cancellation to Escape,
+  Claude Code's turn-interrupt. It does not declare a duplicate generic stop tool.
 
 ## 6. Result shape (strict, per protocol Section 2)
 
@@ -178,24 +173,17 @@ Following the documented shape exactly:
 
 ## 7. Progress while CC works
 
-Two channels exist while a call is in flight (protocol docs Sections 3/3a); neither
-interrupts playback and neither resolves the call:
+One progress channel exists while a call is in flight; it neither interrupts playback nor
+resolves the call:
 
 - **`tool_progress`** -- free-text note, <=500 chars, <=12 per call. Available if the user
   asks ("how's it going?"), otherwise silent.
-- **`tool_partial_result`** -- structured partial in the same `{speak, data, handle}` shape
-  as a terminal result, capped at 2 KiB each / 8 per call (much smaller than the 16 KiB
-  terminal cap -- never push diffs or logs through it). Optional `reply: true` makes the
-  broker proactively narrate that milestone right away, best-effort. Use `reply: true`
-  sparingly -- one or two genuine milestones per task ("tests passing", "done") -- and leave
-  it false (the default, surfaced on the next natural turn) for everything else.
-
 Pull checkpoints from the transcript tail, not raw tool-call dumps. Don't try to stream
 every line -- pick the moments worth mentioning.
 
 Barge/orphan semantics (protocol Section 4) are unchanged: a barge never cancels tool work,
-progress and partials keep landing after a barge, and a late terminal result still lands in
-context whenever it arrives.
+progress keeps landing after a barge, and a late terminal result still lands in context
+whenever it arrives.
 
 ## 8. Constraints to design around now, not later
 
@@ -204,14 +192,20 @@ context whenever it arrives.
   accepted, 601+ is rejected with `invalid_tools`. So `long_task` holds open for up to 570s and
   most coding tasks now finish inside a single call, resolving early when the Stop hook fires.
   Tasks longer than that still resolve with the `handle` and a "still working" status for the
-  brain to follow up on. The in-flight call remains converse-code's only push channel to the
-  brain -- there is no host-initiated message outside a call -- which is the other reason to hold
-  one open while Claude Code works.
+  brain to follow up on. Holding the call is a pending-job lease, not 600 seconds of voice-brain
+  computation: Converse can keep talking and report its safe status label while Claude works.
+  Once that lease ends, completion is still delivered by `inject_context`, but Converse no
+  longer has the original pending-job ID for managed cancellation. Durable deferred jobs in
+  Converse would close that remaining gap; until then it affects only tasks beyond 570 seconds.
+- **Host-pushed completion**: a Claude `Stop` hook with no matching open voice call sends
+  `inject_context` with role `context` and `reply: true`. This wakes the voice brain for work
+  typed directly in the terminal, and also for a task that outlives its tool-call deadline.
+  Voice-started tasks resolve their existing call instead, so completion is never announced twice.
 - **No stop keyword-matching** -- stopping is a judgement call made by the brain from
   context, expressed via the tool call, never via string-matching "stop" anywhere in
   `converse-code`.
-- **A barge never cancels tool work** -- CC keeps running across a barge; only an explicit
-  `stop_long_task` call interrupts it.
+- **A barge never cancels tool work** -- CC keeps running across a barge. Only Converse's
+  explicit managed `tool_cancel` for the pending call interrupts it.
 
 ## 9. What enters the voice brain's context
 
@@ -270,7 +264,7 @@ mid-turn (queued messages render below the input box), so a `long_task` arriving
 queue, or it can't explain why nothing is coming back quickly. Queued items live only on
 screen, never in the transcript, so they're read from the same screen-buffer snapshots as
 menus, and `data.queue` (the list of pending queued instructions) rides along with
-`data.state` on every result, partial, and `check_status` response.
+`data.state` on every result and `check_status` response.
 
 ## 11. Later, not now
 
@@ -286,10 +280,10 @@ menus, and `data.queue` (the list of pending queued instructions) rides along wi
 
 ## 12. MVP surface (decided)
 
-Ship: `long_task`, `stop_long_task`, `command`, `select_option`, `press_key`. That's the
+Ship: `long_task`, `command`, `select_option`, `press_key`. That's the
 whole manifest.
 
-Deferred until real usage demands them: `check_status` (the hold-open call's partials
-already answer "how's it going?" for anything mid-task; add it only if dead-air gaps
+Deferred until real usage demands them: `check_status` (Converse already exposes managed
+pending-job status and receives progress; add it only if dead-air gaps
 between calls prove annoying), `list_commands`, the `PermissionRequest` hook, tmux
 persistence, Tailscale/remote, official-client pairing.

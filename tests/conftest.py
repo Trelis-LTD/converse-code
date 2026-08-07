@@ -27,17 +27,17 @@ class FakeSender:
 
     def __init__(self):
         self.results = []
-        self.partials = []
         self.progress = []
+        self.context = []
 
     async def send_tool_result(self, call_id, content):
         self.results.append((call_id, content))
 
-    async def send_tool_partial_result(self, call_id, content, reply=False):
-        self.partials.append((call_id, content, reply))
-
     async def send_tool_progress(self, call_id, note):
         self.progress.append((call_id, note))
+
+    async def send_context(self, text, role="context", reply=False):
+        self.context.append((text, role, reply))
 
 
 @pytest.fixture
