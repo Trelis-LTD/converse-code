@@ -92,6 +92,7 @@
   <span id="micHint">Click the mic and talk. Instructions appear in your terminal.</span>
   <span id="micLabel">off</span>
 </footer>
+<script src="/assistant-transcript.js"></script>
 <script>
 (function(){
   "use strict";
@@ -170,8 +171,6 @@
   }
 
   var currentYouEl = null;
-  var currentAssistantEl = null;
-  var assistantText = "";  // accumulates text_delta chunks for the live caption
 
   function makeEntry(kind, labelText){
     var div = document.createElement("div");
@@ -199,10 +198,6 @@
   function freezeYou(){
     currentYouEl = null;
   }
-  function freezeAssistant(){
-    currentAssistantEl = null;
-  }
-
   function addInjected(text){
     var el = makeEntry("inject", "→ sent to Claude Code");
     setBody(el, text);
@@ -228,6 +223,12 @@
     if(f === undefined) return false;
     return !!f;
   }
+
+  var assistantTranscript = new AssistantTranscript({
+    create: function(){ return makeEntry("assistant", "Assistant"); },
+    setText: setBody,
+    pickText: pickText
+  });
 
   // The /ws channel carries only converse-code's own status — Claude Code's
   // state, its queue, and the text injected into the terminal. Everything from
@@ -295,24 +296,16 @@
       }
       case "turn": {
         freezeYou();
-        currentAssistantEl = makeEntry("assistant", "Assistant");
-        assistantText = "";
+        assistantTranscript.handle(ev);
         break;
       }
-      case "text_delta": {
-        if(!currentAssistantEl){ currentAssistantEl = makeEntry("assistant", "Assistant"); assistantText = ""; }
-        assistantText += (ev.delta || "");
-        setBody(currentAssistantEl, assistantText);
+      case "text_delta":
+      case "utterance":
+      case "interrupted": {
+        assistantTranscript.handle(ev);
         break;
       }
-      case "utterance": {
-        if(!currentAssistantEl) currentAssistantEl = makeEntry("assistant", "Assistant");
-        assistantText = pickText(ev);
-        setBody(currentAssistantEl, assistantText);
-        break;
-      }
-      case "done": { freezeAssistant(); freezeYou(); break; }
-      case "interrupted": { freezeAssistant(); break; }
+      case "done": { assistantTranscript.handle(ev); freezeYou(); break; }
       case "bye": {
         addBanner("Session ended" + (ev.reason ? (": " + ev.reason) : "") + " — click the mic to start again.");
         resetSession();
@@ -332,6 +325,7 @@
   // mic does nothing until the page is manually reloaded.
   function resetSession(){
     try{ if(client) client.close(); }catch(e){}
+    assistantTranscript.reset();
     client = null;
     micActive = false;
     micBtn.classList.remove("live");
