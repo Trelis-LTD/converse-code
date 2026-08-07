@@ -90,7 +90,12 @@ async def _run(args) -> int:
 
     scratch = tempfile.mkdtemp(prefix="converse-code-")
     # --settings loads *additional* settings, so the dev's own hooks/config stay.
-    settings_path = hooks.write_settings(scratch, server.hook_url("stop"))
+    settings_path = hooks.write_settings(
+        scratch,
+        server.hook_url("stop"),
+        server.hook_url("user_prompt_submit"),
+        server.hook_url("permission_request"),
+    )
     claude_argv = shlex.split(args.claude) + ["--settings", str(settings_path)]
     host = ClaudeHost(claude_argv, attach_terminal=not args.headless)
 
@@ -99,7 +104,7 @@ async def _run(args) -> int:
         api_key, session_id=handle, tools=tools.manifest(), url=args.broker_url,
         client_info={"capabilities": []},
     )
-    router = tools.ToolRouter(host, client, handle=handle)
+    router = tools.ToolRouter(host, client, handle=handle, verify_submissions=True)
     router.on_status = server.send_json_to_tab
     server.on_hook = router.on_hook
 

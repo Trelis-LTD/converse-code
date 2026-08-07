@@ -4,8 +4,10 @@ verify the hook fires and the transcript-derived result comes back. Handles a
 trust dialog via the menu path if one appears."""
 
 import asyncio
+import os
 import sys
 import tempfile
+from pathlib import Path
 
 from converse_code.hooks import write_settings
 from converse_code.localserver import LocalServer
@@ -28,14 +30,31 @@ class Collector:
 
 
 async def main() -> None:
+    original_dir = Path.cwd()
+    project_dir = Path(tempfile.mkdtemp(prefix="cc-smoke-project-"))
+    os.chdir(project_dir)
     server = LocalServer()
     port = await server.start(port=0)
-    settings = write_settings(tempfile.mkdtemp(prefix="cc-smoke-"), server.hook_url("stop"))
+    settings = write_settings(
+        tempfile.mkdtemp(prefix="cc-smoke-"),
+        server.hook_url("stop"),
+        server.hook_url("user_prompt_submit"),
+        server.hook_url("permission_request"),
+    )
 
-    host = ClaudeHost(["claude", "--settings", str(settings)], attach_terminal=False)
+    host = ClaudeHost(
+        ["claude", "--permission-mode", "auto", "--settings", str(settings)],
+        attach_terminal=False,
+    )
     await host.start()
     sender = Collector()
-    router = ToolRouter(host, sender, handle="cc-smoke")
+    router = ToolRouter(
+        host,
+        sender,
+        handle="cc-smoke",
+        project_dir=project_dir,
+        verify_submissions=True,
+    )
     router.POLL_S = 1.0
     async def on_hook(event, payload):
         print(f"HOOK {event}: keys={sorted(payload)} transcript_path={payload.get('transcript_path')}")
@@ -62,10 +81,31 @@ async def main() -> None:
         print("data:", result["data"])
         print("progress notes:", sender.progress)
         ok = "pong" in result["speak"].lower() and result["data"]["state"] == "idle"
-        print("REAL-CLAUDE SMOKE:", "PASS" if ok else "FAIL")
+        print("prompt flow:", "PASS" if ok else "FAIL")
         if not ok:
             print("--- screen ---")
             print("\n".join(l for l in host.snapshot() if l.strip()))
+
+        await router.handle_tool_call({
+            "id": "model-menu", "name": "command", "args": {"command": "/model"},
+        })
+        menu_result = sender.results[-1]
+        menu = router.menu()
+        menu_ok = menu is not None and bool(menu.options)
+        print("model menu:", menu_result["speak"])
+        if menu_ok:
+            selected = menu.options[menu.selected]
+            await router.handle_tool_call({
+                "id": "model-select",
+                "name": "select_option",
+                "args": {"option": selected},
+            })
+            menu_ok = router.menu() is None
+            if not menu_ok:
+                print("--- screen after menu selection ---")
+                print("\n".join(line for line in host.snapshot() if line.strip()))
+        print("menu navigation:", "PASS" if menu_ok else "FAIL")
+        print("REAL-CLAUDE SMOKE:", "PASS" if ok and menu_ok else "FAIL")
     finally:
         host.inject("/exit")
         try:
@@ -73,6 +113,7 @@ async def main() -> None:
         except asyncio.TimeoutError:
             await host.stop()
         await server.stop()
+        os.chdir(original_dir)
 
 
 sys.exit(asyncio.run(main()))

@@ -34,3 +34,11 @@ def test_voice_session_pins_classic_and_explains_retryable_pipeline_errors():
     assert 'ev.detail ||' in page
     assert "ev.retryable" in page
     assert "Click the mic to reconnect" in page
+
+
+def test_voice_session_closes_after_its_final_reply():
+    page = PAGE.read_text()
+
+    assert 'msg.event === "end_session"' in page
+    assert "endAfterReply = true" in page
+    assert "finishEndSession" in page

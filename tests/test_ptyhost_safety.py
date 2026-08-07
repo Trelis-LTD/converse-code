@@ -1,12 +1,13 @@
 """Injection sanitization and terminal-state restoration."""
 
+import asyncio
 import os
 import sys
 from pathlib import Path
 
 import pytest
 
-from converse_code.ptyhost import MAX_INJECT_CHARS, ClaudeHost, sanitize
+from converse_code.ptyhost import INJECT_SUBMIT_DELAY_S, MAX_INJECT_CHARS, ClaudeHost, sanitize
 
 FAKE_TUI = str(Path(__file__).parent / "fake_tui.py")
 
@@ -31,6 +32,32 @@ def test_sanitize_keeps_ordinary_and_unicode_text():
 
 def test_sanitize_caps_length():
     assert len(sanitize("x" * (MAX_INJECT_CHARS + 500))) == MAX_INJECT_CHARS
+
+
+async def test_inject_separates_text_from_submit_keystroke():
+    host = ClaudeHost(["unused"], attach_terminal=False)
+    writes = []
+    host._master_fd = 1
+    host._write = writes.append
+
+    host.inject("read the test file")
+
+    assert writes == [b"read the test file"]
+    await asyncio.sleep(INJECT_SUBMIT_DELAY_S * 2)
+    assert writes == [b"read the test file", b"\r"]
+
+
+async def test_concurrent_injections_are_serialized():
+    host = ClaudeHost(["unused"], attach_terminal=False)
+    writes = []
+    host._master_fd = 1
+    host._write = writes.append
+
+    host.inject("first")
+    host.inject("second")
+
+    await asyncio.sleep(INJECT_SUBMIT_DELAY_S * 5)
+    assert writes == [b"first", b"\r", b"second", b"\r"]
 
 
 async def test_inject_writes_sanitized_bytes(tmp_path):

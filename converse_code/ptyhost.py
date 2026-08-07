@@ -16,6 +16,7 @@ import struct
 import sys
 import termios
 import tty
+from collections import deque
 
 import pyte
 
@@ -28,6 +29,7 @@ class _Screen(pyte.Screen):
 
 
 MAX_INJECT_CHARS = 8000
+INJECT_SUBMIT_DELAY_S = 0.05
 
 
 def sanitize(text: str) -> str:
@@ -67,6 +69,8 @@ class ClaudeHost:
         self._stream = pyte.ByteStream(self._screen)
         self.exited = asyncio.Event()
         self.returncode: int | None = None
+        self._injection_queue: deque[bytes] = deque()
+        self._injecting = False
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -185,7 +189,35 @@ class ClaudeHost:
         an embedded ESC sequence would otherwise be a terminal-escape injection
         (prompt spoofing, OSC-52 clipboard writes) against the dev's emulator.
         """
-        self._write(sanitize(text).encode() + b"\r")
+        if self._master_fd is None:
+            raise OSError("Claude Code session has exited")
+        self._injection_queue.append(sanitize(text).encode())
+        if not self._injecting:
+            self._start_next_injection()
+
+    def _start_next_injection(self) -> None:
+        if self._master_fd is None or not self._injection_queue:
+            self._injecting = False
+            self._injection_queue.clear()
+            return
+        self._injecting = True
+        self._write(self._injection_queue.popleft())
+        asyncio.get_running_loop().call_later(INJECT_SUBMIT_DELAY_S, self._submit_injection)
+
+    def _submit_injection(self) -> None:
+        if self._master_fd is None:
+            self._injecting = False
+            self._injection_queue.clear()
+            return
+        try:
+            self._write(b"\r")
+        except OSError:
+            self._injecting = False
+            self._injection_queue.clear()
+            return
+        self._injecting = False
+        if self._injection_queue:
+            asyncio.get_running_loop().call_later(INJECT_SUBMIT_DELAY_S, self._start_next_injection)
 
     def send_key(self, name: str) -> None:
         self._write(KEYMAP[name])

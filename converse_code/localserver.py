@@ -4,7 +4,7 @@
           terminal (JSON, this process -> page)
   /proxy  the Converse protocol, relayed between the page's SDK client and the
           broker (JSON + binary audio, both directions)
-  /hook   Claude Code's Stop hook POSTs its payload here
+  /hook   Claude Code lifecycle hooks POST their payloads here
 
 Everything here is reachable from any web page the dev happens to have open —
 browsers don't apply same-origin policy to WebSockets, and a simple-content-type
@@ -209,4 +209,6 @@ class LocalServer:
             payload = {}
         if self.on_hook:
             await self.on_hook(request.match_info["event"], payload)
-        return web.Response(text="ok")
+        # Native Claude Code HTTP hooks expect a JSON response body. An empty
+        # object means "observed, no decision" and lets processing continue.
+        return web.json_response({})
