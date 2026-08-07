@@ -6,6 +6,7 @@ import asyncio
 import getpass
 import logging
 import os
+import shlex
 import shutil
 import sys
 import tempfile
@@ -20,6 +21,7 @@ from .ptyhost import ClaudeHost
 
 log = logging.getLogger(__name__)
 DEFAULT_PORT = 8737
+DEFAULT_CLAUDE_CMD = "claude --permission-mode auto"
 
 
 def _session_handle() -> str:
@@ -89,7 +91,7 @@ async def _run(args) -> int:
     scratch = tempfile.mkdtemp(prefix="converse-code-")
     # --settings loads *additional* settings, so the dev's own hooks/config stay.
     settings_path = hooks.write_settings(scratch, server.hook_url("stop"))
-    claude_argv = args.claude.split() + ["--settings", str(settings_path)]
+    claude_argv = shlex.split(args.claude) + ["--settings", str(settings_path)]
     host = ClaudeHost(claude_argv, attach_terminal=not args.headless)
 
     handle = _session_handle()
@@ -236,7 +238,7 @@ async def _spawn_tool(router: tools.ToolRouter, call: dict) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="converse-code", description="Talk to Claude Code by voice via Converse.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="local port for the voice tab")
-    parser.add_argument("--claude", default=os.environ.get("CONVERSE_CODE_CLAUDE_CMD", "claude"),
+    parser.add_argument("--claude", default=os.environ.get("CONVERSE_CODE_CLAUDE_CMD", DEFAULT_CLAUDE_CMD),
                         help="command used to launch Claude Code")
     parser.add_argument("--broker-url", default=os.environ.get("CONVERSE_URL", brokermod.DEFAULT_URL))
     parser.add_argument("--no-browser", action="store_true", help="don't auto-open the voice tab")
