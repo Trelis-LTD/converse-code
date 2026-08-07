@@ -153,7 +153,7 @@ async def test_tab_ws_relay_and_hook(server):
             msg = await ws.receive(timeout=5)
             assert json.loads(msg.data)["event"] == "status"
 
-        # hook endpoint (as the curl in the Stop hook would call it)
+        # hook endpoint (as Claude Code's native HTTP hook calls it)
         async with session.post(
             server.hook_url("stop"),
             json={"transcript_path": "/tmp/t.jsonl", "session_id": "s1"},

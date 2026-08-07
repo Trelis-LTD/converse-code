@@ -1,6 +1,6 @@
 """Full-loop test: mock Converse broker -> BrokerClient -> ToolRouter -> real
 pty running the fake TUI, with the Stop hook arriving over HTTP exactly as
-Claude Code's curl hook would send it. Only the real `claude` binary and the
+Claude Code's native HTTP hook would send it. Only the real `claude` binary and the
 real broker are substituted."""
 
 import asyncio
@@ -72,7 +72,7 @@ async def test_full_loop(tmp_path):
             assert asyncio.get_running_loop().time() < deadline, host.snapshot()
             await asyncio.sleep(0.05)
 
-        # 2. the turn "finishes": transcript written, Stop hook POSTs like curl would
+        # 2. the turn "finishes": transcript written, Stop hook POSTs as Claude would
         transcript.write_text(json.dumps({
             "type": "assistant",
             "message": {"content": [{"type": "text", "text": "Echoed the greeting."}]},

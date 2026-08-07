@@ -98,11 +98,13 @@ since it lands in the dev's real terminal where an escape sequence would be an i
 
 Following the documented shape exactly:
 
-- **`long_task`** -- `requires_permission: true`, `timeout: 600` (the protocol's current
-  hard cap -- see Section 8 below). Description field carries the *guidance prose* the brain
-  uses to decide when to call it, including the preserve-the-user's-technical-wording
-  instruction from Section 2. Its `status_label` is `Claude Code task`, which Converse can
-  use when the user asks about the managed pending job.
+- **`long_task`** -- `timeout: 600` (the protocol's current hard cap -- see Section 8
+  below), with no Converse-level permission gate. An explicit voice instruction is already
+  authorization to pass that instruction to Claude; requiring a second approval made every
+  edit needlessly repetitive. The description limits calls to explicit user requests and
+  carries the preserve-the-user's-technical-wording guidance from Section 2. Its
+  `status_label` is `Claude Code task`, which Converse can use when the user asks about the
+  managed pending job.
 - **`check_status`** *(optional, recommended)* -- `read_only: true`. Lets the broker fire it
   speculatively/early for "how's it going?" without waiting for turn commit. Returns
   whatever the last progress checkpoint said plus the current screen state (see Section 10),
@@ -121,6 +123,9 @@ Following the documented shape exactly:
 - **`press_key`** -- fast, low-level fallback: one of a small enum (escape, up, down, left,
   right, enter, tab, ctrl-c, shift-tab). For anything the higher-level tools didn't
   anticipate. Its description should steer the brain toward the high-level tools first.
+- **`end_session`** -- ends the Converse voice connection only after its final spoken reply
+  completes (or is interrupted). Claude Code remains open and interactive in the terminal.
+  The browser uses the SDK's clean `close()` path; clicking the mic starts a new voice session.
 
 ## 5. Claude Code driver mechanics
 
@@ -133,6 +138,10 @@ Following the documented shape exactly:
 - **Input**: on `tool_call` for `long_task`, translate `args.request` into a single
   instruction and write it (plus Enter) to the pty. This is indistinguishable from real
   typing -- the dev watches it appear live in their terminal.
+- **Input acknowledgement**: inject prompt text and Enter as separate PTY writes, then require
+  Claude Code's `UserPromptSubmit` HTTP hook before considering the handoff accepted. Retry a
+  swallowed Enter twice, then return a bounded recovery message instead of holding the voice tool
+  open. Serialize concurrent injections so their text cannot merge in the composer.
 - **Output**: don't screen-scrape ANSI for CC's replies. Install a `Stop` hook (fires when
   Claude finishes a turn) that signals `converse-code`, then read the actual JSONL
   transcript Claude Code already writes to disk for that session (`transcript_path`,
@@ -142,13 +151,14 @@ Following the documented shape exactly:
   emulator buffer (e.g. `pyte`) on its way to the real terminal, so `converse-code` can
   snapshot the *rendered screen* at any moment. This is used only for structure -- menu and
   queue detection (Section 10) -- never as the source of CC's prose.
-- **Permission prompts inside CC itself**: Claude Code's own tool-approval prompts are a
-  distinct case from the Converse-level `requires_permission` gate. For the MVP they need
+- **Permission behavior inside CC itself**: Claude Code runs in `--permission-mode auto`,
+  independently of Converse's tool manifest. For the MVP, any prompt it still presents needs
   *no dedicated mechanism*: a permission prompt is just a menu, so the Section 10 state
   machine already detects it from the screen buffer, reports its options to the brain, and
   answers it via `select_option` -- the user hears "it wants to run pytest, allow it?" and
-  says yes. A `PermissionRequest` hook (for reliability/latency) and any scoped
-  auto-approve list are later hardening, not MVP surface. Never auto-approve by default.
+  says yes. A `PermissionRequest` HTTP hook wakes voice for permission menus originating from
+  terminal-entered work; it observes and announces the menu but never auto-approves it. Any scoped
+  policy controls are later hardening, not MVP surface. Never bypass permissions by default.
 - **Stop**: Converse owns the semantic decision to cancel a pending job and sends the host
   `tool_cancel` for that exact call. `converse-code` maps a matching cancellation to Escape,
   Claude Code's turn-interrupt. It does not declare a duplicate generic stop tool.
@@ -280,7 +290,7 @@ menus, and `data.queue` (the list of pending queued instructions) rides along wi
 
 ## 12. MVP surface (decided)
 
-Ship: `long_task`, `command`, `select_option`, `press_key`. That's the
+Ship: `long_task`, `command`, `select_option`, `press_key`, `end_session`. That's the
 whole manifest.
 
 Deferred until real usage demands them: `check_status` (Converse already exposes managed

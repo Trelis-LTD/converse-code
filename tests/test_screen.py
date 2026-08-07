@@ -38,6 +38,22 @@ REAL_IDLE_SCREEN = [
     "  ⏵⏵ auto mode on (shift+tab to cycle)",
 ]
 
+# Captured after closing Claude Code 2.1.224's /model picker. Historical user
+# prompts retain the same ❯ glyph as menu selections; only the bottom composer
+# between rules is live, and none of these history rows is an open menu.
+REAL_IDLE_WITH_PROMPT_HISTORY = [
+    "❯ Reply with exactly the word pong and do nothing else.",
+    "⏺ pong",
+    "✻ Worked for 3s",
+    "❯ /model",
+    "  ⎿  Set model to Fable 5 and saved as your default for new sessions",
+    "                                      ◐ medium · /effort",
+    "────────────────────────────────────────────────────────",
+    "❯ ",
+    "────────────────────────────────────────────────────────",
+    "  ⏵⏵ auto mode on (shift+tab to cycle)",
+]
+
 # Numbered list in Claude's prose + the prompt cursor: not a menu either.
 PROSE_WITH_NUMBERS = [
     " Here's the plan:",
@@ -84,6 +100,10 @@ def test_idle_screen_is_not_a_menu():
 
 def test_real_claude_idle_prompt_is_not_a_menu():
     assert detect_menu(REAL_IDLE_SCREEN) is None
+
+
+def test_historical_prompt_cursors_are_not_menus():
+    assert detect_menu(REAL_IDLE_WITH_PROMPT_HISTORY) is None
 
 
 def test_numbered_prose_is_not_a_menu():

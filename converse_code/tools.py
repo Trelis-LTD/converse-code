@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import screen as screenmod
 from . import transcript as tmod
-from .ptyhost import KEYMAP
+from .ptyhost import KEYMAP, sanitize
 
 log = logging.getLogger(__name__)
 
@@ -23,8 +23,9 @@ HOLD_MARGIN_S = 30
 
 LONG_TASK_DESCRIPTION = (
     "Send a coding instruction to Claude Code, an AI coding agent working in the user's "
-    "project, and wait for it to finish (or report back if it is still working). Use for "
-    "any request to write, edit, investigate, run, or explain code. Pass the user's "
+    "project, and wait for it to finish (or report back if it is still working). Use only "
+    "when the user explicitly asks to write, edit, investigate, run, or explain code; never "
+    "infer an action from a general question or suggestion. Pass the user's "
     "instruction in 'request', preserving their technical wording exactly — file names, "
     "function names, flags, error text — compress filler, never editorialize. If Claude "
     "Code is already working, the instruction is queued behind the current task. Not for "
@@ -51,6 +52,12 @@ PRESS_KEY_DESCRIPTION = (
     "use this only when they don't fit."
 )
 
+END_SESSION_DESCRIPTION = (
+    "End the current Converse voice session after a brief goodbye. Use only when the user "
+    "explicitly asks to end, close, leave, or hang up the voice session. This stops the "
+    "microphone and voice connection but leaves Claude Code running in the terminal."
+)
+
 
 def manifest() -> list[dict]:
     def tool(name, description, props=None, required=None, **flags):
@@ -68,7 +75,7 @@ def manifest() -> list[dict]:
     return [
         tool("long_task", LONG_TASK_DESCRIPTION,
              {"request": {"type": "string", "description": "The coding instruction."}},
-             ["request"], requires_permission=True, timeout=TOOL_TIMEOUT_S,
+             ["request"], timeout=TOOL_TIMEOUT_S,
              status_label="Claude Code task"),
         tool("command", COMMAND_DESCRIPTION,
              {"command": {"type": "string", "description": "Slash command, starting with '/'."}},
@@ -79,6 +86,7 @@ def manifest() -> list[dict]:
         tool("press_key", PRESS_KEY_DESCRIPTION,
              {"key": {"type": "string", "enum": sorted(KEYMAP)}},
              ["key"], timeout=15),
+        tool("end_session", END_SESSION_DESCRIPTION, timeout=15),
     ]
 
 
@@ -87,8 +95,11 @@ class ToolRouter:
     POLL_S = 2.0            # transcript/menu poll cadence while holding
     SETTLE_S = 1.2          # wait after command/select before reading the screen
     MAX_PROGRESS = 10       # protocol cap is 12/call; keep headroom
+    SUBMIT_ACK_S = 2.0      # UserPromptSubmit should arrive almost immediately
+    SUBMIT_ATTEMPTS = 3     # initial submit plus two bounded Enter retries
 
-    def __init__(self, driver, sender, handle: str, project_dir: str | Path | None = None):
+    def __init__(self, driver, sender, handle: str, project_dir: str | Path | None = None,
+                 verify_submissions: bool = False):
         """driver: ClaudeHost-like (inject/send_key/snapshot).
         sender: BrokerClient-like (tool results/progress and context injection)."""
         self.driver = driver
@@ -106,11 +117,30 @@ class ToolRouter:
         self._active_call_id: str | None = None
         self._server_canceled: set[str] = set()
         self._suppress_next_stop_notification = False
+        self._verify_submissions = verify_submissions
+        self._submit_lock = asyncio.Lock()
+        self._prompt_submitted = asyncio.Event()
+        self._expected_prompt: str | None = None
+        self._turn_failure = ""
         self.on_status = None  # async callback(dict) → browser tab
 
     # -- events from the Stop hook -------------------------------------------
 
     async def on_hook(self, event: str, payload: dict) -> None:
+        if event == "user_prompt_submit":
+            prompt = payload.get("prompt")
+            if isinstance(prompt, str) and sanitize(prompt) == self._expected_prompt:
+                self._prompt_submitted.set()
+            return
+        if event == "permission_request":
+            # HTTP hooks run before Claude paints the interactive prompt. Return
+            # promptly, then inspect the settled screen and wake voice only for
+            # terminal-originated work; an open long_task already polls menus.
+            asyncio.create_task(self._announce_permission_request(payload))
+            return
+        if event == "stop_failure":
+            await self._on_stop_failure(payload)
+            return
         if event != "stop":
             return
         voice_call_was_waiting = self._active_call_id is not None
@@ -143,6 +173,22 @@ class ToolRouter:
         if not voice_call_was_waiting and not suppress_notification:
             await self._wake_voice_for_terminal_turn(hook_text)
 
+    async def _on_stop_failure(self, payload: dict) -> None:
+        waiting = self._active_call_id is not None
+        detail = payload.get("error_details") or payload.get("error") or "unknown Claude error"
+        self._turn_failure = str(detail)
+        self.working = False
+        self.queue.clear()
+        self._turn_done.set()
+        await self._push_status()
+        if not waiting:
+            await self.sender.send_context(
+                f"Claude Code stopped because of an error: {self._turn_failure}. "
+                "Tell the user briefly and suggest trying again after fixing the error.",
+                role="context",
+                reply=True,
+            )
+
     async def _wake_voice_for_terminal_turn(self, hook_text: str = "") -> None:
         """Narrate a turn that did not originate from an open voice tool call.
 
@@ -162,6 +208,27 @@ class ToolRouter:
             reply=True,
         )
 
+    async def _announce_permission_request(self, payload: dict) -> None:
+        await asyncio.sleep(min(self.SETTLE_S, 0.5))
+        await self._push_status()
+        if self._active_call_id is not None:
+            return
+        menu = self.menu()
+        # Auto mode also emits PermissionRequest immediately before an automatic
+        # denial, where no interactive menu is ever painted. Only wake voice for
+        # a decision the user can actually make.
+        if menu is None:
+            return
+        tool_name = payload.get("tool_name")
+        detail = f" for {tool_name}" if isinstance(tool_name, str) and tool_name else ""
+        options = f" Options: {', '.join(menu.options)}." if menu.options else ""
+        await self.sender.send_context(
+            f"Claude Code is waiting for permission{detail}.{options} "
+            "Tell the user briefly and ask which option they want; do not choose for them.",
+            role="context",
+            reply=True,
+        )
+
     # -- dispatch --------------------------------------------------------------
 
     async def handle_tool_call(self, call: dict) -> None:
@@ -171,6 +238,7 @@ class ToolRouter:
             "command": self._command,
             "select_option": self._select_option,
             "press_key": self._press_key,
+            "end_session": self._end_session,
         }
         handler = handlers.get(name)
         try:
@@ -246,23 +314,66 @@ class ToolRouter:
                 f"{menu.title or 'a menu'} — options: {', '.join(menu.options)}."
             )
 
-        self.driver.inject(request)
+        starting_turn = not self.working
+        if starting_turn:
+            # Arm completion before touching the PTY. A trivial Claude turn can
+            # emit UserPromptSubmit and Stop back-to-back; clearing _turn_done
+            # after injection would lose that Stop and wait until the deadline.
+            self.working = True
+            self._interrupted = False
+            self._turn_done.clear()
+            self.last_assistant_text = ""
+            self._turn_failure = ""
+            self._active_call_id = call_id
+            self._ensure_transcript()
+            start_offset, start_path = self._offset, self.transcript_path
+
+        if not await self._inject_and_confirm(request):
+            if starting_turn:
+                self.working = False
+                self._active_call_id = None
+            return self._result(
+                "I put the instruction into Claude Code, but couldn't confirm it was submitted. "
+                "The text may still be visible in the terminal input; press Enter there or try again."
+            )
         if self.on_status:
             await self.on_status({"type": "local", "event": "injected", "text": request})
 
-        if self.working:
+        if not starting_turn:
             self.queue.append(request)
             return self._result(
                 "Queued behind the current task; it will run next. The current task is still going."
             )
 
-        self.working = True
-        self._interrupted = False
-        self._turn_done.clear()
-        self.last_assistant_text = ""
-        self._active_call_id = call_id
-        self._ensure_transcript()
-        return await self._await_turn(call_id, self._offset, self.transcript_path)
+        return await self._await_turn(call_id, start_offset, start_path)
+
+    async def _inject_and_confirm(self, text: str) -> bool:
+        """Inject one prompt and, in production, wait for Claude to acknowledge it.
+
+        Splitting text from Enter prevents paste-mode from swallowing submission;
+        UserPromptSubmit then distinguishes an accepted prompt from text merely
+        sitting in the composer. Retries are intentionally bounded so a changed
+        or unrecognized TUI state cannot strand the voice tool until its deadline.
+        """
+        async with self._submit_lock:
+            self._expected_prompt = sanitize(text)
+            self._prompt_submitted.clear()
+            try:
+                self.driver.inject(text)
+                if not self._verify_submissions:
+                    return True
+                for attempt in range(self.SUBMIT_ATTEMPTS):
+                    try:
+                        await asyncio.wait_for(
+                            self._prompt_submitted.wait(), timeout=self.SUBMIT_ACK_S
+                        )
+                        return True
+                    except asyncio.TimeoutError:
+                        if attempt + 1 < self.SUBMIT_ATTEMPTS:
+                            self.driver.send_key("enter")
+                return False
+            finally:
+                self._expected_prompt = None
 
     async def _await_turn(self, call_id: str, start_offset: int, start_path) -> dict:
         """Hold the call open: progress from the transcript tail, resolve on the
@@ -277,6 +388,9 @@ class ToolRouter:
             if self._turn_done.is_set():
                 if self._interrupted:
                     return self._result("Stopped — the task was interrupted before finishing.")
+                if self._turn_failure:
+                    detail, self._turn_failure = self._turn_failure, ""
+                    return self._result(f"Claude Code stopped because of an error: {detail}")
                 return self._turn_result(start_offset, start_path)
 
             menu = self.menu()
@@ -321,6 +435,10 @@ class ToolRouter:
             return self._result("Commands must start with a slash, like /clear.")
         if self.menu():
             return self._result("A menu is open — answer it first with select_option.")
+        # Built-in UI commands such as /model are handled entirely inside the
+        # TUI and intentionally fire neither UserPromptSubmit nor
+        # UserPromptExpansion. The PTY's split text/Enter write is therefore the
+        # reliable submission path; menu/screen state below confirms the effect.
         self.driver.inject(cmd)
         if self.on_status:
             await self.on_status({"type": "local", "event": "injected", "text": cmd})
@@ -365,6 +483,11 @@ class ToolRouter:
         self.driver.send_key(key)
         await asyncio.sleep(0.3)
         return self._result(f"Pressed {key}.")
+
+    async def _end_session(self, _call_id: str, _args: dict) -> dict:
+        if self.on_status:
+            await self.on_status({"type": "local", "event": "end_session"})
+        return self._result("Ending the voice session now. Claude Code will remain open in the terminal.")
 
     # -- transcript tailing ----------------------------------------------------
 

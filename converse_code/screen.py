@@ -60,6 +60,12 @@ def detect_menu(lines: list[str]) -> Menu | None:
             continue
         if _neighbor_is_rule(cleaned, i):
             continue  # the idle input prompt: rule / ❯ … / rule
+        # Submitted prompts remain in Claude's scrollback with the same cursor
+        # glyph. Their next rendered line is a response/status marker, whereas
+        # live unnumbered picker rows are followed by another plain option.
+        next_line = cleaned[i + 1].lstrip() if i + 1 < len(cleaned) else ""
+        if next_line.startswith(("⎿", "⏺", "✻", "·")):
+            continue
         # Unnumbered menu (e.g. /model picker): contiguous non-decor block.
         start = i
         while start > 0 and not _is_decor(cleaned[start - 1]) \

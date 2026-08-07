@@ -3,6 +3,7 @@ import asyncio
 from conftest import append_transcript, finish_turn
 
 from converse_code.tools import manifest
+from converse_code.tools import ToolRouter
 
 MENU_LINES = [
     "  Do you want to proceed?",
@@ -24,9 +25,10 @@ def assistant(text=None, tool=None, file_path=None):
 def test_manifest_shape():
     tools = manifest()
     names = [t["name"] for t in tools]
-    assert names == ["long_task", "command", "select_option", "press_key"]
+    assert names == ["long_task", "command", "select_option", "press_key", "end_session"]
     long_task = tools[0]
-    assert long_task["requires_permission"] is True
+    assert long_task.get("requires_permission", False) is False
+    assert "explicitly asks" in long_task["description"]
     assert long_task["timeout"] == 600  # server ceiling, verified against prod
     assert long_task["status_label"] == "Claude Code task"
     assert "request" in long_task["parameters"]["properties"]
@@ -67,6 +69,22 @@ async def test_long_task_falls_back_to_hook_message(router, fake_sender):
     })
     await task
     assert fake_sender.results[0][1]["speak"] == "pong"
+
+
+async def test_long_task_resolves_immediately_on_claude_stop_failure(router, fake_sender):
+    task = asyncio.create_task(router.handle_tool_call(
+        {"id": "c1", "name": "long_task", "args": {"request": "quick thing"}}
+    ))
+    await asyncio.sleep(0.05)
+    await router.on_hook("stop_failure", {
+        "error": "authentication_failed",
+        "error_details": "Claude session expired",
+    })
+    await task
+
+    content = fake_sender.results[0][1]
+    assert "Claude session expired" in content["speak"]
+    assert content["data"]["state"] == "idle"
 
 
 async def test_long_task_emits_progress_notes(router, fake_sender):
@@ -113,6 +131,53 @@ async def test_long_task_refused_while_menu_open(router, fake_driver, fake_sende
     assert fake_driver.injected == []
     _, content = fake_sender.results[0]
     assert "menu" in content["speak"].lower()
+
+
+async def test_long_task_waits_for_matching_prompt_submission_hook(
+    fake_driver, fake_sender, tmp_path,
+):
+    router = ToolRouter(
+        fake_driver, fake_sender, handle="cc-test", project_dir=tmp_path,
+        verify_submissions=True,
+    )
+    router.SUBMIT_ACK_S = 0.05
+    router.POLL_S = 0.01
+    router.HOLD_S = 0.2
+
+    task = asyncio.create_task(router.handle_tool_call(
+        {"id": "c1", "name": "long_task", "args": {"request": "read tests"}}
+    ))
+    await asyncio.sleep(0.01)
+    await router.on_hook("user_prompt_submit", {"prompt": "a different prompt"})
+    await asyncio.sleep(0.01)
+    assert not task.done()
+
+    await router.on_hook("user_prompt_submit", {"prompt": "read tests"})
+    await router.on_hook("stop", {"last_assistant_message": "Done."})
+    await task
+
+    assert fake_driver.keys == []
+    assert fake_sender.results[0][1]["speak"] == "Done."
+
+
+async def test_long_task_retries_enter_then_fails_fast_without_ack(
+    fake_driver, fake_sender, tmp_path,
+):
+    router = ToolRouter(
+        fake_driver, fake_sender, handle="cc-test", project_dir=tmp_path,
+        verify_submissions=True,
+    )
+    router.SUBMIT_ACK_S = 0.01
+    router.SUBMIT_ATTEMPTS = 3
+
+    await router.handle_tool_call(
+        {"id": "c1", "name": "long_task", "args": {"request": "read tests"}}
+    )
+
+    assert fake_driver.keys == ["enter", "enter"]
+    content = fake_sender.results[0][1]
+    assert "couldn't confirm" in content["speak"].lower()
+    assert content["data"]["state"] == "idle"
 
 
 async def test_second_long_task_queues(router, fake_driver, fake_sender):
@@ -220,6 +285,40 @@ async def test_stop_hook_wakes_voice_for_terminal_typed_work(router, fake_sender
     assert reply is True
 
 
+async def test_permission_hook_wakes_voice_for_terminal_typed_menu(
+    router, fake_driver, fake_sender,
+):
+    fake_driver.lines = MENU_LINES
+
+    await router.on_hook("permission_request", {"tool_name": "Bash"})
+    await asyncio.sleep(router.SETTLE_S * 2)
+
+    assert fake_sender.context
+    text, role, reply = fake_sender.context[0]
+    assert "permission" in text.lower()
+    assert "Yes" in text
+    assert role == "context"
+    assert reply is True
+
+
+async def test_permission_hook_does_not_announce_auto_mode_denial(router, fake_sender):
+    await router.on_hook("permission_request", {"tool_name": "Bash"})
+    await asyncio.sleep(router.SETTLE_S * 2)
+
+    assert fake_sender.context == []
+
+
+async def test_stop_failure_wakes_voice_for_terminal_typed_work(router, fake_sender):
+    await router.on_hook("stop_failure", {
+        "error": "rate_limit",
+        "error_details": "Try again later",
+    })
+
+    assert fake_sender.context
+    assert "Try again later" in fake_sender.context[0][0]
+    assert fake_sender.context[0][2] is True
+
+
 async def test_terminal_completion_does_not_reuse_stale_voice_result(router, fake_sender):
     router.last_assistant_text = "Old voice-started result."
     append_transcript(router, assistant(text="New terminal result."))
@@ -287,6 +386,16 @@ async def test_press_key(router, fake_driver, fake_sender):
     assert fake_driver.keys == ["ctrl-c"]
     await router.handle_tool_call({"id": "c2", "name": "press_key", "args": {"key": "bogus"}})
     assert "Unknown key" in fake_sender.results[1][1]["speak"]
+
+
+async def test_end_session_arms_browser_close_after_goodbye(router, fake_sender):
+    events = []
+    router.on_status = lambda event: events.append(event) or asyncio.sleep(0)
+
+    await router.handle_tool_call({"id": "c1", "name": "end_session", "args": {}})
+
+    assert events[0] == {"type": "local", "event": "end_session"}
+    assert "voice session" in fake_sender.results[0][1]["speak"].lower()
 
 
 async def test_handler_exception_still_resolves(router, fake_driver, fake_sender):

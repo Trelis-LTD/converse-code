@@ -6,98 +6,156 @@
 <title>Converse Code</title>
 <style>
   :root{
-    --bg:#f5f6f8; --panel:#ffffff; --text:#1c1e21; --muted:#6b7280;
-    --border:#e2e4e8; --accent:#3b6fe0; --accent-fg:#ffffff;
-    --danger:#d0403b; --you:#1c1e21; --asst:#245c3b; --inject:#8a5a00;
-    --dot-connecting:#d9a400; --dot-open:#2e9e4f; --dot-closed:#c0392b;
-    --chip-idle:#3b6fe0; --chip-working:#d9a400; --chip-menu:#7a4fd1;
-  }
-  @media (prefers-color-scheme: dark){
-    :root{
-      --bg:#15171a; --panel:#1e2126; --text:#e7e9ec; --muted:#9aa1ab;
-      --border:#2c3038; --accent:#5a8dff; --accent-fg:#0b0d10;
-      --danger:#ef5f5a; --you:#e7e9ec; --asst:#6fd39a; --inject:#f0c15a;
-      --dot-connecting:#e0b23a; --dot-open:#4bcf78; --dot-closed:#e0625c;
-      --chip-idle:#5a8dff; --chip-working:#e0b23a; --chip-menu:#a988f0;
-    }
+    color-scheme:dark;
+    --bg:#10110f; --panel:#181a17; --panel-2:#20231f; --text:#eee9df;
+    --muted:#92988d; --quiet:#666c63; --border:#2b2f29; --border-strong:#3a4038;
+    --accent:#ed765f; --accent-deep:#bc5542; --accent-fg:#160d0a;
+    --sage:#9abb9e; --sage-deep:#57735b; --amber:#d3a45b; --violet:#ac93d5;
+    --dot-connecting:#d3a45b; --dot-open:#8fc79a; --dot-closed:#77635f;
+    --chip-idle:#9abb9e; --chip-working:#d3a45b; --chip-menu:#ac93d5;
   }
   *{box-sizing:border-box;}
   html,body{height:100%;}
   body{
     margin:0; background:var(--bg); color:var(--text);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
     display:flex; flex-direction:column;
+    letter-spacing:-.01em;
   }
   header{
-    display:flex; align-items:center; gap:.6rem;
-    padding:.75rem 1rem; border-bottom:1px solid var(--border);
-    background:var(--panel); flex:0 0 auto;
+    display:flex; align-items:center; gap:.7rem; width:100%; max-width:920px;
+    padding:1.15rem 1.5rem .9rem; margin:0 auto; flex:0 0 auto;
   }
-  header h1{font-size:1.05rem; margin:0; font-weight:650; letter-spacing:.01em;}
-  .dot{width:.6rem; height:.6rem; border-radius:50%; flex:0 0 auto; background:var(--dot-closed); transition:background .2s;}
+  .brand-mark{
+    width:2rem; height:2rem; display:flex; align-items:center; justify-content:center; gap:2px;
+    border:1px solid var(--border-strong); background:var(--panel); border-radius:.55rem;
+  }
+  .brand-mark i{display:block; width:2px; border-radius:2px; background:var(--accent);}
+  .brand-mark i:nth-child(1),.brand-mark i:nth-child(5){height:6px; opacity:.55;}
+  .brand-mark i:nth-child(2),.brand-mark i:nth-child(4){height:12px; opacity:.8;}
+  .brand-mark i:nth-child(3){height:18px;}
+  .brand-copy{display:flex; flex-direction:column; gap:.05rem;}
+  header h1{font-size:.96rem; margin:0; font-weight:650; letter-spacing:.01em;}
+  .eyebrow{font:600 .6rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--quiet); letter-spacing:.12em; text-transform:uppercase;}
+  .connection{display:flex; align-items:center; gap:.45rem; color:var(--muted); font-size:.7rem; margin-right:.25rem;}
+  .dot{width:.42rem; height:.42rem; border-radius:50%; flex:0 0 auto; background:var(--dot-closed); transition:background .2s,box-shadow .2s;}
   .dot.connecting{background:var(--dot-connecting);}
-  .dot.open{background:var(--dot-open);}
+  .dot.open{background:var(--dot-open); box-shadow:0 0 0 3px rgba(143,199,154,.1);}
   .dot.closed{background:var(--dot-closed);}
   .spacer{flex:1;}
   .chip{
-    font-size:.75rem; padding:.25rem .6rem; border-radius:999px;
-    background:var(--chip-idle); color:#fff; font-weight:600; text-transform:uppercase; letter-spacing:.03em;
+    font:650 .63rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; padding:.38rem .58rem;
+    border-radius:.35rem; color:var(--chip-idle); border:1px solid currentColor;
+    background:transparent; text-transform:uppercase; letter-spacing:.08em;
   }
-  .chip.working{background:var(--chip-working); color:#1c1e21;}
-  .chip.menu{background:var(--chip-menu);}
-  .chip.idle{background:var(--chip-idle);}
+  .chip.working{color:var(--chip-working);}
+  .chip.menu{color:var(--chip-menu);}
+  .chip.idle{color:var(--chip-idle);}
   main{
-    flex:1 1 auto; overflow:hidden; display:flex; flex-direction:column;
-    max-width:760px; width:100%; margin:0 auto; padding:0 1rem;
+    flex:1 1 auto; min-height:0; overflow:hidden; display:flex; flex-direction:column;
+    max-width:920px; width:100%; margin:0 auto; padding:0 1.5rem; position:relative;
   }
   #log{
-    flex:1 1 auto; overflow-y:auto; padding:1rem 0; display:flex; flex-direction:column; gap:.5rem;
+    flex:1 1 auto; overflow-y:auto; padding:1.8rem 0 2rem; display:flex; flex-direction:column; gap:.85rem;
+    scrollbar-width:thin; scrollbar-color:var(--border-strong) transparent;
   }
-  .entry{max-width:88%; padding:.5rem .75rem; border-radius:.6rem; line-height:1.4; font-size:.92rem; word-wrap:break-word;}
-  .entry.you{align-self:flex-end; background:var(--accent); color:var(--accent-fg);}
-  .entry.assistant{align-self:flex-start; background:var(--panel); border:1px solid var(--border); color:var(--asst);}
+  #emptyState{
+    position:absolute; inset:0 1.5rem; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; text-align:center; pointer-events:none; transform:translateY(-2%);
+  }
+  #emptyState.hidden{display:none;}
+  .signal-orbit{
+    width:7.5rem; height:7.5rem; border:1px solid var(--border); border-radius:50%;
+    display:grid; place-items:center; margin-bottom:1.5rem; position:relative;
+  }
+  .signal-orbit:before,.signal-orbit:after{content:""; position:absolute; border:1px solid var(--border); border-radius:50%;}
+  .signal-orbit:before{inset:.7rem;}
+  .signal-orbit:after{inset:1.45rem; border-color:var(--border-strong);}
+  .signal-core{width:2.3rem; height:2.3rem; border-radius:50%; background:var(--accent); box-shadow:0 0 32px rgba(237,118,95,.2);}
+  #emptyState h2{font-size:1.2rem; font-weight:580; margin:0 0 .45rem; letter-spacing:-.025em;}
+  #emptyState p{font-size:.78rem; color:var(--muted); max-width:22rem; line-height:1.55; margin:0;}
+  .entry{
+    max-width:82%; padding:.72rem .88rem; border-radius:.72rem; line-height:1.48;
+    font-size:.9rem; word-wrap:break-word; animation:entry-in .18s ease-out;
+  }
+  @keyframes entry-in{from{opacity:0; transform:translateY(4px);}to{opacity:1; transform:none;}}
+  .entry.you{align-self:flex-end; background:#292d28; border:1px solid var(--border-strong); color:var(--text); border-bottom-right-radius:.2rem;}
+  .entry.assistant{align-self:flex-start; background:var(--panel); border:1px solid var(--border); color:var(--text); border-bottom-left-radius:.2rem;}
   .entry.inject{
-    align-self:center; background:transparent; border:1px dashed var(--border);
-    color:var(--inject); font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.8rem;
+    align-self:stretch; max-width:100%; background:rgba(211,164,91,.055); border:1px solid rgba(211,164,91,.22);
+    color:#d9b678; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.76rem;
+    border-radius:.4rem;
   }
-  .entry.banner{align-self:center; background:transparent; color:var(--muted); font-size:.8rem; font-style:italic;}
-  .entry .label{display:block; font-size:.68rem; opacity:.65; margin-bottom:.15rem; text-transform:uppercase; letter-spacing:.04em;}
+  .entry.banner{align-self:center; background:transparent; color:var(--muted); font-size:.74rem; text-align:center;}
+  .entry .label{display:block; font:650 .58rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--quiet); margin-bottom:.42rem; text-transform:uppercase; letter-spacing:.11em;}
+  .entry.you .label{color:#aeb4aa;}
   footer{
-    flex:0 0 auto; padding:1rem; border-top:1px solid var(--border); background:var(--panel);
-    display:flex; align-items:center; gap:1rem; max-width:760px; width:100%; margin:0 auto;
+    flex:0 0 auto; padding:.85rem; border:1px solid var(--border); background:var(--panel);
+    display:flex; align-items:center; gap:.95rem; max-width:872px; width:calc(100% - 3rem);
+    margin:0 auto 1.25rem; border-radius:1rem; box-shadow:0 14px 40px rgba(0,0,0,.22);
   }
   #micBtn{
-    flex:0 0 auto; width:3.4rem; height:3.4rem; border-radius:50%; border:none; cursor:pointer;
-    background:var(--accent); color:var(--accent-fg); font-size:1.4rem; display:flex; align-items:center; justify-content:center;
-    transition:transform .1s, background .2s; box-shadow:0 1px 4px rgba(0,0,0,.25);
+    flex:0 0 auto; width:3.65rem; height:3.65rem; border-radius:.8rem; border:1px solid #f28a75; cursor:pointer;
+    background:var(--accent); color:var(--accent-fg); display:flex; align-items:center; justify-content:center;
+    transition:transform .12s,background .2s,border-radius .2s; box-shadow:inset 0 -2px 0 rgba(80,20,10,.16);
   }
+  #micBtn svg{width:1.25rem; height:1.25rem; fill:currentColor;}
+  #micBtn:hover{background:#f08069;}
   #micBtn:active{transform:scale(.94);}
-  #micBtn.live{background:var(--danger);}
-  #micHint{flex:1 1 auto; font-size:.8rem; color:var(--muted);}
-  #micLabel{font-size:.78rem; color:var(--muted); flex:0 0 auto; min-width:3.2rem; text-align:right;}
+  #micBtn:focus-visible{outline:2px solid var(--text); outline-offset:3px;}
+  #micBtn.live{background:var(--accent-deep); border-radius:50%;}
+  .mic-copy{flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:.22rem;}
+  #micLabel{font-size:.82rem; font-weight:620; color:var(--text);}
+  #micHint{font-size:.69rem; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .levels{height:1.4rem; display:flex; align-items:center; gap:3px; padding:0 .25rem; opacity:.35;}
+  .levels i{display:block; width:2px; height:5px; border-radius:2px; background:var(--sage);}
+  .levels i:nth-child(2),.levels i:nth-child(6){height:9px;}
+  .levels i:nth-child(3),.levels i:nth-child(5){height:14px;}
+  .levels i:nth-child(4){height:19px;}
+  footer.live .levels{opacity:1;}
+  footer.live .levels i{animation:level .8s ease-in-out infinite alternate;}
+  footer.live .levels i:nth-child(2){animation-delay:-.25s;} footer.live .levels i:nth-child(3){animation-delay:-.5s;}
+  footer.live .levels i:nth-child(4){animation-delay:-.15s;} footer.live .levels i:nth-child(5){animation-delay:-.4s;}
+  @keyframes level{to{transform:scaleY(.35); opacity:.55;}}
+  .kbd{font:600 .58rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--quiet); text-transform:uppercase; letter-spacing:.08em;}
+  @media(max-width:600px){
+    header{padding:1rem;} main{padding:0 1rem;} #emptyState{inset:0 1rem;}
+    .connection span:last-child,.kbd{display:none;} footer{width:calc(100% - 2rem); margin-bottom:1rem;}
+    .entry{max-width:92%;}
+  }
+  @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important; transition:none!important;}}
 </style>
 </head>
 <body>
 <header>
-  <span class="dot closed" id="wsDot" title="WebSocket status"></span>
-  <h1>Converse Code</h1>
+  <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+  <div class="brand-copy"><span class="eyebrow">Trelis</span><h1>Converse Code</h1></div>
   <div class="spacer"></div>
+  <span class="connection"><span class="dot closed" id="wsDot"></span><span>terminal link</span></span>
   <span class="chip idle" id="statusChip">idle</span>
 </header>
 <main>
+  <section id="emptyState" aria-label="Voice session ready">
+    <div class="signal-orbit" aria-hidden="true"><span class="signal-core"></span></div>
+    <h2>Voice link ready</h2>
+    <p>Start speaking to work with Claude Code. Your instructions and its replies will appear here.</p>
+  </section>
   <div id="log"></div>
 </main>
 <footer>
-  <button id="micBtn" title="Toggle microphone">&#127908;</button>
-  <span id="micHint">Click the mic and talk. Instructions appear in your terminal.</span>
-  <span id="micLabel">off</span>
+  <button id="micBtn" type="button" aria-label="Start voice session" aria-pressed="false">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 0 0 3.5-3.5V6a3.5 3.5 0 1 0-7 0v6a3.5 3.5 0 0 0 3.5 3.5Zm-2-9.5a2 2 0 1 1 4 0v6a2 2 0 1 1-4 0V6Zm8 6a6 6 0 0 1-12 0H4.5a7.5 7.5 0 0 0 6.75 7.46V22h1.5v-2.54A7.5 7.5 0 0 0 19.5 12H18Z"/></svg>
+  </button>
+  <div class="mic-copy"><span id="micLabel">Start voice</span><span id="micHint">Speak naturally — coding requests are handed to Claude Code</span></div>
+  <span class="levels" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+  <span class="kbd">Classic voice</span>
 </footer>
 <script src="/assistant-transcript.js"></script>
 <script>
 (function(){
   "use strict";
 
-  var BUILD = "2026-08-06-sdk-0.6.0";
+  var BUILD = "2026-08-07-sdk-0.6.0";
 
   // ---------- WebSocket connection with auto-reconnect ----------
   var ws = null;
@@ -116,6 +174,7 @@
 
   function setDot(state){
     wsDot.className = "dot " + state;
+    wsDot.parentElement.title = "Terminal link: " + state;
   }
 
   function connect(){
@@ -157,6 +216,7 @@
 
   // ---------- Conversation log ----------
   var logEl = document.getElementById("log");
+  var emptyState = document.getElementById("emptyState");
   var userScrolledUp = false;
 
   logEl.addEventListener("scroll", function(){
@@ -173,6 +233,7 @@
   var currentYouEl = null;
 
   function makeEntry(kind, labelText){
+    emptyState.classList.add("hidden");
     var div = document.createElement("div");
     div.className = "entry " + kind;
     if(labelText){
@@ -250,6 +311,8 @@
       updateStatusChip(msg.state, msg.queue);
     } else if(msg.event === "injected"){
       addInjected(msg.text || "");
+    } else if(msg.event === "end_session"){
+      endAfterReply = true;
     }
   }
 
@@ -276,9 +339,11 @@
   // here instead and accumulated a bug per missing responsibility.
   var micBtn = document.getElementById("micBtn");
   var micLabel = document.getElementById("micLabel");
+  var micDock = document.querySelector("footer");
 
   var client = null;
   var micActive = false;
+  var endAfterReply = false;
 
   function proxyUrl(){
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -300,12 +365,21 @@
         break;
       }
       case "text_delta":
-      case "utterance":
-      case "interrupted": {
+      case "utterance": {
         assistantTranscript.handle(ev);
         break;
       }
-      case "done": { assistantTranscript.handle(ev); freezeYou(); break; }
+      case "interrupted": {
+        assistantTranscript.handle(ev);
+        finishEndSession();
+        break;
+      }
+      case "done": {
+        assistantTranscript.handle(ev);
+        freezeYou();
+        finishEndSession();
+        break;
+      }
       case "bye": {
         addBanner("Session ended" + (ev.reason ? (": " + ev.reason) : "") + " — click the mic to start again.");
         resetSession();
@@ -326,6 +400,13 @@
     }
   }
 
+  function finishEndSession(){
+    if(!endAfterReply) return;
+    endAfterReply = false;
+    addBanner("Voice session ended — click the mic to start a new one.");
+    resetSession();
+  }
+
   // Without this, a session that ends (bye, or a broker-side error) leaves the
   // old client cached, so startSession() hands the dead one back and clicking the
   // mic does nothing until the page is manually reloaded.
@@ -334,8 +415,12 @@
     assistantTranscript.reset();
     client = null;
     micActive = false;
+    endAfterReply = false;
     micBtn.classList.remove("live");
-    micLabel.textContent = "off";
+    micDock.classList.remove("live");
+    micBtn.setAttribute("aria-pressed", "false");
+    micBtn.setAttribute("aria-label", "Start voice session");
+    micLabel.textContent = "Start voice";
   }
 
   function startSession(){
@@ -358,16 +443,19 @@
 
   function startMic(){
     if(micActive) return;
-    micLabel.textContent = "…";
+    micLabel.textContent = "Connecting…";
     startSession().then(function(c){
       return c.startMic({workletUrl: "./vendor/converse/mic-worklet.js"});
     }).then(function(){
       micActive = true;
       micBtn.classList.add("live");
-      micLabel.textContent = "live";
+      micDock.classList.add("live");
+      micBtn.setAttribute("aria-pressed", "true");
+      micBtn.setAttribute("aria-label", "Stop voice session");
+      micLabel.textContent = "Listening";
     }).catch(function(err){
       console.debug("mic error", err);
-      micLabel.textContent = "off";
+      micLabel.textContent = "Start voice";
       addBanner("Microphone unavailable: " + (err && err.message ? err.message : err));
     });
   }
@@ -376,7 +464,10 @@
     if(!micActive) return;
     micActive = false;
     micBtn.classList.remove("live");
-    micLabel.textContent = "off";
+    micDock.classList.remove("live");
+    micBtn.setAttribute("aria-pressed", "false");
+    micBtn.setAttribute("aria-label", "Start voice session");
+    micLabel.textContent = "Start voice";
     try{ if(client) client.stopMic(); }catch(e){}
   }
 
