@@ -29,6 +29,15 @@ async def test_serves_index_with_token(server):
             assert "Converse Code" in await resp.text()
 
 
+async def test_serves_assistant_transcript_script_without_cache(server):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{base(server)}/assistant-transcript.js") as resp:
+            assert resp.status == 200
+            assert resp.content_type == "application/javascript"
+            assert "no-store" in resp.headers["Cache-Control"]
+            assert "AssistantTranscript" in await resp.text()
+
+
 async def test_index_requires_token(server):
     async with aiohttp.ClientSession() as session:
         for url in (f"{base(server)}/", f"{base(server)}/?t=wrong"):

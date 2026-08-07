@@ -53,6 +53,7 @@ class LocalServer:
         self._host = host
         app = web.Application()
         app.router.add_get("/", self._index)
+        app.router.add_get("/assistant-transcript.js", self._assistant_transcript)
         app.router.add_get("/ws", self._ws)
         app.router.add_get("/proxy", self._proxy)
         app.router.add_get("/vendor/converse/{name}", self._vendor)
@@ -112,6 +113,12 @@ class LocalServer:
         if not self._authorized(request):
             return web.Response(status=403, text="missing or bad token")
         return web.FileResponse(WEB_DIR / "index.html", headers=self.NO_STORE)
+
+    async def _assistant_transcript(self, _request: web.Request) -> web.StreamResponse:
+        return web.FileResponse(
+            WEB_DIR / "assistant-transcript.js",
+            headers={**self.NO_STORE, "Content-Type": "application/javascript"},
+        )
 
     async def _vendor(self, request: web.Request) -> web.StreamResponse:
         """Serve the vendored @trelis/converse SDK modules to the page.
