@@ -33,14 +33,10 @@ const PAUSE_FADE = 0.02;
 // Far-end tap (SDK AEC): `onScheduled(samples16k, startAt)` fires when a chunk is committed to
 // a BufferSource, with its playout time on this context's clock; `onCleared(cutAt)` fires on a
 // barge/clear so the not-yet-played reference tail is dropped. See aec.js.
-// SETTLED 2026-07-30 — no output-routing machinery belongs here. An 11-configuration on-device
-// experiment (web/audio-route-test.html, iPhone 17, Chrome + Safari) showed modern iOS routes web
-// audio to the loudspeakers in EVERY reachable configuration — bare destination, <audio>-element
-// sink, navigator.audioSession types in every working order, EC-on and raw capture alike — and
-// that "earpiece AND speaker at once" is simply normal iPhone stereo playback (the receiver is
-// the second stereo speaker). Web pages get no earpiece lever, so the speaker/earpiece option
-// (0.4.1-0.4.4) was unimplementable and is removed; the historical "quiet on iPhone" complaint
-// was the per-voice gain spread, fixed server-side. Full record: docs/user-feedback.md.
+// Playback intentionally remains a unity-gain AudioContext path. Physical output routing, maximum
+// loudness, and full-duplex attenuation belong to the browser/OS; WebKit device tests found no
+// reliable web override. Do not add software boost, output-route switching, or audio-session
+// manipulation here. Native media integrations are the boundary for route guarantees.
 export class StreamingPlayer {
   constructor() {
     this.onScheduled = null;

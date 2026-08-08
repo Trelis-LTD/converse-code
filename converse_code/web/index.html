@@ -155,7 +155,7 @@
 (function(){
   "use strict";
 
-  var BUILD = "2026-08-07-sdk-0.6.0";
+  var BUILD = "2026-08-08-sdk-0.8.0";
 
   // ---------- WebSocket connection with auto-reconnect ----------
   var ws = null;
@@ -335,8 +335,7 @@
   // It connects to /proxy on this server rather than to Converse directly: the
   // converse-code process relays that socket to the broker, adding the API key
   // and the tool manifest, because the tools are answered by the process, not by
-  // this page. A previous version drove the SDK's low-level audio pieces from
-  // here instead and accumulated a bug per missing responsibility.
+  // this page.
   var micBtn = document.getElementById("micBtn");
   var micLabel = document.getElementById("micLabel");
   var micDock = document.querySelector("footer");
@@ -478,7 +477,7 @@
   // ---------- Boot ----------
   // Printed so it is always possible to tell which page a browser has loaded —
   // a cached page previously looked identical to a fixed one.
-  console.info("converse-code voice tab | audio: @trelis/converse SDK 0.6.0 | build " + BUILD);
+  console.info("converse-code voice tab | audio: @trelis/converse SDK 0.8.0 | build " + BUILD);
   connect();
 })();
 </script>

@@ -124,8 +124,8 @@ class LocalServer:
         """Serve the vendored @trelis/converse SDK modules to the page.
 
         Deliberately not token-gated: an ES module's own static imports can't
-        carry a query string, and these files are public npm code containing no
-        secrets. The token still guards the page, the socket and the hook.
+        carry a query string, and these are bundled Apache-licensed client modules
+        containing no secrets. The token still guards the page, socket and hooks.
         """
         name = request.match_info["name"]
         if not name.endswith(".js") or "/" in name or ".." in name:

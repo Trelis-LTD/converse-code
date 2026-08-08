@@ -7,6 +7,6 @@ services, so they are kept out of the test suite.
   injects an instruction, waits for the Stop hook, prints the spoken summary and
   state. Catches everything a fake TUI cannot (transcript timing, hook payloads,
   screen quirks).
-- `probe_tool_limits.py` — asks production what tool `timeout` values it accepts.
-  Used to confirm the ceiling moved from 120s to 600s rather than trusting a
-  changelog; re-run it if the manifest is ever rejected with `invalid_tools`.
+- `vendor_converse_sdk.py` — regenerates the static browser SDK from an extracted,
+  Apache-licensed `sdk/browser` source tree, pins its upstream commit, and carries
+  its license, NOTICE, changelog, and third-party terms into the wheel.

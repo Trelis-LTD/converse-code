@@ -1,10 +1,4 @@
-/* Check the voice tab's audio wiring, and the vendored SDK's own audio math.
-
-   History worth keeping: this page used to hand-roll decode/resample/playback,
-   and shipped three defects in a row — PCM16 decoded as Float32 (pure noise), no
-   jitter buffer, and clicks at chunk seams. Two of my own tests passed anyway,
-   because they validated my assumptions against themselves. The audio path is
-   now the official @trelis/converse SDK, so this checks:
+/* Check the voice tab's audio wiring and the vendored SDK's own audio math:
 
      1. the page delegates to the SDK rather than reimplementing audio
      2. the SDK's decoder reads PCM16 — the wire format, verified against the
@@ -32,7 +26,7 @@ for (const banned of ["new StreamingPlayer", "new mod.MicCapture", "new mod.Echo
                       "binaryToFloat32", "floatToPcm16Bytes", "resampleToCtxRate", "MicCaptureProcessor"]) {
   if (script.includes(banned)) throw new Error(`page is hand-driving SDK audio again: ${banned}`);
 }
-// Hidden-tab playback is the SDK's job as of 0.6.0 (2.5s horizon while hidden),
+// Hidden-tab playback is the SDK's job (introduced in 0.6.0 and retained in 0.8.0),
 // so the page must NOT carry its own scheduler pump any more.
 if (script.includes("createScriptProcessor")) {
   throw new Error("page still carries the hidden-tab pump; SDK >=0.6.0 handles it");

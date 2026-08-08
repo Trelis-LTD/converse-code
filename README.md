@@ -36,8 +36,10 @@ uv tool install --force .
 cd my-project && converse-code
 ```
 
-First run asks for a Converse API key (converse.trelis.com dashboard) and stores it in
-`~/.config/converse-code/`. Every run: Claude Code opens in your terminal as normal, plus a
+First run asks for a Converse API key from the Converse dashboard, validates it, and stores it in
+`~/.config/converse-code/config.json` with mode `0600`. Run `converse-code login` to replace the
+saved key, or set `CONVERSE_API_KEY` to supply one without writing it to disk. Every run: Claude
+Code opens in your terminal as normal, plus a
 `http://127.0.0.1:<port>/?t=<token>` tab with a mic button and a live transcript — open the
 URL it prints, since the token is what keeps other pages out. Close the terminal, everything
 stops.
@@ -52,7 +54,7 @@ The browser uses Converse's Classic voice. The mic button starts or stops only t
 connection; Claude Code remains fully interactive in the terminal. Saying that you want to end
 the session closes the voice connection after the final spoken reply and leaves Claude running.
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the full design spec.
+See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security boundaries.
 
 ## How it works
 
@@ -99,4 +101,10 @@ plus opening and selecting the `/model` menu. It consumes a small Claude request
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Converse Code is licensed under the [Apache License 2.0](LICENSE). The bundled browser SDK is
+Apache-licensed Trelis source with its required third-party terms retained under
+[`converse_code/web/vendor/converse`](converse_code/web/vendor/converse).
+
+These licenses cover the open Converse Code client and bundled SDK code. They do **not** license
+the hosted Converse service, its models, Trelis trademarks, or server-side software. See
+[NOTICE](NOTICE) for the complete boundary and attributions.
