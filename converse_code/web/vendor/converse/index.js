@@ -43,6 +43,13 @@ const captureClockMs = () => {
 // One short-lived authorized control frame (feedback, client_error): open a fresh socket — the
 // session's own socket is usually closed by the time these fire — send the frame, resolve on the
 // server's ok. `kind` only labels the errors.
+function brokerError(frame, fallback) {
+  const err = new Error(frame?.detail || fallback);
+  err.code = frame?.code;
+  err.retryable = frame?.retryable;
+  return err;
+}
+
 function sendOneShotFrame(kind, frame, { url, WebSocketImpl = globalThis.WebSocket, timeoutMs = 5000 }) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocketImpl(toWebSocketUrl(url));
@@ -195,8 +202,8 @@ export class ConverseClient extends EventTarget {
     this._echoCancellerFactory = echoCancellerFactory;
     this.WebSocketImpl = WebSocketImpl;
     // Remote deploys drop sockets (wifi handoff, sleep, transient loss) far more than localhost.
-    // Auto-reconnect with backoff keeps the mic alive across a blip; a reconnect is a fresh server
-    // session (conversation context is server-side and resets), surfaced via events.
+    // Auto-reconnect with backoff keeps the mic alive across a blip; the server-issued resume token
+    // preserves conversation and deferred jobs during its bounded reconnect window.
     this.autoReconnect = autoReconnect;
     this.reconnectBaseMs = reconnectBaseMs;
     this.reconnectMaxMs = reconnectMaxMs;
@@ -210,6 +217,7 @@ export class ConverseClient extends EventTarget {
     this._playbackPauseSeq = null; // reversible hold; sequence rejects late resume events
     this._live = false;         // true only while a socket is open AND past `ready`
     this._closedByUser = false; // set by close() so a clean shutdown doesn't trigger reconnect
+    this._resumeToken = null;   // latest server token; sent on the next continuation attempt
     this._temperature = undefined;
     this._noGreeting = false;
     this._listeningFired = false; // one `listening` event per live session, after mic warmup frames
@@ -341,11 +349,12 @@ export class ConverseClient extends EventTarget {
   // Safari requires audio playback to be unlocked from the user's gesture. Call this before any
   // async connect / mic-permission wait so later streamed assistant audio can actually play.
   // Over webrtc the StreamingPlayer is unused (see _attachRemoteAudio) — the hidden <audio> element
-  // needs the same gesture-unlock treatment, so this also nudges it to play if one already exists
-  // (e.g. unlockAudio() called again after a reconnect established a new remote track).
+  // is the only playback surface, so do not allocate a silent AudioContext for that transport.
+  // Nudge an existing element too (for example after a reconnect established a new remote track).
   unlockAudio() {
+    const contextUnlock = this.transport === 'ws' ? this.player?.ensureContext?.() : null;
     return Promise.all([
-      this.player?.ensureContext?.(),
+      contextUnlock,
       this._remoteAudioEl?.play?.().catch(() => {}),
     ].filter(Boolean));
   }
@@ -426,6 +435,7 @@ export class ConverseClient extends EventTarget {
       mode,
     };
     if (this.apiKey) start.api_key = this.apiKey;
+    if (this._resumeToken) start.resume_token = this._resumeToken;
     const client = {};
     client.capabilities = (this.transport !== 'webrtc' && this._supportsReversiblePlayback())
       ? ['playback_pause_v1'] : [];
@@ -453,6 +463,7 @@ export class ConverseClient extends EventTarget {
     ws.binaryType = 'arraybuffer';
     return new Promise((resolve, reject) => {
       let settled = false;
+      let liveReady = false;
       const fail = (err) => {
         if (!settled) {
           settled = true;
@@ -469,13 +480,17 @@ export class ConverseClient extends EventTarget {
       ws.addEventListener('close', (ev) => {
         this.ws = null;
         this._live = false;
-        if (!settled) fail(new Error('Converse WebSocket closed before ready'));
-        else if (!this._closedByUser && ev.code === 1000) {
+        if (!liveReady) {
+          if (!settled) fail(new Error('Converse WebSocket closed before ready'));
+          return;
+        }
+        if (!this._closedByUser && ev.code === 1000) {
           // The server hung up ON PURPOSE (only intentional ends close 1000 — e.g. the idle
           // sign-off's `close(1000, "idle")`). Redialing here would open a fresh session and
           // replay the greeting; stay closed and let the app decide. Abnormal drops (1006 loss,
           // 1011 upstream lost, 1013 drain) still reconnect below.
           this.opened = null;
+          this._resumeToken = null; // an ended session must not resume on a later connect()
           this._responding = false;   // a reused client must not carry reply/ack state into
           this._dropAck();            // a later connect() (mirrors _scheduleReconnect's resets)
           this._dispatch({ type: 'session_end', code: ev.code, reason: ev.reason || '' });
@@ -495,7 +510,9 @@ export class ConverseClient extends EventTarget {
                 + `this SDK plays pcm16 at ${SAMPLE_RATE} Hz`));
               return;
             }
+            if (typeof detail.resume_token === 'string') this._resumeToken = detail.resume_token;
             settled = true;
+            liveReady = true;
             this._live = true;
             this._listeningFired = false;   // re-arm: this session emits `listening` after warmup
             this._listeningFrames = 0;
@@ -504,7 +521,7 @@ export class ConverseClient extends EventTarget {
             this._sendAudioFrontendStatus();
             resolve(this);
           } else if (!settled && detail?.type === 'error') {
-            fail(new Error(detail.detail || 'Converse WebSocket rejected connection'));
+            fail(brokerError(detail, 'Converse WebSocket rejected connection'));
           }
         } catch (err) {
           fail(err);
@@ -603,6 +620,7 @@ export class ConverseClient extends EventTarget {
               return;
             }
             if (!settled && detail?.type === 'ready') {
+              if (typeof detail.resume_token === 'string') this._resumeToken = detail.resume_token;
               settled = true;
               this._channel = channel;
               this._live = true;
@@ -613,7 +631,7 @@ export class ConverseClient extends EventTarget {
               this._sendAudioFrontendStatus();
               resolve(this);
             } else if (!settled && detail?.type === 'error') {
-              fail(new Error(detail.detail || 'Converse webrtc session rejected'));
+              fail(brokerError(detail, 'Converse webrtc session rejected'));
             }
           });
           channel.addEventListener('close', () => {
@@ -628,7 +646,7 @@ export class ConverseClient extends EventTarget {
           signalingDone = true;
           try { ws.close(1000); } catch { /* noop */ }   // signaling's job is done
         } else if (msg.type === 'error') {
-          fail(new Error(msg.detail || 'Converse webrtc connect rejected'));
+          fail(brokerError(msg, 'Converse webrtc connect rejected'));
         }
       });
     });
@@ -645,6 +663,7 @@ export class ConverseClient extends EventTarget {
       // Only an intentional server end closes 1000 (mirrors the WS idle sign-off) — surface it the
       // same way so app code doesn't need transport-specific handling.
       this._responding = false;
+      this._resumeToken = null;
       this._dropAck();
       this._dispatch({ type: 'session_end', code, reason: reason || '' });
     }
@@ -706,6 +725,11 @@ export class ConverseClient extends EventTarget {
         return self;
       }).catch((err) => {
         if (this._closedByUser) throw err;
+        if (err?.code === 'resume_failed') {
+          this._resumeToken = null;
+          this._dispatch({ type: 'resume_failed', error: err });
+          throw err;
+        }
         if (attempt >= this.maxReconnectAttempts) {
           this._dispatch({ type: 'error', detail: 'reconnect failed', error: err });
           throw err;
@@ -854,6 +878,14 @@ export class ConverseClient extends EventTarget {
     this._sendControl({ type: 'tool_result', id, content });
   }
 
+  /** Detach an eligible tool call from the current voice turn. The host keeps running the job and
+   *  may address later progress, cancellation, and the one terminal result by id or handle. */
+  sendToolDeferred(id, { handle, statusLabel } = {}) {
+    const frame = { type: 'tool_deferred', id, handle };
+    if (statusLabel) frame.status_label = statusLabel;
+    this._sendControl(frame);
+  }
+
   /** Report human-readable progress on an in-flight tool call (docs/client-tool-protocol.md §3):
    *  appends to the brain's context so the next turn can speak to it; never resolves the call. */
   sendToolProgress(id, note) {
@@ -885,6 +917,7 @@ export class ConverseClient extends EventTarget {
   close() {
     this._closedByUser = true;   // stop any reconnect loop and prevent reconnect on the close event
     this._live = false;
+    this._resumeToken = null;   // an intentional reuse starts a new conversation
     this._dropAck();             // armed-but-unsent ack frames must not bleed into a reused client
 
     this.stopMic();              // release the SDK-owned mic (no-op for custom-capture apps)

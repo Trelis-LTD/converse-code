@@ -1,9 +1,9 @@
 {
   "name": "@trelis/converse",
-  "version": "0.6.0",
+  "version": "0.8.0",
   "type": "module",
   "description": "Browser SDK for the Trelis Converse v2.1 WebSocket voice API",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "keywords": [
     "voice",
     "voice-ai",
@@ -25,10 +25,13 @@
   },
   "files": [
     "src",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_LICENSES"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
     "pack:check": "npm pack --dry-run",
     "vendor": "node scripts/vendor.mjs",
     "vendor:check": "node scripts/vendor.mjs --check"

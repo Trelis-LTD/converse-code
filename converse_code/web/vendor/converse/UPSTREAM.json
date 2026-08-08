@@ -1,0 +1,7 @@
+{
+  "package": "@trelis/converse",
+  "version": "0.8.0",
+  "repository": "https://github.com/Trelis-LTD/voice-loop-pro",
+  "path": "sdk/browser",
+  "commit": "7776e02aea21577077fe03e6b0c79d9e78b0421d"
+}

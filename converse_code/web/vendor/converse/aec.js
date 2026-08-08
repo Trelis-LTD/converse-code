@@ -25,9 +25,10 @@ const RENDER_PUMP_MS = 10;   // far-end feed cadence; AEC3's delay estimator abs
 // fires vs the browser-arm baseline) — tune with eval/runners/sweep_wasm_aec.py.
 export const TUNED_AEC3_CONFIG = '';
 
-// True where getUserMedia AEC cannot deliver the AEC-only front-end spec: all iOS browsers
-// (Chrome/Firefox/Edge included — Apple mandates WebKit) and Mac Safari. Desktop Chromium
-// keeps its native per-stream AEC3; Firefox desktop keeps Gecko's per-stream canceller.
+// True where getUserMedia AEC cannot deliver the AEC-only front-end spec: supported iOS browser
+// builds (including branded Chrome/Firefox/Edge) and Mac Safari. The device gate deliberately
+// keeps new iOS engine variants on the conservative SDK path until physically certified. Desktop
+// Chromium keeps its native per-stream AEC3; Firefox desktop keeps Gecko's per-stream canceller.
 export function needsSdkAec(ua = globalThis.navigator?.userAgent || '') {
   const iosDevice = /iPhone|iPad|iPod/.test(ua)
     || (/Macintosh/.test(ua) && (globalThis.navigator?.maxTouchPoints || 0) > 1); // iPadOS masquerades as Mac

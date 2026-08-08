@@ -30,6 +30,7 @@ def test_web_audio_resamplers():
 def test_voice_session_pins_classic_and_explains_retryable_pipeline_errors():
     page = PAGE.read_text()
 
+    assert "@trelis/converse SDK 0.8.0" in page
     assert 'voice: "classic"' in page
     assert 'ev.detail ||' in page
     assert "ev.retryable" in page

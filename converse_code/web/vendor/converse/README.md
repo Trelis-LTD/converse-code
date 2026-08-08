@@ -1,28 +1,21 @@
 # Vendored `@trelis/converse` browser SDK
 
-Copied verbatim from npm `@trelis/converse@0.6.0` (`package/src/`). Do not edit
-these files — re-vendor from npm to update, and bump the version noted here.
+This is the preferred-form JavaScript source for `@trelis/converse` 0.8.0 from
+the pinned upstream revision recorded in [UPSTREAM.json](UPSTREAM.json). The
+voice page is a static application served by the Python CLI, so the SDK is
+included in the wheel rather than fetched from a CDN at runtime.
 
-Why vendored rather than a CDN or an npm dependency: the voice tab is served by
-a Python CLI with no build step and must work offline, so the modules are
-shipped as static files under this directory.
+Do not edit copied SDK files here. Regenerate them from a licensed source tree:
 
-Why used at all: this SDK owns microphone capture, echo cancellation, streaming
-playback and interruption handling. Hand-rolling that produced a string of
-audio defects (a Float32/PCM16 decode error, chunk-seam clicks, no jitter
-buffer); the SDK is the same code the Converse playground runs.
+```bash
+uv run scripts/vendor_converse_sdk.py /path/to/sdk/browser --commit <full-git-sha>
+```
 
-`package.json` is retained for the version/licence record. The package is
-published `UNLICENSED` — it is used here as first-party Trelis code.
+The update script refuses non-Apache source and copies `LICENSE`, `NOTICE`, and
+the complete `THIRD_PARTY_LICENSES` directory. Use `--check` with the same source
+and commit to verify an update. Do not vendor an npm artifact whose package
+metadata or notice set does not match the licensed source release.
 
-Version history that matters here, all found the hard way:
-- 0.4.5 decoded the downlink as `pcm_f32le` after the server default became
-  PCM16 — pure noise against a live server.
-- 0.5.0 fixed that, and fails `connect()` loudly if the server announces an
-  unexpected format instead of playing garbage.
-- 0.6.0 fixed hidden-tab playback (a 2.5s scheduling horizon while the tab is
-  hidden, replacing a workaround this page used to carry) and added
-  `sendToolResult`/`sendToolProgress`/`sendToolPartialResult`/`sendToolCancel`.
-
-`tests/web_audio_check.mjs` pins both: the page must not reintroduce its own
-audio handling, and the vendored player must contain the hidden-tab fix.
+The SDK owns browser microphone capture, echo cancellation, streaming playback,
+reconnection, and interruption handling. Converse Code owns the localhost relay,
+Claude Code tools, and UI integration.
