@@ -25,7 +25,9 @@ def assistant(text=None, tool=None, file_path=None):
 def test_manifest_shape():
     tools = manifest()
     names = [t["name"] for t in tools]
-    assert names == ["long_task", "command", "select_option", "press_key", "end_session"]
+    assert names == [
+        "long_task", "steer_task", "command", "select_option", "press_key", "end_session",
+    ]
     long_task = tools[0]
     assert long_task.get("requires_permission", False) is False
     # The description states capability, not a verb whitelist: the brain pipes
@@ -248,26 +250,50 @@ async def test_long_task_retries_enter_then_fails_fast_without_ack(
     assert content["data"]["state"] == "idle"
 
 
-async def test_second_long_task_queues(router, fake_driver, fake_sender):
+async def test_second_long_task_requires_explicit_steering(router, fake_driver, fake_sender):
     t1 = asyncio.create_task(router.handle_tool_call(
         {"id": "c1", "name": "long_task", "args": {"request": "first"}}
     ))
     await asyncio.sleep(0.1)
     await router.handle_tool_call({"id": "c2", "name": "long_task", "args": {"request": "second"}})
 
-    queued = next(c for cid, c in fake_sender.results if cid == "c2")
-    assert "Queued" in queued["speak"]
-    assert queued["data"]["queue"] == ["second"]
-    assert fake_driver.injected == ["first", "second"]
+    rejected = next(c for cid, c in fake_sender.results if cid == "c2")
+    assert "steer_task" in rejected["speak"]
+    assert rejected["data"]["queue"] == []
+    assert fake_driver.injected == ["first"]
 
     append_transcript(router, assistant(text="First done."))
     await finish_turn(router, delay=0)
     await t1
-    assert router.working is True  # queued item is now running
-    assert router.queue == []
-
-    await router.on_hook("stop", {"transcript_path": str(router.transcript_path)})
     assert router.working is False
+
+
+async def test_steer_task_adds_guidance_to_current_turn(router, fake_driver, fake_sender):
+    task = asyncio.create_task(router.handle_tool_call(
+        {"id": "c1", "name": "long_task", "args": {"request": "first"}}
+    ))
+    await asyncio.sleep(0.1)
+
+    await router.handle_tool_call(
+        {"id": "c2", "name": "steer_task", "args": {"request": "also update the docs"}}
+    )
+
+    steered = next(c for cid, c in fake_sender.results if cid == "c2")
+    assert "current" in steered["speak"].lower()
+    assert fake_driver.injected == ["first", "also update the docs"]
+    assert router.working is True
+
+    await router.on_hook("stop", {"last_assistant_message": "Code and docs updated."})
+    await task
+    assert router.working is False
+
+
+async def test_steer_task_requires_active_work(router, fake_driver, fake_sender):
+    await router.handle_tool_call(
+        {"id": "c1", "name": "steer_task", "args": {"request": "also update the docs"}}
+    )
+    assert fake_driver.injected == []
+    assert "long_task" in fake_sender.results[0][1]["speak"]
 
 
 async def test_server_tool_cancel_interrupts_matching_task(router, fake_driver, fake_sender):
@@ -442,6 +468,40 @@ async def test_select_option_arrow_math(router, fake_driver, fake_sender):
     await side
     assert fake_driver.keys == ["down", "down", "enter"]
     assert "Chose Haiku" in fake_sender.results[0][1]["speak"]
+
+
+async def test_selecting_model_confirms_second_phase(router, fake_driver, fake_sender):
+    """Claude Code 2.1.226 asks for a second confirmation when a model change
+    affects speed/token use. The explicit model selection authorizes that exact
+    confirmation; leaving it open makes the next voice action one phase behind."""
+    fake_driver.lines = [" Select model:", " ❯ Opus", "   Sonnet", "   Haiku", ""]
+
+    async def advance_menus():
+        while fake_driver.keys.count("enter") < 1:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [
+            # The screen parser intentionally uses the line immediately above
+            # the first option as its title; Claude renders explanatory copy
+            # there, not the top-level "Switch model?" heading.
+            " This conversation is cached for the current model.",
+            " ❯ 1. Yes, switch to Haiku 4.5",
+            "   2. No, go back",
+            "",
+        ]
+        while fake_driver.keys.count("enter") < 2:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [" > ", ""]
+
+    side = asyncio.create_task(advance_menus())
+    await router.handle_tool_call(
+        {"id": "c1", "name": "select_option", "args": {"option": "haiku"}}
+    )
+    await side
+
+    assert fake_driver.keys == ["down", "down", "enter", "enter"]
+    result = fake_sender.results[0][1]
+    assert "confirmed" in result["speak"].lower()
+    assert result["data"]["state"] == "idle"
 
 
 async def test_select_option_without_menu(router, fake_sender):

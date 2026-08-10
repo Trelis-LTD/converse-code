@@ -30,7 +30,7 @@ def test_web_audio_resamplers():
 def test_voice_session_pins_classic_and_explains_retryable_pipeline_errors():
     page = PAGE.read_text()
 
-    assert "@trelis/converse SDK 0.8.0" in page
+    assert "@trelis/converse SDK 0.10.0" in page
     assert 'voice: "classic"' in page
     assert 'ev.detail ||' in page
     assert "ev.retryable" in page
@@ -43,3 +43,28 @@ def test_voice_session_closes_after_its_final_reply():
     assert 'msg.event === "end_session"' in page
     assert "endAfterReply = true" in page
     assert "finishEndSession" in page
+
+
+def test_stop_is_a_clean_session_end_and_mute_is_independent():
+    page = PAGE.read_text()
+
+    assert 'id="muteBtn"' in page
+    assert "setMicEnabled" in page
+    assert "stopSession" in page
+    assert "sessionGeneration" in page
+    assert 'case "session_end"' in page
+
+
+def test_browser_connects_directly_with_scoped_credentials_and_resume_state():
+    page = PAGE.read_text()
+
+    assert '"wss://converse.trelis.com/ws"' in page
+    assert "/session-credential" in page
+    assert "/proxy" not in page
+    assert "injectContext" in page
+    assert "sendToolResult" in page
+    assert "sendToolDeferred" in page
+    assert "exportResumeState" in page
+    assert "importResumeState" in page
+    assert 'addEventListener("resume_state"' in page
+    assert "sessionStorage" in page

@@ -104,6 +104,16 @@
   #micBtn:active{transform:scale(.94);}
   #micBtn:focus-visible{outline:2px solid var(--text); outline-offset:3px;}
   #micBtn.live{background:var(--accent-deep); border-radius:50%;}
+  #muteBtn{
+    flex:0 0 auto; min-width:4.5rem; height:2.35rem; padding:0 .75rem; border-radius:.55rem;
+    border:1px solid var(--border-strong); background:var(--panel-2); color:var(--muted);
+    font:650 .63rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; cursor:pointer;
+    text-transform:uppercase; letter-spacing:.06em;
+  }
+  #muteBtn:hover:not(:disabled){color:var(--text); border-color:var(--muted);}
+  #muteBtn:disabled{opacity:.35; cursor:default;}
+  #muteBtn.muted{color:var(--amber); border-color:var(--amber);}
+  #muteBtn:focus-visible{outline:2px solid var(--text); outline-offset:3px;}
   .mic-copy{flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:.22rem;}
   #micLabel{font-size:.82rem; font-weight:620; color:var(--text);}
   #micHint{font-size:.69rem; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
@@ -148,6 +158,7 @@
   </button>
   <div class="mic-copy"><span id="micLabel">Start voice</span><span id="micHint">Speak naturally — coding requests are handed to Claude Code</span></div>
   <span class="levels" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+  <button id="muteBtn" type="button" aria-label="Mute microphone" aria-pressed="false" disabled>Mute</button>
   <span class="kbd">Classic voice</span>
 </footer>
 <script src="/assistant-transcript.js"></script>
@@ -155,7 +166,8 @@
 (function(){
   "use strict";
 
-  var BUILD = "2026-08-08-sdk-0.8.0";
+  var BUILD = "2026-08-10-direct-sdk-0.10.0";
+  var RESUME_STORAGE_KEY = "converse-code-resume-v1";
 
   // ---------- WebSocket connection with auto-reconnect ----------
   var ws = null;
@@ -163,6 +175,7 @@
   var statusChip = document.getElementById("statusChip");
   var reconnectDelay = 2000;
   var reconnectTimer = null;
+  var localOutbox = [];
 
   function wsUrl(){
     var proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -187,6 +200,10 @@
     }
     ws.onopen = function(){
       setDot("open");
+      while(localOutbox.length && ws.readyState === WebSocket.OPEN){
+        ws.send(JSON.stringify(localOutbox.shift()));
+      }
+      if(converseReady) sendJson({type: "local", event: "bridge_ready"});
     };
     ws.onclose = function(){
       setDot("closed");
@@ -208,9 +225,11 @@
     }, reconnectDelay);
   }
 
-  function sendJson(obj){
+  function sendJson(obj, durable){
     if(ws && ws.readyState === WebSocket.OPEN){
       ws.send(JSON.stringify(obj));
+    } else if(durable){
+      localOutbox.push(obj);
     }
   }
 
@@ -269,7 +288,7 @@
     autoScroll();
   }
 
-  // ---------- Local + passthrough JSON handling ----------
+  // ---------- Local status + tool bridge ----------
   function pickText(msg){
     if(typeof msg.text === "string") return msg.text;
     if(typeof msg.transcript === "string") return msg.transcript;
@@ -291,10 +310,8 @@
     pickText: pickText
   });
 
-  // The /ws channel carries only converse-code's own status — Claude Code's
-  // state, its queue, and the text injected into the terminal. Everything from
-  // Converse itself (transcripts, replies, audio) arrives through the SDK client
-  // on /proxy and is rendered by renderEvent().
+  // Converse audio and events travel directly between this page and Converse.
+  // The localhost socket carries only Claude state and tool controls.
   function handleJson(raw){
     var msg;
     try{
@@ -313,6 +330,8 @@
       addInjected(msg.text || "");
     } else if(msg.event === "end_session"){
       endAfterReply = true;
+    } else if(msg.event === "bridge_control"){
+      queueBridgeControl(msg);
     }
   }
 
@@ -332,22 +351,79 @@
   // browser cannot do for us on Safari/iOS), streaming playback, barge handling
   // and reconnects.
   //
-  // It connects to /proxy on this server rather than to Converse directly: the
-  // converse-code process relays that socket to the broker, adding the API key
-  // and the tool manifest, because the tools are answered by the process, not by
-  // this page.
+  // Python mints a short-lived session credential; the persistent account key
+  // never enters browser JavaScript.
   var micBtn = document.getElementById("micBtn");
+  var muteBtn = document.getElementById("muteBtn");
   var micLabel = document.getElementById("micLabel");
   var micDock = document.querySelector("footer");
 
   var client = null;
   var micActive = false;
+  var micMuted = false;
+  var sessionStarting = false;
+  var sessionGeneration = 0;
   var endAfterReply = false;
+  var converseReady = false;
+  var pendingBridgeControls = new Map();
 
-  function proxyUrl(){
-    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+  function credentialUrl(){
     var token = new URLSearchParams(location.search).get("t") || "";
-    return proto + "//" + location.host + "/proxy?t=" + encodeURIComponent(token);
+    return "/session-credential?t=" + encodeURIComponent(token);
+  }
+
+  function loadResumeRecord(){
+    try{
+      var record = JSON.parse(sessionStorage.getItem(RESUME_STORAGE_KEY) || "null");
+      if(record && typeof record.sessionId === "string" && record.state){
+        return record;
+      }
+    }catch(e){}
+    sessionStorage.removeItem(RESUME_STORAGE_KEY);
+    return null;
+  }
+
+  function saveResumeRecord(sessionId, state){
+    if(state){
+      sessionStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify({sessionId: sessionId, state: state}));
+    } else {
+      sessionStorage.removeItem(RESUME_STORAGE_KEY);
+    }
+  }
+
+  function queueBridgeControl(frame){
+    if(!pendingBridgeControls.has(frame.seq)) pendingBridgeControls.set(frame.seq, frame);
+    flushBridgeControls();
+  }
+
+  function flushBridgeControls(){
+    if(!client || !converseReady) return;
+    pendingBridgeControls.forEach(function(frame, seq){
+      try{
+        switch(frame.action){
+          case "tool_result":
+            client.sendToolResult(frame.id, frame.content); break;
+          case "tool_progress":
+            client.sendToolProgress(frame.id, frame.note); break;
+          case "tool_deferred":
+            client.sendToolDeferred(frame.id, {
+              handle: frame.handle, statusLabel: frame.status_label
+            }); break;
+          case "tool_partial_result":
+            client.sendToolPartialResult(frame.id, frame.content, {reply: !!frame.reply}); break;
+          case "tool_cancel":
+            client.sendToolCancel(frame.id); break;
+          case "inject_context":
+            client.injectContext(frame.text, {role: frame.role, reply: !!frame.reply}); break;
+          default:
+            console.debug("unknown bridge action", frame.action); return;
+        }
+        pendingBridgeControls.delete(seq);
+        sendJson({type: "local", event: "bridge_ack", seq: seq}, true);
+      }catch(err){
+        console.debug("could not deliver bridge control", err);
+      }
+    });
   }
 
   function renderEvent(ev){
@@ -384,6 +460,34 @@
         resetSession();
         break;
       }
+      case "session_end": {
+        addBanner("Voice session ended — click the mic to start again.");
+        resetSession();
+        break;
+      }
+      case "tool_call":
+        sendJson({type: "local", event: "tool_call", call: ev}, true);
+        break;
+      case "tool_cancel":
+        sendJson({type: "local", event: "tool_cancel", call: ev}, true);
+        break;
+      case "tool_deferred_resume":
+        sendJson({type: "local", event: "tool_deferred_resume", call: ev}, true);
+        break;
+      case "reconnecting":
+        converseReady = false;
+        micLabel.textContent = "Reconnecting…";
+        break;
+      case "reconnected":
+        converseReady = true;
+        micLabel.textContent = micMuted ? "Muted" : "Listening";
+        flushBridgeControls();
+        sendJson({type: "local", event: "bridge_ready"});
+        break;
+      case "resume_failed":
+        addBanner("The previous voice session expired — click the mic to start a fresh one.");
+        resetSession();
+        break;
       case "error": {
         console.debug("client error", ev);
         var detail = ev.detail || (ev.error && ev.error.message) || "unknown error";
@@ -410,74 +514,128 @@
   // old client cached, so startSession() hands the dead one back and clicking the
   // mic does nothing until the page is manually reloaded.
   function resetSession(){
-    try{ if(client) client.close(); }catch(e){}
-    assistantTranscript.reset();
+    sessionGeneration += 1;
+    var closingClient = client;
     client = null;
+    converseReady = false;
+    sessionStorage.removeItem(RESUME_STORAGE_KEY);
+    try{ if(closingClient) closingClient.close(); }catch(e){}
+    assistantTranscript.reset();
     micActive = false;
+    micMuted = false;
+    sessionStarting = false;
     endAfterReply = false;
     micBtn.classList.remove("live");
     micDock.classList.remove("live");
     micBtn.setAttribute("aria-pressed", "false");
     micBtn.setAttribute("aria-label", "Start voice session");
     micLabel.textContent = "Start voice";
+    muteBtn.disabled = true;
+    muteBtn.classList.remove("muted");
+    muteBtn.setAttribute("aria-pressed", "false");
+    muteBtn.textContent = "Mute";
   }
 
-  function startSession(){
+  async function startSession(){
     if(client) return Promise.resolve(client);
-    return import("./vendor/converse/index.js").then(function(mod){
-      client = new mod.ConverseClient({
-        url: proxyUrl(),
-        // The process substitutes the real key and session id when it relays the
-        // start frame; nothing secret is ever handed to the browser.
-        apiKey: "relayed-by-converse-code",
-        sessionId: mod.createSessionId(),
-        mode: {kind: "converse", voice: "classic", web_search: false}
-      });
-      client.addEventListener("event", function(e){ renderEvent(e.detail || {}); });
-      return client.unlockAudio()
-        .then(function(){ return client.connect(); })
-        .then(function(){ return client; });
+    var generation = ++sessionGeneration;
+    var mod = await import("./vendor/converse/index.js");
+    var resume = loadResumeRecord();
+    var sessionId = resume ? resume.sessionId : mod.createSessionId();
+    var response = await fetch(credentialUrl(), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({session_id: sessionId})
     });
+    if(!response.ok) throw new Error("Voice credential failed: " + response.status);
+    var credential = await response.json();
+    if(generation !== sessionGeneration) throw {sessionCanceled: true};
+    var openingClient = new mod.ConverseClient({
+      url: credential.ws_url || "wss://converse.trelis.com/ws",
+      apiKey: credential.api_key,
+      sessionId: credential.session_id,
+      mode: {
+        kind: "converse", voice: "classic", web_search: false,
+        tools: credential.tools || []
+      }
+    });
+    if(resume) openingClient.importResumeState(resume.state);
+    client = openingClient;
+    openingClient.addEventListener("resume_state", function(e){
+      if(client === openingClient){
+        saveResumeRecord(openingClient.sessionId,
+          e.detail.state ? openingClient.exportResumeState() : null);
+      }
+    });
+    openingClient.addEventListener("event", function(e){
+      if(client === openingClient) renderEvent(e.detail || {});
+    });
+    await openingClient.unlockAudio();
+    await openingClient.connect();
+    if(generation !== sessionGeneration || client !== openingClient){
+      openingClient.close();
+      throw {sessionCanceled: true};
+    }
+    converseReady = true;
+    flushBridgeControls();
+    sendJson({type: "local", event: "bridge_ready"});
+    return openingClient;
   }
 
   function startMic(){
-    if(micActive) return;
+    if(micActive || sessionStarting) return;
+    sessionStarting = true;
     micLabel.textContent = "Connecting…";
     startSession().then(function(c){
       return c.startMic({workletUrl: "./vendor/converse/mic-worklet.js"});
     }).then(function(){
+      if(!client) throw {sessionCanceled: true};
+      sessionStarting = false;
       micActive = true;
+      micMuted = false;
       micBtn.classList.add("live");
       micDock.classList.add("live");
       micBtn.setAttribute("aria-pressed", "true");
       micBtn.setAttribute("aria-label", "Stop voice session");
       micLabel.textContent = "Listening";
+      muteBtn.disabled = false;
     }).catch(function(err){
+      sessionStarting = false;
+      if(err && err.sessionCanceled) return;
       console.debug("mic error", err);
+      resetSession();
       micLabel.textContent = "Start voice";
       addBanner("Microphone unavailable: " + (err && err.message ? err.message : err));
     });
   }
 
-  function stopMic(){
-    if(!micActive) return;
-    micActive = false;
-    micBtn.classList.remove("live");
-    micDock.classList.remove("live");
-    micBtn.setAttribute("aria-pressed", "false");
-    micBtn.setAttribute("aria-label", "Start voice session");
-    micLabel.textContent = "Start voice";
-    try{ if(client) client.stopMic(); }catch(e){}
+  function stopSession(){
+    if(!micActive && !sessionStarting && !client) return;
+    addBanner("Voice session stopped — click the mic to reconnect.");
+    resetSession();
+  }
+
+  function toggleMute(){
+    if(!client || !micActive) return;
+    micMuted = !micMuted;
+    client.setMicEnabled(!micMuted);
+    muteBtn.classList.toggle("muted", micMuted);
+    muteBtn.setAttribute("aria-pressed", String(micMuted));
+    muteBtn.textContent = micMuted ? "Unmute" : "Mute";
+    micLabel.textContent = micMuted ? "Muted" : "Listening";
+    micDock.classList.toggle("live", !micMuted);
   }
 
   micBtn.addEventListener("click", function(){
-    if(micActive){ stopMic(); } else { startMic(); }
+    if(micActive || sessionStarting || client){ stopSession(); } else { startMic(); }
   });
+  muteBtn.addEventListener("click", toggleMute);
 
   // ---------- Boot ----------
   // Printed so it is always possible to tell which page a browser has loaded —
   // a cached page previously looked identical to a fixed one.
-  console.info("converse-code voice tab | audio: @trelis/converse SDK 0.8.0 | build " + BUILD);
+  console.info("converse-code voice tab | audio: @trelis/converse SDK 0.10.0 | build " + BUILD);
   connect();
 })();
 </script>

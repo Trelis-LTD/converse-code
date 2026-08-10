@@ -1,0 +1,59 @@
+"""Server-side authentication helpers for direct Browser SDK sessions."""
+
+import asyncio
+import json
+
+import aiohttp
+import websockets
+
+DEFAULT_WS_URL = "wss://converse.trelis.com/ws"
+DEFAULT_API_URL = "https://converse.trelis.com"
+
+
+class CredentialError(RuntimeError):
+    pass
+
+
+async def validate_key(api_key: str, url: str = DEFAULT_WS_URL) -> bool:
+    """Check a persistent key with the broker's non-billable auth frame."""
+    async with websockets.connect(url) as ws:
+        await ws.send(json.dumps({"type": "auth", "api_key": api_key}))
+        reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+        return reply.get("type") == "ok"
+
+
+async def mint_session_credential(
+    api_key: str,
+    session_id: str,
+    api_url: str = DEFAULT_API_URL,
+) -> dict:
+    """Exchange the server-held key for one browser-safe scoped credential."""
+    endpoint = f"{api_url.rstrip('/')}/api/v1/session-keys"
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        async with session.post(
+            endpoint,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"session_id": session_id},
+        ) as response:
+            try:
+                body = await response.json()
+            except (aiohttp.ContentTypeError, ValueError) as exc:
+                raise CredentialError(
+                    f"Converse credential endpoint returned HTTP {response.status}"
+                ) from exc
+            if response.status != 201:
+                raise CredentialError(
+                    f"Converse credential endpoint returned HTTP {response.status}"
+                )
+    if (
+        not isinstance(body, dict)
+        or not isinstance(body.get("api_key"), str)
+        or body.get("session_id") != session_id
+        or not isinstance(body.get("expires_in"), int)
+    ):
+        raise CredentialError("Converse credential endpoint returned an invalid response")
+    return {
+        "api_key": body["api_key"],
+        "session_id": body["session_id"],
+        "expires_in": body["expires_in"],
+    }

@@ -19,7 +19,8 @@ console.log("page script parses: OK");
 // audio pieces. Driving StreamingPlayer/MicCapture/EchoCanceller directly from
 // the page means owning echo cancellation, frame ordering, barge handling and
 // scheduler liveness — responsibilities that produced one bug each.
-for (const needed of ["ConverseClient", "vendor/converse/index.js", "startMic", "unlockAudio", "/proxy"]) {
+for (const needed of ["ConverseClient", "vendor/converse/index.js", "startMic", "unlockAudio",
+                      "injectContext", "exportResumeState", "session-credential"]) {
   if (!script.includes(needed)) throw new Error(`page no longer uses ${needed}`);
 }
 for (const banned of ["new StreamingPlayer", "new mod.MicCapture", "new mod.EchoCanceller",

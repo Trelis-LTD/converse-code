@@ -71,6 +71,8 @@ class ClaudeHost:
         self.returncode: int | None = None
         self._injection_queue: deque[bytes] = deque()
         self._injecting = False
+        self._pending_write = bytearray()
+        self._writer_registered = False
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -139,11 +141,17 @@ class ClaudeHost:
         except (BlockingIOError, InterruptedError):
             return
         if data:
-            os.write(self._master_fd, data)
+            try:
+                self._write(data)
+            except OSError:
+                pass
 
     def _finish(self) -> None:
         loop = asyncio.get_running_loop()
         loop.remove_reader(self._master_fd)
+        if self._writer_registered:
+            loop.remove_writer(self._master_fd)
+            self._writer_registered = False
         if self.attach_terminal:
             loop.remove_reader(sys.stdin.fileno())
         if self._pid:
@@ -158,6 +166,7 @@ class ClaudeHost:
             except OSError:
                 pass
             self._master_fd = None
+        self._pending_write.clear()
         self.restore_terminal()
         self.exited.set()
 
@@ -225,7 +234,32 @@ class ClaudeHost:
     def _write(self, data: bytes) -> None:
         if self._master_fd is None:
             raise OSError("Claude Code session has exited")
-        os.write(self._master_fd, data)
+        self._pending_write.extend(data)
+        self._flush_writes()
+
+    def _flush_writes(self) -> None:
+        if self._master_fd is None:
+            self._pending_write.clear()
+            return
+        while self._pending_write:
+            try:
+                written = os.write(self._master_fd, self._pending_write)
+            except InterruptedError:
+                continue
+            except BlockingIOError:
+                if not self._writer_registered:
+                    asyncio.get_running_loop().add_writer(self._master_fd, self._flush_writes)
+                    self._writer_registered = True
+                return
+            if written <= 0:
+                if not self._writer_registered:
+                    asyncio.get_running_loop().add_writer(self._master_fd, self._flush_writes)
+                    self._writer_registered = True
+                return
+            del self._pending_write[:written]
+        if self._writer_registered:
+            asyncio.get_running_loop().remove_writer(self._master_fd)
+            self._writer_registered = False
 
     def snapshot(self) -> list[str]:
         """Current rendered screen, one string per row."""

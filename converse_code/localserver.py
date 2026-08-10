@@ -1,14 +1,13 @@
 """Local HTTP + WebSocket server. Three channels:
 
-  /ws     status only — Claude Code's state/queue and the text injected into the
-          terminal (JSON, this process -> page)
-  /proxy  the Converse protocol, relayed between the page's SDK client and the
-          broker (JSON + binary audio, both directions)
+  /ws     acknowledged tool controls plus Claude Code state (JSON in both
+          directions; audio never crosses localhost)
+  /session-credential  mints a scoped credential for the direct Browser SDK
   /hook   Claude Code lifecycle hooks POST their payloads here
 
 Everything here is reachable from any web page the dev happens to have open —
 browsers don't apply same-origin policy to WebSockets, and a simple-content-type
-POST needs no preflight. So both endpoints require a per-run secret token
+POST needs no preflight. So all private endpoints require a per-run secret token
 (`?t=…`), the page is served only to a request carrying it, and WebSocket
 upgrades additionally must come from our own origin. Without this, a background
 ad frame could evict the real tab, listen to the conversation, or forge a
@@ -18,6 +17,7 @@ ad frame could evict the real tab, listen to the conversation, or forge a
 import hmac
 import json
 import logging
+import re
 import secrets
 from pathlib import Path
 from typing import Awaitable, Callable
@@ -35,15 +35,9 @@ class LocalServer:
     def __init__(self, token: str | None = None) -> None:
         self.token = token or secrets.token_urlsafe(24)
         self.on_tab_json: Callable[[dict], Awaitable[None]] | None = None
+        self.on_tab_closed: Callable[[], Awaitable[None]] | None = None
+        self.on_session_credential: Callable[[str], Awaitable[dict]] | None = None
         self.on_hook: Callable[[str, dict], Awaitable[None]] | None = None
-        # The page's SDK client speaks the Converse protocol over /proxy; the
-        # process relays it to the broker, adding the tool manifest. Keeping this
-        # separate from /ws means converse-code's own status messages never enter
-        # the SDK's message stream.
-        self.on_proxy_json: Callable[[dict], Awaitable[None]] | None = None
-        self.on_proxy_audio: Callable[[bytes], Awaitable[None]] | None = None
-        self.on_proxy_closed: Callable[[], Awaitable[None]] | None = None
-        self._proxy_ws: web.WebSocketResponse | None = None
         self._tab: web.WebSocketResponse | None = None
         self._runner: web.AppRunner | None = None
         self._host = "127.0.0.1"
@@ -55,7 +49,7 @@ class LocalServer:
         app.router.add_get("/", self._index)
         app.router.add_get("/assistant-transcript.js", self._assistant_transcript)
         app.router.add_get("/ws", self._ws)
-        app.router.add_get("/proxy", self._proxy)
+        app.router.add_post("/session-credential", self._session_credential)
         app.router.add_get("/vendor/converse/{name}", self._vendor)
         app.router.add_post("/hook/{event}", self._hook)
         self._runner = web.AppRunner(app)
@@ -73,7 +67,7 @@ class LocalServer:
         return f"http://{self._host}:{self.port}/hook/{event}?t={self.token}"
 
     async def stop(self) -> None:
-        for sock in (self._tab, self._proxy_ws):
+        for sock in (self._tab,):
             if sock is not None and not sock.closed:
                 await sock.close()
         if self._runner:
@@ -96,12 +90,14 @@ class LocalServer:
 
     # -- outbound to the tab ---------------------------------------------
 
-    async def send_json_to_tab(self, msg: dict) -> None:
+    async def send_json_to_tab(self, msg: dict) -> bool:
         if self._tab is not None and not self._tab.closed:
             try:
                 await self._tab.send_str(json.dumps(msg))
+                return True
             except ConnectionError:
                 pass
+        return False
 
     # -- handlers ----------------------------------------------------------
 
@@ -148,9 +144,10 @@ class LocalServer:
             return web.Response(status=403, text="forbidden")
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
-        if self._tab is not None and not self._tab.closed:
-            await self._tab.close()
+        previous = self._tab
         self._tab = ws
+        if previous is not None and not previous.closed:
+            await previous.close()
         log.info("browser tab connected")
         async for msg in ws:
             if msg.type == WSMsgType.TEXT and self.on_tab_json:
@@ -160,44 +157,30 @@ class LocalServer:
                     log.warning("bad JSON from tab: %.100s", msg.data)
         if self._tab is ws:
             self._tab = None
+            if self.on_tab_closed:
+                await self.on_tab_closed()
         return ws
 
-    async def send_json_to_proxy(self, msg: dict) -> None:
-        if self._proxy_ws is not None and not self._proxy_ws.closed:
-            try:
-                await self._proxy_ws.send_str(json.dumps(msg))
-            except ConnectionError:
-                pass
-
-    async def send_audio_to_proxy(self, data: bytes) -> None:
-        if self._proxy_ws is not None and not self._proxy_ws.closed:
-            try:
-                await self._proxy_ws.send_bytes(data)
-            except ConnectionError:
-                pass
-
-    async def _proxy(self, request: web.Request) -> web.StreamResponse:
+    async def _session_credential(self, request: web.Request) -> web.Response:
         if not self._authorized(request) or not self._same_origin(request):
-            return web.Response(status=403, text="forbidden")
-        ws = web.WebSocketResponse(heartbeat=30, max_msg_size=4 * 1024 * 1024)
-        await ws.prepare(request)
-        if self._proxy_ws is not None and not self._proxy_ws.closed:
-            await self._proxy_ws.close()
-        self._proxy_ws = ws
-        log.info("SDK client connected")
-        async for msg in ws:
-            if msg.type == WSMsgType.BINARY and self.on_proxy_audio:
-                await self.on_proxy_audio(msg.data)
-            elif msg.type == WSMsgType.TEXT and self.on_proxy_json:
-                try:
-                    await self.on_proxy_json(json.loads(msg.data))
-                except json.JSONDecodeError:
-                    log.warning("bad JSON from SDK client: %.100s", msg.data)
-        if self._proxy_ws is ws:
-            self._proxy_ws = None
-        if self.on_proxy_closed:
-            await self.on_proxy_closed()
-        return ws
+            return web.json_response({"error": "forbidden"}, status=403)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            body = {}
+        session_id = body.get("session_id")
+        if not isinstance(session_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}", session_id,
+        ):
+            return web.json_response({"error": "invalid session_id"}, status=400)
+        if self.on_session_credential is None:
+            return web.json_response({"error": "credential service unavailable"}, status=503)
+        try:
+            credential = await self.on_session_credential(session_id)
+        except Exception:
+            log.exception("could not mint browser session credential")
+            return web.json_response({"error": "could not reach Converse"}, status=502)
+        return web.json_response(credential, status=201)
 
     async def _hook(self, request: web.Request) -> web.Response:
         if not self._authorized(request):

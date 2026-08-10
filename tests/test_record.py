@@ -3,7 +3,6 @@ import struct
 import wave
 
 from converse_code.record import WavRecorder, analyse_pcm16
-from converse_code.cli import _record_and_relay_audio
 
 
 RATE = 16_000
@@ -64,24 +63,3 @@ def test_recorder_duration_uses_its_configured_sample_rate(tmp_path):
     recorder.close()
 
     assert recorder.seconds == 0.5
-
-
-async def test_record_audio_relay_captures_the_exact_bytes_sent_to_page(tmp_path):
-    class FakeServer:
-        def __init__(self):
-            self.frames = []
-
-        async def send_audio_to_proxy(self, frame):
-            self.frames.append(frame)
-
-    frame = _tone(0.01)
-    path = tmp_path / "relay.wav"
-    recorder = WavRecorder(path)
-    server = FakeServer()
-
-    await _record_and_relay_audio(recorder, server, frame)
-    recorder.close()
-
-    assert server.frames == [frame]
-    with wave.open(str(path), "rb") as wav:
-        assert wav.readframes(wav.getnframes()) == frame

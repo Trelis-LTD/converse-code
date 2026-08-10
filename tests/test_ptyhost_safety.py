@@ -108,3 +108,18 @@ def test_restore_terminal_restores_stdin_blocking_mode():
         sys.stdin = real_stdin
     finally:
         os.close(w)
+
+
+def test_write_retries_partial_nonblocking_pty_writes(monkeypatch):
+    host = ClaudeHost(["unused"], attach_terminal=False)
+    host._master_fd = 123
+    calls = []
+
+    def partial_write(fd, data):
+        calls.append((fd, bytes(data)))
+        return min(2, len(data))
+
+    monkeypatch.setattr(os, "write", partial_write)
+    host._write(b"abcdef")
+
+    assert calls == [(123, b"abcdef"), (123, b"cdef"), (123, b"ef")]

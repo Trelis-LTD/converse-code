@@ -102,13 +102,34 @@ async def main() -> None:
         menu_ok = menu is not None and bool(menu.options)
         print("model menu:", menu_result["speak"])
         if menu_ok:
-            selected = menu.options[menu.selected]
+            before = menu.options[menu.selected]
+            # A regression once made selection look successful while Claude was
+            # still one interaction behind. Choose a genuinely different model,
+            # then reopen /model and verify Claude itself reports that choice.
+            selected = next(option for option in reversed(menu.options) if option != before)
             await router.handle_tool_call({
                 "id": "model-select",
                 "name": "select_option",
                 "args": {"option": selected},
             })
-            menu_ok = router.menu() is None
+            await router.handle_tool_call({
+                "id": "model-confirm", "name": "command", "args": {"command": "/model"},
+            })
+            confirmed = router.menu()
+            def model_name(option: str) -> str:
+                lowered = option.lower()
+                return next(
+                    (name for name in ("default", "opus", "fable", "sonnet", "haiku")
+                     if name in lowered),
+                    lowered.replace("✔", "").strip(),
+                )
+            menu_ok = (
+                confirmed is not None
+                and bool(confirmed.options)
+                and model_name(confirmed.options[confirmed.selected]) == model_name(selected)
+            )
+            if confirmed is not None:
+                host.send_key("escape")
             if not menu_ok:
                 print("--- screen after menu selection ---")
                 print("\n".join(line for line in host.snapshot() if line.strip()))

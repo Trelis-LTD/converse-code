@@ -76,55 +76,38 @@ async def test_ws_rejects_foreign_origin(server):
         assert exc.value.status == 403
 
 
-async def test_proxy_requires_token_and_local_origin():
-    """The SDK client's socket carries the whole session — it needs the same gate
-    as the status channel, or any page could open a billable session."""
+async def test_session_credential_requires_token_and_local_origin():
     s = LocalServer(token="tok123")
     await s.start(port=0)
     try:
-        url = f"http://127.0.0.1:{s.port}/proxy"
+        url = f"http://127.0.0.1:{s.port}/session-credential"
         async with aiohttp.ClientSession() as session:
             for bad in (url, f"{url}?t=wrong"):
-                with pytest.raises(aiohttp.WSServerHandshakeError) as exc:
-                    async with session.ws_connect(bad):
-                        pass
-                assert exc.value.status == 403
-            with pytest.raises(aiohttp.WSServerHandshakeError) as exc:
-                async with session.ws_connect(f"{url}?t=tok123",
-                                              headers={"Origin": "https://evil.example"}):
-                    pass
-            assert exc.value.status == 403
+                async with session.post(bad, json={"session_id": "s1"}) as response:
+                    assert response.status == 403
+            async with session.post(
+                f"{url}?t=tok123", json={"session_id": "s1"},
+                headers={"Origin": "https://evil.example"},
+            ) as response:
+                assert response.status == 403
     finally:
         await s.stop()
 
 
-async def test_proxy_relays_both_directions(server):
-    """JSON and binary must pass through untouched in both directions."""
-    from_page_json, from_page_audio, closed = [], [], []
-    server.on_proxy_json = lambda m: from_page_json.append(m) or asyncio.sleep(0)
-    server.on_proxy_audio = lambda b: from_page_audio.append(b) or asyncio.sleep(0)
-    server.on_proxy_closed = lambda: closed.append(True) or asyncio.sleep(0)
-
+async def test_session_credential_is_minted_by_python(server):
+    requested = []
+    server.on_session_credential = lambda sid: requested.append(sid) or asyncio.sleep(0, result={
+        "api_key": "csk_scoped", "session_id": sid, "expires_in": 600, "tools": [],
+    })
     async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(
-            f"http://127.0.0.1:{server.port}/proxy?t=tok123",
+        async with session.post(
+            f"http://127.0.0.1:{server.port}/session-credential?t=tok123",
             headers={"Origin": f"http://127.0.0.1:{server.port}"},
-        ) as ws:
-            await ws.send_str(json.dumps({"type": "start", "session_id": "x"}))
-            await ws.send_bytes(b"\x01\x02" * 160)
-            await asyncio.sleep(0.1)
-            assert from_page_json[0]["type"] == "start"
-            assert len(from_page_audio[0]) == 320
-
-            await server.send_json_to_proxy({"type": "asr", "text": "hi"})
-            await server.send_audio_to_proxy(b"\x00\x01" * 320)
-            first = await ws.receive(timeout=5)
-            second = await ws.receive(timeout=5)
-            got = {first.type: first.data, second.type: second.data}
-            assert json.loads(got[aiohttp.WSMsgType.TEXT])["type"] == "asr"
-            assert len(got[aiohttp.WSMsgType.BINARY]) == 640
-    await asyncio.sleep(0.1)
-    assert closed == [True]
+            json={"session_id": "browser-session"},
+        ) as response:
+            assert response.status == 201
+            assert (await response.json())["api_key"] == "csk_scoped"
+    assert requested == ["browser-session"]
 
 
 async def test_tab_ws_relay_and_hook(server):
@@ -167,7 +150,5 @@ async def test_urls_carry_token(server):
     assert server.hook_url("stop").endswith("/hook/stop?t=tok123")
 
 
-async def test_sends_without_a_connected_page_are_noops(server):
-    await server.send_json_to_tab({"type": "x"})
-    await server.send_json_to_proxy({"type": "x"})
-    await server.send_audio_to_proxy(b"\x00")
+async def test_send_without_a_connected_page_reports_false(server):
+    assert await server.send_json_to_tab({"type": "x"}) is False

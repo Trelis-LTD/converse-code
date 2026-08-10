@@ -106,10 +106,21 @@ async def test_start_frame_and_tool_roundtrip(mock_broker):
     assert client.closed.is_set()
 
 
-async def test_send_after_close_is_noop(mock_broker):
+async def test_control_result_survives_reconnect_but_stale_audio_drops(mock_broker):
     client = BrokerClient("ck_test", session_id="s", tools=[], url=mock_broker.url)
     await client.connect()
     run_task = asyncio.create_task(client.run())
     await client.close()
     await asyncio.wait_for(run_task, 5)
-    await client.send_tool_result("x", {"speak": "late"})  # must not raise
+    await client.send_tool_result("x", {"speak": "late"})
+    await client.send_audio(b"stale audio")
+
+    await client.connect()
+    second_run = asyncio.create_task(client.run())
+    await asyncio.sleep(0.1)
+
+    assert {"type": "tool_result", "id": "x", "content": {"speak": "late"}} in mock_broker.received
+    assert b"stale audio" not in mock_broker.audio
+
+    await client.close()
+    await asyncio.wait_for(second_run, 5)

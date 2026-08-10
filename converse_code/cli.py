@@ -13,9 +13,8 @@ import tempfile
 import webbrowser
 from pathlib import Path
 
-from . import broker as brokermod
-from . import config, hooks, relay, selftest, tools
-from .record import WavRecorder
+from . import config, converse, hooks, selftest, tools
+from .bridge import BrowserBridge
 from .localserver import LocalServer
 from .ptyhost import ClaudeHost
 
@@ -47,7 +46,7 @@ async def _login(url: str) -> int:
     if not key:
         print("No key given.")
         return 1
-    if await brokermod.validate_key(key, url=url):
+    if await converse.validate_key(key, url=url):
         config.save_api_key(key)
         print(f"Key is valid. Saved to {config.CONFIG_PATH}.")
         return 0
@@ -79,7 +78,7 @@ async def _run(args) -> int:
     # (non-billable) auth frame rather than letting a bad key surface minutes
     # later as a banner in the browser.
     try:
-        if not await brokermod.validate_key(api_key, url=args.broker_url):
+        if not await converse.validate_key(api_key, url=args.broker_url):
             await server.stop()
             print("Converse rejected that API key. Run: converse-code login", file=sys.stderr)
             return 1
@@ -101,59 +100,36 @@ async def _run(args) -> int:
     host = ClaudeHost(claude_argv, attach_terminal=not args.headless)
 
     handle = _session_handle()
-    client = brokermod.BrokerClient(
-        api_key, session_id=handle, tools=tools.manifest(), url=args.broker_url,
-        client_info={"capabilities": []},
-    )
-    router = tools.ToolRouter(host, client, handle=handle, verify_submissions=True)
+    bridge = BrowserBridge(server.send_json_to_tab)
+    router = tools.ToolRouter(host, bridge, handle=handle, verify_submissions=True)
     router.on_status = server.send_json_to_tab
     server.on_hook = router.on_hook
 
-    # The browser runs the SDK's own ConverseClient — the same code path as the
-    # Converse playground — and this process relays its socket to the broker,
-    # substituting the real API key and adding the tool manifest. Hand-driving the
-    # SDK's audio pieces instead produced a run of composition bugs (missing echo
-    # canceller, missing scheduler pump, wrong frame ordering); the client already
-    # solves all of that, so it owns the audio and this owns the tools.
-    broker_task: asyncio.Task | None = None
+    # The browser connects the official SDK straight to Converse. Python keeps
+    # the persistent key and gives the page only a short-lived credential bound
+    # to the browser's requested session ID.
+    async def issue_credential(session_id: str) -> dict:
+        credential = await converse.mint_session_credential(
+            api_key, session_id, api_url=args.api_url,
+        )
+        return {
+            **credential,
+            "ws_url": args.broker_url,
+            "tools": tools.manifest(),
+        }
 
-    async def on_proxy_json(msg: dict) -> None:
-        nonlocal broker_task
-        if relay.is_start(msg):
-            frame = relay.rewrite_start_frame(msg, api_key, handle, tools.manifest())
-            try:
-                await client.connect(start_frame=frame)
-            except Exception as exc:
-                log.error("broker connect failed: %s", exc)
-                await server.send_json_to_proxy(
-                    {"type": "bye", "code": 1011, "reason": f"could not reach Converse: {exc}"}
-                )
-                return
-            broker_task = asyncio.create_task(client.run())
-            return
-        await client.send_raw(msg)
+    async def tab_closed() -> None:
+        bridge.on_browser_disconnected()
 
-    async def on_proxy_closed() -> None:
-        await client.close()
+    async def tool_resumed(event: dict) -> None:
+        log.info("broker resumed deferred tool %s (%s)", event.get("id"), event.get("handle"))
 
-    server.on_proxy_json = on_proxy_json
-    server.on_proxy_audio = client.send_raw
-    server.on_proxy_closed = on_proxy_closed
-
-    async def to_page(msg: dict) -> None:
-        await server.send_json_to_proxy(msg)
-
-    client.on_json = to_page
-    recorder: WavRecorder | None = None
-    if args.record_audio:
-        rec_path = Path(tempfile.gettempdir()) / f"converse-code-downlink-{os.getpid()}.wav"
-        recorder = WavRecorder(rec_path)
-        print(f"Recording assistant audio to: {rec_path}")
-        client.on_audio = lambda frame: _record_and_relay_audio(recorder, server, frame)
-    else:
-        client.on_audio = server.send_audio_to_proxy
-    client.on_tool_call = lambda call: _spawn_tool(router, call)
-    client.on_tool_cancel = router.handle_tool_cancel
+    server.on_session_credential = issue_credential
+    server.on_tab_json = bridge.handle_browser_message
+    server.on_tab_closed = tab_closed
+    bridge.on_tool_call = lambda call: _spawn_tool(router, call)
+    bridge.on_tool_cancel = router.handle_tool_cancel
+    bridge.on_tool_resume = tool_resumed
 
     print(f"Converse Code — voice tab: {url}   (session: {handle})")
     print(f"Logs: {LOG_PATH}")
@@ -166,23 +142,9 @@ async def _run(args) -> int:
     finally:
         host.restore_terminal()
         _report_early_exit(host, asyncio.get_running_loop().time() - started_at)
-        if broker_task is not None:
-            broker_task.cancel()
-        await client.close()
         await server.stop()
         shutil.rmtree(scratch, ignore_errors=True)
-        if recorder is not None:
-            recorder.close()
-            print(f"\nRecorded {recorder.seconds:.1f}s of assistant audio: {recorder.path}")
-            print("Play it: if it sounds clean, the problem is the browser or the "
-                  "audio device, not the session.")
     return host.returncode or 0
-
-
-async def _record_and_relay_audio(recorder: WavRecorder, server: LocalServer, frame: bytes) -> None:
-    """Record the same downlink frame that is handed to the browser page."""
-    recorder.add(frame)
-    await server.send_audio_to_proxy(frame)
 
 
 LOG_PATH = Path(tempfile.gettempdir()) / "converse-code.log"
@@ -246,10 +208,14 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="local port for the voice tab")
     parser.add_argument("--claude", default=os.environ.get("CONVERSE_CODE_CLAUDE_CMD", DEFAULT_CLAUDE_CMD),
                         help="command used to launch Claude Code")
-    parser.add_argument("--broker-url", default=os.environ.get("CONVERSE_URL", brokermod.DEFAULT_URL))
+    parser.add_argument(
+        "--broker-url", default=os.environ.get("CONVERSE_URL", converse.DEFAULT_WS_URL),
+    )
+    parser.add_argument(
+        "--api-url", default=os.environ.get("CONVERSE_API_URL", converse.DEFAULT_API_URL),
+        help="Converse HTTP API base used to mint browser session credentials",
+    )
     parser.add_argument("--no-browser", action="store_true", help="don't auto-open the voice tab")
-    parser.add_argument("--record-audio", action="store_true",
-                        help="save the assistant audio relayed to the page as a WAV (for diagnosing playback)")
     parser.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)  # tests only
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("login", help="store and validate your Converse API key")

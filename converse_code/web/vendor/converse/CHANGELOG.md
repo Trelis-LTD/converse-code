@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.0 - 2026-08-10
+
+- Add a supported, versioned Browser SDK resume-state API for full page reloads:
+  `resumeState`, `exportResumeState()`, `importResumeState()`, and the `resume_state` event. The
+  state rotates with each server token and clears on terminal or rejected sessions, so apps can
+  safely keep a tab-scoped `sessionStorage` copy without reading private SDK fields.
+- Add `injectContext(text, {role, reply})` as the supported Browser SDK surface for the existing
+  `inject_context` protocol frame, including proactive host announcements with `reply: true`.
+
+## 0.9.0 - 2026-08-09
+
+- Add `mode.silence_nudge_s` / `mode.silence_end_s` to override the broker's two-stage idle
+  policy (check-in nudge, then sign-off + end) per session — useful for benchmark harnesses or
+  flows with long think-time. Both default to the broker's env-configured values (10s/20s) when
+  omitted; the broker also falls back to those defaults if either value is non-positive or
+  `silence_end_s` does not exceed `silence_nudge_s`.
+
 ## 0.8.0 - 2026-08-08
 
 - License Trelis-authored Browser SDK code under Apache 2.0; bundled AEC components remain under

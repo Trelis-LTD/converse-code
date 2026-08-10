@@ -32,9 +32,17 @@ LONG_TASK_DESCRIPTION = (
     "their instruction in 'request' with their technical wording preserved exactly — file "
     "names, function names, flags, error text — compress filler, never editorialize. Work "
     "runs in the background: meaningful milestones and completion are announced "
-    "automatically. If Claude Code is already working, the instruction is queued behind the "
-    "current task. Not for questions about progress (status arrives automatically) and not "
+    "automatically. Start only a new turn with this tool; if Claude Code is already working, "
+    "use steer_task to add guidance to that turn. Not for questions about progress (status "
+    "arrives automatically) and not "
     "for stopping work (Converse manages cancellation of the pending job)."
+)
+
+STEER_TASK_DESCRIPTION = (
+    "Add a follow-up instruction to the Claude Code task that is already running. Use this only "
+    "when the user wants to refine, redirect, or add requirements to current work. Preserve their "
+    "technical wording exactly. This steers the active turn; it does not queue a separate task. "
+    "If Claude Code is idle, use long_task instead."
 )
 
 COMMAND_DESCRIPTION = (
@@ -83,6 +91,9 @@ def manifest() -> list[dict]:
              deferred=True, deferred_timeout=DEFERRED_TIMEOUT_S,
              notify_on_complete=True,
              status_label="Claude Code task"),
+        tool("steer_task", STEER_TASK_DESCRIPTION,
+             {"request": {"type": "string", "description": "Guidance for the active task."}},
+             ["request"], timeout=15),
         tool("command", COMMAND_DESCRIPTION,
              {"command": {"type": "string", "description": "Slash command, starting with '/'."}},
              ["command"], timeout=15),
@@ -109,7 +120,7 @@ class ToolRouter:
     def __init__(self, driver, sender, handle: str, project_dir: str | Path | None = None,
                  verify_submissions: bool = False):
         """driver: ClaudeHost-like (inject/send_key/snapshot).
-        sender: BrokerClient-like (tool results/progress and context injection)."""
+        sender: BrowserBridge-like (tool results/progress and context injection)."""
         self.driver = driver
         self.sender = sender
         self.handle = handle
@@ -174,14 +185,7 @@ class ToolRouter:
             self.last_assistant_text = hook_text
         voice_owed = self._voice_owed
         self._voice_owed = False
-        if self.queue:
-            self.queue.pop(0)  # next queued instruction starts automatically
-            self.working = True
-            # The next episode runs a queued voice instruction whose tool call
-            # already resolved — its completion is owed out loud.
-            self._voice_owed = True
-        else:
-            self.working = False
+        self.working = False
         self._turn_done.set()
         await self._push_status()
         if not voice_call_was_waiting and not suppress_notification:
@@ -210,7 +214,7 @@ class ToolRouter:
         """Keep voice current on an episode no open tool call is watching.
 
         announce=True is for voice-initiated work whose call already resolved
-        (queued instruction, or the tracking window closed): the user asked out
+        because the tracking window closed: the user asked out
         loud and never heard the outcome, so completion is a milestone. A turn
         the user typed at the terminal was read there — telemetry: inject
         silently so the brain is current the moment they ask, without narrating
@@ -266,6 +270,7 @@ class ToolRouter:
         trace("tool_call", id=call_id, name=name, args=args)
         handlers = {
             "long_task": self._long_task,
+            "steer_task": self._steer_task,
             "command": self._command,
             "select_option": self._select_option,
             "press_key": self._press_key,
@@ -282,7 +287,7 @@ class ToolRouter:
             content = self._result("Something went wrong driving Claude Code; the session itself is still alive.")
         # The host work is complete before its result crosses the network. Stop
         # treating it as cancellable now, so a late cancel cannot press Escape
-        # against a queued/following Claude turn while this send is in flight.
+        # against a following Claude turn while this send is in flight.
         if self._active_call_id == call_id:
             self._active_call_id = None
         if call_id in self._server_canceled:
@@ -365,36 +370,33 @@ class ToolRouter:
                 f"{menu.title or 'a menu'} — options: {', '.join(menu.options)}."
             )
 
-        starting_turn = not self.working
-        if starting_turn:
-            # Arm completion before touching the PTY. A trivial Claude turn can
-            # emit UserPromptSubmit and Stop back-to-back; clearing _turn_done
-            # after injection would lose that Stop and wait until the deadline.
-            self.working = True
-            self._interrupted = False
-            self._turn_done.clear()
-            self.last_assistant_text = ""
-            self._turn_failure = ""
-            self._active_call_id = call_id
-            self._ensure_transcript()
-            start_offset, start_path = self._offset, self.transcript_path
+        if self.working:
+            return self._result(
+                "Claude Code is already working. Use steer_task to add guidance to the current "
+                "task, or wait for it to finish before starting another task."
+            )
+
+        # Arm completion before touching the PTY. A trivial Claude turn can
+        # emit UserPromptSubmit and Stop back-to-back; clearing _turn_done
+        # after injection would lose that Stop and wait until the deadline.
+        self.working = True
+        self._interrupted = False
+        self._turn_done.clear()
+        self.last_assistant_text = ""
+        self._turn_failure = ""
+        self._active_call_id = call_id
+        self._ensure_transcript()
+        start_offset, start_path = self._offset, self.transcript_path
 
         if not await self._inject_and_confirm(request):
-            if starting_turn:
-                self.working = False
-                self._active_call_id = None
+            self.working = False
+            self._active_call_id = None
             return self._result(
                 "I put the instruction into Claude Code, but couldn't confirm it was submitted. "
                 "The text may still be visible in the terminal input; press Enter there or try again."
             )
         if self.on_status:
             await self.on_status({"type": "local", "event": "injected", "text": request})
-
-        if not starting_turn:
-            self.queue.append(request)
-            return self._result(
-                "Queued behind the current task; it will run next. The current task is still going."
-            )
 
         # Detach from the voice turn: the brain closes its reply naturally now,
         # and notify_on_complete announces the terminal result when it lands.
@@ -403,6 +405,34 @@ class ToolRouter:
             call_id, f"{self.handle}-{call_id}", status_label="Claude Code task"
         )
         return await self._await_turn(call_id, start_offset, start_path)
+
+    async def _steer_task(self, _call_id: str, args: dict) -> dict:
+        request = sanitize((args.get("request") or "").strip())
+        if not request:
+            return self._result("No steering instruction was given.")
+        if request.startswith("!"):
+            return self._result(
+                "Raw shell commands are not allowed over voice. Phrase the guidance as a plain "
+                "instruction instead."
+            )
+        if request.startswith("/"):
+            return self._result("That looks like a slash command — use the command tool for it.")
+        menu = self.menu()
+        if menu:
+            return self._result(
+                f"Claude Code needs the open menu answered before it can be steered: "
+                f"{menu.title or 'a menu'} — options: {', '.join(menu.options)}."
+            )
+        if not self.working:
+            return self._result("Claude Code is idle. Use long_task to start new work.")
+        if not await self._inject_and_confirm(request):
+            return self._result(
+                "I added the guidance to Claude Code, but couldn't confirm it was submitted. "
+                "It may still be visible in the terminal input."
+            )
+        if self.on_status:
+            await self.on_status({"type": "local", "event": "injected", "text": request})
+        return self._result("Added that guidance to the current Claude Code task.")
 
     async def _inject_and_confirm(self, text: str) -> bool:
         """Inject one prompt and, in production, wait for Claude to acknowledge it.
@@ -565,12 +595,57 @@ class ToolRouter:
         self.driver.send_key("enter")
         await asyncio.sleep(self.SETTLE_S)
         after = self.menu()
+        if self._is_model_menu(menu) and self._is_matching_model_confirmation(
+            after, menu.options[idx]
+        ):
+            yes_idx = next(
+                i for i, option in enumerate(after.options)
+                if option.lower().lstrip("0123456789. ").startswith("yes")
+            )
+            delta = yes_idx - after.selected
+            key = "down" if delta > 0 else "up"
+            for _ in range(abs(delta)):
+                self.driver.send_key(key)
+                await asyncio.sleep(0.05)
+            self.driver.send_key("enter")
+            await asyncio.sleep(self.SETTLE_S)
+            final_menu = self.menu()
+            if final_menu:
+                return self._result(
+                    f"Confirmed {menu.options[idx]}, but Claude Code opened another menu: "
+                    f"{final_menu.title or 'options'} — {', '.join(final_menu.options)}."
+                )
+            return self._result(f"Chose and confirmed {menu.options[idx]}.")
         if after:
             return self._result(
                 f"Chose {menu.options[idx]}; another menu opened: {after.title or 'options'} — "
                 f"{', '.join(after.options)}."
             )
         return self._result(f"Chose {menu.options[idx]}.")
+
+    @staticmethod
+    def _is_model_menu(menu: screenmod.Menu | None) -> bool:
+        return bool(menu and "model" in (menu.title or "").lower())
+
+    @staticmethod
+    def _is_matching_model_confirmation(
+        menu: screenmod.Menu | None, selected_option: str
+    ) -> bool:
+        if not menu:
+            return False
+        yes_options = [
+            option.lower() for option in menu.options
+            if option.lower().lstrip("0123456789. ").startswith("yes")
+        ]
+        has_go_back = any("go back" in option.lower() for option in menu.options)
+        if not yes_options or not has_go_back:
+            return False
+        selected = selected_option.lower()
+        model = next(
+            (name for name in ("default", "opus", "fable", "sonnet", "haiku") if name in selected),
+            None,
+        )
+        return model is not None and any(model in option for option in yes_options)
 
     async def _press_key(self, _call_id: str, args: dict) -> dict:
         key = (args.get("key") or "").strip().lower()

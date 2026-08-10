@@ -26,7 +26,7 @@ def test_help_works():
     proc = run(["--help"])
     assert proc.returncode == 0
     assert "Talk to Claude Code by voice" in proc.stdout
-    assert "--record-audio" in proc.stdout
+    assert "--api-url" in proc.stdout
 
 
 def test_default_claude_command_uses_auto_permission_mode():
@@ -35,8 +35,8 @@ def test_default_claude_command_uses_auto_permission_mode():
 
 def test_startup_checks_credentials_before_launching_claude():
     """Exercises the whole startup path: logging setup, key load, credential
-    check. The broker socket itself is opened later (when the page's SDK client
-    connects), so an unreachable broker must still fail fast here with a clear
+    check. The browser's direct socket is opened later, so an unreachable broker
+    must still fail fast here with a clear
     message rather than a traceback or a silent start."""
     proc = run(["--no-browser", "--headless", "--port", "0", "--broker-url", "ws://127.0.0.1:1"])
     assert proc.returncode == 1

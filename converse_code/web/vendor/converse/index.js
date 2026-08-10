@@ -107,6 +107,7 @@ export function sendClientError({ url, sessionId, detail, context, apiKey,
 
 const CONVERSE_MODE_FIELDS = new Set([
   'kind', 'voice', 'instructions', 'tools', 'web_search', 'flow', 'greeting', 'temperature',
+  'silence_nudge_s', 'silence_end_s',
 ]);
 const RELAY_MODE_FIELDS = new Set(['kind', 'provider', 'model', 'voice', 'web_search']);
 
@@ -149,6 +150,20 @@ function validatedMode(value = { kind: 'converse' }) {
         || !Number.isFinite(mode.temperature))) {
       throw new TypeError('converse temperature must be a finite number');
     }
+    // Per-session override of the broker's two-stage silence policy (env defaults: 10s/20s) — e.g.
+    // a benchmark harness with long simulated-user think-time. Omit either field to keep the
+    // broker's default for it; the broker also falls back to its defaults if these are omitted,
+    // non-positive, or silence_end_s <= silence_nudge_s.
+    for (const key of ['silence_nudge_s', 'silence_end_s']) {
+      if (Object.hasOwn(mode, key) && (typeof mode[key] !== 'number'
+          || !Number.isFinite(mode[key]) || mode[key] <= 0)) {
+        throw new TypeError(`converse ${key} must be a positive finite number`);
+      }
+    }
+    if (Object.hasOwn(mode, 'silence_nudge_s') && Object.hasOwn(mode, 'silence_end_s')
+        && mode.silence_end_s <= mode.silence_nudge_s) {
+      throw new TypeError('converse silence_end_s must be greater than silence_nudge_s');
+    }
   } else {
     if (typeof mode.provider !== 'string' || !mode.provider.trim()) {
       throw new TypeError('relay mode provider is required');
@@ -158,6 +173,20 @@ function validatedMode(value = { kind: 'converse' }) {
   return mode;
 }
 
+function resumeTokenFromState(state) {
+  if (state == null) return null;
+  if (typeof state !== 'object' || Array.isArray(state)) {
+    throw new TypeError('resumeState must be an object or null');
+  }
+  if (state.version !== 1) {
+    throw new TypeError('resumeState.version must be 1');
+  }
+  if (typeof state.resumeToken !== 'string' || !state.resumeToken) {
+    throw new TypeError('resumeState.resumeToken must be a non-empty string');
+  }
+  return state.resumeToken;
+}
+
 export class ConverseClient extends EventTarget {
   constructor({ url, sessionId = createSessionId(), player, apiKey,
     mode = { kind: 'converse' }, user, timezone, rawAssist = false,
@@ -165,6 +194,7 @@ export class ConverseClient extends EventTarget {
     echoCancellerFactory = () => new EchoCanceller(),
     autoReconnect = true, reconnectBaseMs = 500, reconnectMaxMs = 5000,
     maxReconnectAttempts = 12, listeningWarmupFrames = LISTENING_WARMUP_FRAMES,
+    resumeState = null,
     transport = 'ws', RTCPeerConnectionImpl = globalThis.RTCPeerConnection } = {}) {
     super();
     if (!url) throw new Error('url is required');
@@ -217,7 +247,8 @@ export class ConverseClient extends EventTarget {
     this._playbackPauseSeq = null; // reversible hold; sequence rejects late resume events
     this._live = false;         // true only while a socket is open AND past `ready`
     this._closedByUser = false; // set by close() so a clean shutdown doesn't trigger reconnect
-    this._resumeToken = null;   // latest server token; sent on the next continuation attempt
+    this._resumeToken = resumeTokenFromState(resumeState);
+    // Latest server token (possibly imported above); sent on the next continuation attempt.
     this._temperature = undefined;
     this._noGreeting = false;
     this._listeningFired = false; // one `listening` event per live session, after mic warmup frames
@@ -412,8 +443,38 @@ export class ConverseClient extends EventTarget {
     // Initial connect failed (not a live drop, so no reconnect) — clear so a later connect() retries.
     // `_openOnce` never touches `this.opened` itself, so this and `_scheduleReconnect` are its sole
     // owners; that's what keeps a multi-attempt reconnect from leaving `opened` null while live.
-    opening.catch(() => { if (this.opened === opening) this.opened = null; });
+    opening.catch((err) => {
+      if (this.opened === opening) this.opened = null;
+      if (err?.code === 'resume_failed' && this._resumeToken) {
+        this._setResumeToken(null);
+        this._dispatch({ type: 'resume_failed', error: err });
+      }
+    });
     return this.opened;
+  }
+
+  /** Return the current opaque, JSON-serializable continuation state, or null before `ready` and
+   *  after the session ends. Persist it only in storage appropriate for a short-lived credential
+   *  (normally sessionStorage), then pass it back as `resumeState` after a page reload. */
+  exportResumeState() {
+    return this._resumeToken ? { version: 1, resumeToken: this._resumeToken } : null;
+  }
+
+  /** Install state previously returned by exportResumeState(). Import is deliberately restricted
+   *  to a client that has not started connecting: replacing a live session's continuation token
+   *  would make the next automatic reconnect resume unrelated context. */
+  importResumeState(state) {
+    if (this.opened || this._live || this.ws) {
+      throw new Error('resume state can only be imported before connect()');
+    }
+    this._setResumeToken(resumeTokenFromState(state));
+  }
+
+  _setResumeToken(token) {
+    const normalized = typeof token === 'string' && token ? token : null;
+    if (normalized === this._resumeToken) return;
+    this._resumeToken = normalized;
+    this._dispatch({ type: 'resume_state', state: this.exportResumeState() });
   }
 
   // Shared start-frame construction (mode/temperature/greeting/capabilities/rawAssist) for both
@@ -490,7 +551,7 @@ export class ConverseClient extends EventTarget {
           // replay the greeting; stay closed and let the app decide. Abnormal drops (1006 loss,
           // 1011 upstream lost, 1013 drain) still reconnect below.
           this.opened = null;
-          this._resumeToken = null; // an ended session must not resume on a later connect()
+          this._setResumeToken(null); // an ended session must not resume on a later connect()
           this._responding = false;   // a reused client must not carry reply/ack state into
           this._dropAck();            // a later connect() (mirrors _scheduleReconnect's resets)
           this._dispatch({ type: 'session_end', code: ev.code, reason: ev.reason || '' });
@@ -510,7 +571,7 @@ export class ConverseClient extends EventTarget {
                 + `this SDK plays pcm16 at ${SAMPLE_RATE} Hz`));
               return;
             }
-            if (typeof detail.resume_token === 'string') this._resumeToken = detail.resume_token;
+            if (typeof detail.resume_token === 'string') this._setResumeToken(detail.resume_token);
             settled = true;
             liveReady = true;
             this._live = true;
@@ -620,7 +681,7 @@ export class ConverseClient extends EventTarget {
               return;
             }
             if (!settled && detail?.type === 'ready') {
-              if (typeof detail.resume_token === 'string') this._resumeToken = detail.resume_token;
+              if (typeof detail.resume_token === 'string') this._setResumeToken(detail.resume_token);
               settled = true;
               this._channel = channel;
               this._live = true;
@@ -663,7 +724,7 @@ export class ConverseClient extends EventTarget {
       // Only an intentional server end closes 1000 (mirrors the WS idle sign-off) — surface it the
       // same way so app code doesn't need transport-specific handling.
       this._responding = false;
-      this._resumeToken = null;
+      this._setResumeToken(null);
       this._dropAck();
       this._dispatch({ type: 'session_end', code, reason: reason || '' });
     }
@@ -726,7 +787,7 @@ export class ConverseClient extends EventTarget {
       }).catch((err) => {
         if (this._closedByUser) throw err;
         if (err?.code === 'resume_failed') {
-          this._resumeToken = null;
+          this._setResumeToken(null);
           this._dispatch({ type: 'resume_failed', error: err });
           throw err;
         }
@@ -870,6 +931,20 @@ export class ConverseClient extends EventTarget {
     this._sendControl({ type: 'ambience', active: !!active });
   }
 
+  /** Add a typed user message or silent host context to the conversation, optionally asking the
+   *  model to reply immediately. Mirrors the public inject_context wire contract. */
+  injectContext(text, { role = 'context', reply = false } = {}) {
+    if (typeof text !== 'string') throw new TypeError('text must be a string');
+    if (!text.trim() || [...text].length > 2000) {
+      throw new RangeError('text must contain 1 to 2000 characters');
+    }
+    if (role !== 'user' && role !== 'context') {
+      throw new TypeError('role must be "user" or "context"');
+    }
+    if (typeof reply !== 'boolean') throw new TypeError('reply must be a boolean');
+    this._sendControl({ type: 'inject_context', text, role, reply });
+  }
+
   /** Resolve a `tool_call` event with JSON content. Keep results compact: the server enforces
    *  its configured UTF-8 JSON byte ceiling and replaces oversized content with a bounded
    *  truncation marker and preview. Listen for calls via `client.addEventListener('tool_call', …)`;
@@ -917,7 +992,7 @@ export class ConverseClient extends EventTarget {
   close() {
     this._closedByUser = true;   // stop any reconnect loop and prevent reconnect on the close event
     this._live = false;
-    this._resumeToken = null;   // an intentional reuse starts a new conversation
+    this._setResumeToken(null); // an intentional reuse starts a new conversation
     this._dropAck();             // armed-but-unsent ack frames must not bleed into a reused client
 
     this.stopMic();              // release the SDK-owned mic (no-op for custom-capture apps)

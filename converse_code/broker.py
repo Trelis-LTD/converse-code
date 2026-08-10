@@ -12,27 +12,17 @@
 import asyncio
 import json
 import logging
+from collections import deque
 from typing import Awaitable, Callable
 
 import websockets
 
 from . import audio as audiofmt
+from .converse import DEFAULT_WS_URL, validate_key
 
 log = logging.getLogger(__name__)
 
-DEFAULT_URL = "wss://converse.trelis.com/ws"
-
-
-class AuthError(Exception):
-    pass
-
-
-async def validate_key(api_key: str, url: str = DEFAULT_URL) -> bool:
-    """Check a key with the non-billable auth frame."""
-    async with websockets.connect(url) as ws:
-        await ws.send(json.dumps({"type": "auth", "api_key": api_key}))
-        reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-        return reply.get("type") == "ok"
+DEFAULT_URL = DEFAULT_WS_URL
 
 
 class BrokerClient:
@@ -55,6 +45,8 @@ class BrokerClient:
         self.on_audio: Callable[[bytes], Awaitable[None]] | None = None
         self.closed = asyncio.Event()
         self._ws: websockets.WebSocketClientProtocol | None = None
+        self._outbox: deque[dict] = deque()
+        self._send_lock = asyncio.Lock()
 
     async def connect(self, start_frame: dict | None = None) -> None:
         """Open (or re-open) the broker session.
@@ -65,31 +57,38 @@ class BrokerClient:
         silently swallows every tool result for the rest of the process's life
         while everything still *looks* connected.
         """
-        if self._ws is not None:
-            await self._ws.close()   # no-op if it already closed
-        self.closed.clear()
+        previous = self._ws
+        if previous is not None:
+            await previous.close()   # no-op if it already closed
         # Cap inbound frames generously (TTS audio chunks are small) rather than
         # disabling the limit — an unbounded cap lets a misbehaving endpoint
         # force arbitrary allocations.
-        self._ws = await websockets.connect(self.url, max_size=4 * 1024 * 1024)
+        ws = await websockets.connect(self.url, max_size=4 * 1024 * 1024)
+        self._ws = ws
+        self.closed.clear()
         if start_frame is not None:
-            await self._ws.send(json.dumps(start_frame))
-            return
-        await self._ws.send(json.dumps({
-            "type": "start",
-            "session_id": self.session_id,
-            "api_key": self.api_key,
-            # Pin the downlink encoding rather than relying on the server default,
-            # which has changed once already (pcm_f32le -> pcm16).
-            "audio": {"sr": audiofmt.SAMPLE_RATE, "output_encoding": audiofmt.OUTPUT_ENCODING},
-            "mode": {"kind": "converse", "web_search": False, "tools": self.tools},
-            "client": self.client_info,
-        }))
+            await ws.send(json.dumps(start_frame))
+        else:
+            await ws.send(json.dumps({
+                "type": "start",
+                "session_id": self.session_id,
+                "api_key": self.api_key,
+                # Pin the downlink encoding rather than relying on the server default,
+                # which has changed once already (pcm_f32le -> pcm16).
+                "audio": {"sr": audiofmt.SAMPLE_RATE, "output_encoding": audiofmt.OUTPUT_ENCODING},
+                "mode": {"kind": "converse", "web_search": False, "tools": self.tools},
+                "client": self.client_info,
+            }))
+        await self._flush_outbox(ws)
 
     async def run(self) -> None:
         """Receive loop; returns when the connection closes."""
+        ws = self._ws
+        if ws is None:
+            self.closed.set()
+            return
         try:
-            async for msg in self._ws:
+            async for msg in ws:
                 if isinstance(msg, bytes):
                     if self.on_audio:
                         await self.on_audio(msg)
@@ -108,30 +107,52 @@ class BrokerClient:
         except websockets.ConnectionClosed as exc:
             log.info("broker connection closed: %s", exc)
         finally:
-            self.closed.set()
+            if self._ws is ws:
+                self.closed.set()
 
     async def close(self) -> None:
         if self._ws is not None:
             await self._ws.close()
 
-    # -- senders (all no-ops once closed; callers shouldn't have to care) ----
+    # -- senders ------------------------------------------------------------
 
-    async def _send(self, payload: dict | bytes) -> None:
-        if self._ws is None or self.closed.is_set():
+    async def _flush_outbox(self, ws) -> None:
+        async with self._send_lock:
+            while self._outbox and self._ws is ws and not self.closed.is_set():
+                payload = self._outbox[0]
+                try:
+                    await ws.send(json.dumps(payload))
+                except websockets.ConnectionClosed:
+                    self.closed.set()
+                    return
+                self._outbox.popleft()
+
+    async def _send(self, payload: dict | bytes, *, durable: bool = False) -> None:
+        async with self._send_lock:
+            ws = self._ws
+            if ws is None or self.closed.is_set():
+                if durable and isinstance(payload, dict):
+                    self._outbox.append(payload)
+                return
+            try:
+                await ws.send(payload if isinstance(payload, bytes) else json.dumps(payload))
+            except websockets.ConnectionClosed:
+                if durable and isinstance(payload, dict):
+                    self._outbox.append(payload)
+                if self._ws is ws:
+                    self.closed.set()
             return
-        try:
-            await self._ws.send(payload if isinstance(payload, bytes) else json.dumps(payload))
-        except websockets.ConnectionClosed:
-            self.closed.set()
 
     async def send_audio(self, pcm16: bytes) -> None:
         await self._send(pcm16)
 
     async def send_tool_result(self, call_id: str, content: dict) -> None:
-        await self._send({"type": "tool_result", "id": call_id, "content": content})
+        await self._send({"type": "tool_result", "id": call_id, "content": content}, durable=True)
 
     async def send_tool_progress(self, call_id: str, note: str) -> None:
-        await self._send({"type": "tool_progress", "id": call_id, "note": note[:500]})
+        await self._send(
+            {"type": "tool_progress", "id": call_id, "note": note[:500]}, durable=True
+        )
 
     async def send_tool_deferred(self, call_id: str, handle: str,
                                  status_label: str | None = None) -> None:
@@ -139,7 +160,7 @@ class BrokerClient:
         frame = {"type": "tool_deferred", "id": call_id, "handle": handle}
         if status_label:
             frame["status_label"] = status_label
-        await self._send(frame)
+        await self._send(frame, durable=True)
 
     async def send_tool_partial_result(self, call_id: str, content: dict,
                                        reply: bool = False) -> None:
@@ -148,10 +169,10 @@ class BrokerClient:
         frame = {"type": "tool_partial_result", "id": call_id, "content": content}
         if reply:
             frame["reply"] = True
-        await self._send(frame)
+        await self._send(frame, durable=True)
 
     async def send_tool_cancel(self, call_id: str) -> None:
-        await self._send({"type": "tool_cancel", "id": call_id})
+        await self._send({"type": "tool_cancel", "id": call_id}, durable=True)
 
     async def send_client_event(self, event: str, **fields) -> None:
         await self._send({"type": "client_event", "event": event, **fields})
@@ -163,7 +184,7 @@ class BrokerClient:
             "text": text[:2000],
             "role": role,
             "reply": reply,
-        })
+        }, durable=True)
 
     async def send_raw(self, payload: dict | bytes) -> None:
         """Relay a frame from the browser's SDK client straight through."""

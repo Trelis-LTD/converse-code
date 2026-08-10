@@ -22,8 +22,8 @@ def test_vendored_sdk_carries_license_notice_and_complete_attributions():
     third_party = VENDOR / "THIRD_PARTY_LICENSES"
 
     assert package["license"] == "Apache-2.0"
-    assert package["version"] == "0.8.0"
-    assert provenance["commit"] == "7776e02aea21577077fe03e6b0c79d9e78b0421d"
+    assert package["version"] == "0.10.0"
+    assert provenance["commit"] == "2651c7cba65794bcf8675118d1496b593cfa89ba"
     notice = " ".join((VENDOR / "NOTICE").read_text().split())
     assert "hosted Converse service" in notice
     assert len(list(third_party.glob("*"))) >= 13

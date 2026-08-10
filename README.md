@@ -54,9 +54,10 @@ Claude starts in auto permission mode by default. Override the wrapped command w
 converse-code --claude "claude --permission-mode default"
 ```
 
-The browser uses Converse's Classic voice. The mic button starts or stops only the voice
-connection; Claude Code remains fully interactive in the terminal. Saying that you want to end
-the session closes the voice connection after the final spoken reply and leaves Claude running.
+The browser uses Converse's Classic voice. The mic button starts or cleanly ends the voice
+connection; the separate Mute button gates microphone audio without disconnecting. Claude Code
+remains fully interactive in the terminal. Saying that you want to end the session closes the
+voice connection after the final spoken reply and leaves Claude running.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security boundaries.
 
@@ -65,15 +66,13 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security b
 ```
    Dev's terminal                        Dev's browser tab (localhost)
    `claude` TUI, fully interactive      mic + speaker + live ASR transcript
-        ^                                       ^
-        | pty                                   | audio + captions
-        +------------------+-------------------+
-                           |
-                    converse-code   <- this repo
-                           |
-                           |  one Converse WebSocket: audio + tool protocol
-                           v
-              Converse broker (unchanged)
+        ^                                       |
+        | pty                           audio + tool protocol
+        |                                       v
+   converse-code <--- acknowledged ---> Browser SDK
+        |              local controls           |
+        +-- scoped credential + Claude hooks    v
+                                      Converse broker
          brain, ASR, TTS, turn-taking, barge-in
 ```
 
@@ -91,7 +90,14 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security b
   needs a menu decision, but never approves on the user's behalf.
 - Trust dialogs, model pickers, and permission menus are detected from the rendered terminal
   structure. Prompt-history cursors are excluded so a closed menu cannot be mistaken for an open
-  one. Converse's managed pending-job cancellation interrupts only the matching Claude turn.
+  one. Model changes also consume Claude Code's specific follow-up model confirmation before they
+  report success. Converse's managed pending-job cancellation interrupts only the matching turn.
+- New work and steering are explicit: `long_task` starts an idle Claude turn, while `steer_task`
+  adds requirements to work already in progress. A second task is never silently reinterpreted as
+  guidance or claimed to be queued.
+- The browser SDK connects directly to Converse with a short-lived, session-bound credential.
+  Its supported resume-state API preserves a live conversation across page reloads; only tool
+  calls and Claude status cross the authenticated localhost link.
 - Built entirely against the public Converse tool contract
   (`converse.trelis.com/docs/api/websocket/#tools`).
 
