@@ -29,12 +29,20 @@ class FakeSender:
         self.results = []
         self.progress = []
         self.context = []
+        self.deferred = []
+        self.partials = []
 
     async def send_tool_result(self, call_id, content):
         self.results.append((call_id, content))
 
     async def send_tool_progress(self, call_id, note):
         self.progress.append((call_id, note))
+
+    async def send_tool_deferred(self, call_id, handle, status_label=None):
+        self.deferred.append((call_id, handle))
+
+    async def send_tool_partial_result(self, call_id, content, reply=False):
+        self.partials.append((call_id, content, reply))
 
     async def send_context(self, text, role="context", reply=False):
         self.context.append((text, role, reply))

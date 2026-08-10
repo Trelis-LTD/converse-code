@@ -37,10 +37,18 @@ The localhost server exposes:
 - `/hook/{event}`: native Claude Code HTTP lifecycle hooks.
 - `/vendor/converse/*.js`: the Apache-licensed browser SDK modules bundled with the wheel.
 
-The tool router reports `idle`, `working`, or `menu`. A long task stays open until Claude emits
-`Stop`, fails through `StopFailure`, needs a visible menu answer, is cancelled, or reaches the
-bounded hold deadline. Completion after that deadline is pushed into the voice session rather
-than requiring a polling call.
+The tool router reports `idle`, `working`, or `menu`. A `long_task` call is acknowledged as
+deferred once its prompt is confirmed accepted, so no voice turn is held open while Claude works.
+The unit of work is a **working episode**: one run of Claude Code from accepting input until it
+comes to rest (`Stop`, `StopFailure`, or cancellation). Prompts start an episode or join one in
+progress — input typed mid-episode either steers it (one episode, one combined outcome) or queues
+as the next episode — so a deferred job is the broker's handle on the current episode, never on an
+individual prompt, and episodes are strictly serial. While an episode runs, milestones go out as
+partial results under the cadence rule *milestones speak, telemetry stays silent*: a menu
+(blocked on a decision) and a test run announce themselves; file edits stay silent but keep the
+voice current; other activity is plain progress. The episode's closing message resolves the job
+and is announced by the broker. Episodes typed directly at the terminal inject their outcome
+silently — the user already read it there.
 
 Prompt injection is acknowledged, not assumed. Text and Enter are separate PTY writes, concurrent
 injections are serialized, and `UserPromptSubmit` confirms that Claude accepted the exact prompt.

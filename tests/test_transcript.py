@@ -49,12 +49,24 @@ def test_summarize_collects_last_text_and_files():
     assert "Edit" in s.tools_used
 
 
-def test_progress_notes():
-    assert tmod.progress_note(entry_assistant(tool_use("Edit", file_path="/p/auth.py"))) == "editing auth.py"
-    assert tmod.progress_note(entry_assistant(tool_use("Bash", description="Run test suite"))) == "run test suite"
-    assert tmod.progress_note(entry_assistant(tool_use("Grep", pattern="x"))) == "reading the code"
-    assert tmod.progress_note(entry_assistant(text("hi"))) is None
-    assert tmod.progress_note({"type": "user"}) is None
+def test_milestone_classifies_entries():
+    edit = tmod.milestone(entry_assistant(tool_use("Edit", file_path="/p/auth.py")))
+    assert edit == {"kind": "edit", "speak": "Edited auth.py.", "files": ["auth.py"]}
+    tests = tmod.milestone(entry_assistant(tool_use("Bash", description="Run test suite")))
+    assert tests == {"kind": "tests", "speak": "Running the tests now."}
+    # Claude's interstitial prose becomes silent telemetry, compressed
+    prose = tmod.milestone(entry_assistant(text("README created. Now building the game itself.")))
+    assert prose["kind"] == "note"
+    assert "building the game" in prose["note"]
+    assert tmod.milestone(entry_assistant(text("Done."))) is None  # too short to be informative
+    assert tmod.milestone({"type": "user"}) is None
+
+
+def test_milestone_ignores_non_assistant_and_plain_bash():
+    note = tmod.milestone(entry_assistant(tool_use("Bash", description="Install deps")))
+    assert note == {"kind": "note", "note": "install deps"}
+    assert tmod.milestone(entry_assistant(tool_use("Grep", pattern="x"))) == {
+        "kind": "note", "note": "reading the code"}
 
 
 def test_speak_summary_cuts_at_sentence():
