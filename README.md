@@ -5,6 +5,9 @@ terminal and connects it to [Converse](https://converse.trelis.com) over the pub
 WebSocket tool protocol — you speak into a browser tab, instructions appear in the
 terminal as typed text, and the voice tells you what happened.
 
+> **Alpha — invite only.** Trelis Converse is in alpha for individual developers and
+> enterprise. Reach out to [voice@trelis.com](mailto:voice@trelis.com) to get on the waitlist.
+
 This repository is also the **reference implementation** for building a client against the
 [Converse WebSocket tool contract](https://converse.trelis.com/docs/api/websocket/#tools).
 It exercises the full surface — audio streaming, tool calls and resolutions, proactive
