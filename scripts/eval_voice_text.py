@@ -20,7 +20,11 @@ import tempfile
 import time
 from pathlib import Path
 
-from converse_code import config
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from converse_code import config  # noqa: E402
 from converse_code.broker import BrokerClient, DEFAULT_URL
 from converse_code.hooks import write_settings
 from converse_code.localserver import LocalServer

@@ -41,14 +41,17 @@ def test_manifest_shape():
 
 async def test_long_task_rejects_bash_mode_prefix(router, fake_driver, fake_sender):
     """A leading '!' is the TUI's raw-shell escape: it bypasses Claude Code's
-    permission system, so it must never be injected from the voice path."""
-    await router.handle_tool_call(
-        {"id": "c1", "name": "long_task", "args": {"request": "!open index.html"}}
-    )
-    assert fake_driver.injected == []
-    _, content = fake_sender.results[0]
-    assert "not allowed" in content["speak"]
-    assert content["data"]["state"] == "idle"
+    permission system, so it must never be injected from the voice path — and
+    the guard must see the sanitized text, or a stripped control character
+    prefix would smuggle '!' past it."""
+    for request in ("!open index.html", "\x01!ls", "\x1b!rm -rf /"):
+        await router.handle_tool_call(
+            {"id": "c1", "name": "long_task", "args": {"request": request}}
+        )
+        assert fake_driver.injected == []
+        _, content = fake_sender.results[-1]
+        assert "not allowed" in content["speak"]
+        assert content["data"]["state"] == "idle"
 
 
 async def test_long_task_redirects_slash_commands(router, fake_driver, fake_sender):

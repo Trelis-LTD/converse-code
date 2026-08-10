@@ -69,6 +69,29 @@ def test_milestone_ignores_non_assistant_and_plain_bash():
         "kind": "note", "note": "reading the code"}
 
 
+def test_milestone_test_detection_needs_word_boundary():
+    assert tmod.milestone(entry_assistant(
+        tool_use("Bash", description="Show latest commit")))["kind"] == "note"
+    assert tmod.milestone(entry_assistant(
+        tool_use("Bash", description="Run the test suite")))["kind"] == "tests"
+
+
+def test_milestone_priority_across_parallel_blocks():
+    """Parallel tool calls share one entry; a Read block must not mask a test
+    run, and multiple edits merge into one partial."""
+    entry = {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Read", "input": {}},
+        {"type": "tool_use", "name": "Bash", "input": {"description": "Run tests"}},
+    ]}}
+    assert tmod.milestone(entry)["kind"] == "tests"
+    edits = {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Edit", "input": {"file_path": "/p/a.py"}},
+        {"type": "tool_use", "name": "Write", "input": {"file_path": "/p/b.py"}},
+    ]}}
+    m = tmod.milestone(edits)
+    assert m == {"kind": "edit", "speak": "Edited 2 files.", "files": ["a.py", "b.py"]}
+
+
 def test_speak_summary_cuts_at_sentence():
     long = "First sentence is here. " + "word " * 100
     out = tmod.speak_summary(long, limit=60)

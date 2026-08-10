@@ -102,6 +102,7 @@ class ToolRouter:
     SETTLE_S = 1.2          # wait after command/select before reading the screen
     MAX_PROGRESS = 10       # protocol cap is 12/call; keep headroom
     MAX_PARTIALS = 6        # protocol cap is 8/call; keep headroom
+    MENU_RESERVE = 2        # partial budget only blocking menus may spend
     SUBMIT_ACK_S = 2.0      # UserPromptSubmit should arrive almost immediately
     SUBMIT_ATTEMPTS = 3     # initial submit plus two bounded Enter retries
 
@@ -192,6 +193,7 @@ class ToolRouter:
         self._turn_failure = str(detail)
         self.working = False
         self.queue.clear()
+        self._voice_owed = False  # the error itself is the announcement
         self._turn_done.set()
         await self._push_status()
         if not waiting:
@@ -304,6 +306,7 @@ class ToolRouter:
         self.driver.send_key("escape")
         self.working = False
         self.queue.clear()
+        self._voice_owed = False  # canceled work owes no completion
         self._turn_done.set()
         await self._push_status()
 
@@ -336,7 +339,10 @@ class ToolRouter:
     # -- tools -------------------------------------------------------------------
 
     async def _long_task(self, call_id: str, args: dict) -> dict:
-        request = (args.get("request") or "").strip()
+        # Guard the exact text that will be typed: sanitize() strips control
+        # characters, so testing the raw string would let "\x01!ls" reach the
+        # PTY as "!ls".
+        request = sanitize((args.get("request") or "").strip())
         if not request:
             return self._result("No instruction was given.")
         # Voice input reaches the machine only as natural-language instructions
@@ -455,6 +461,9 @@ class ToolRouter:
 
             menu = self.menu()
             if menu:
+                # A blocking menu is the one interjection that must never be
+                # starved: it draws on the full budget while edits/tests keep
+                # MENU_RESERVE partials free for it below.
                 key = (menu.title, tuple(menu.options))
                 if key != announced_menu and sent_partials < self.MAX_PARTIALS:
                     announced_menu = key
@@ -475,11 +484,11 @@ class ToolRouter:
                         await self.sender.send_tool_progress(call_id, m["note"])
                         sent_progress += 1
                 elif m["kind"] == "tests":
-                    if not tests_announced and sent_partials < self.MAX_PARTIALS:
+                    if not tests_announced and sent_partials < self.MAX_PARTIALS - self.MENU_RESERVE:
                         tests_announced = True
                         sent_partials += 1
                         await self._send_partial(call_id, m["speak"], reply=True)
-                elif sent_partials < self.MAX_PARTIALS:
+                elif sent_partials < self.MAX_PARTIALS - self.MENU_RESERVE:
                     sent_partials += 1
                     await self._send_partial(call_id, m["speak"], files=m.get("files"))
 
@@ -618,4 +627,4 @@ class ToolRouter:
             m = tmod.milestone(entry)
             if m and m not in out:
                 out.append(m)
-        return out[:5]
+        return out
