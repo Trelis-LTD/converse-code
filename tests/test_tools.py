@@ -26,7 +26,8 @@ def test_manifest_shape():
     tools = manifest()
     names = [t["name"] for t in tools]
     assert names == [
-        "long_task", "steer_task", "command", "select_option", "press_key", "end_session",
+        "long_task", "steer_task", "observe_claude", "set_model", "command",
+        "select_option", "press_key", "end_session",
     ]
     long_task = tools[0]
     assert long_task.get("requires_permission", False) is False
@@ -365,6 +366,93 @@ async def test_canceled_turn_does_not_suppress_the_next_terminal_completion(
     assert "later typed task" in fake_sender.context[0][0]
 
 
+async def test_prompt_correlated_cancel_blocks_new_ui_work_and_ignores_late_stop(
+    router, fake_driver, fake_sender,
+):
+    router._verify_submissions = True
+    task = asyncio.create_task(router.handle_tool_call(
+        {"id": "old", "name": "long_task", "args": {"request": "open the game"}}
+    ))
+    await asyncio.sleep(0.05)
+    await router.on_hook("user_prompt_submit", {
+        "prompt": "open the game", "prompt_id": "prompt-old",
+    })
+    await router.handle_tool_cancel({"type": "tool_cancel", "id": "old"})
+    await task
+
+    assert router.state() == "canceling"
+    await router.handle_tool_call(
+        {"id": "model", "name": "command", "args": {"command": "/model"}}
+    )
+    assert fake_driver.injected == ["open the game"]
+    assert "still stopping" in fake_sender.results[-1][1]["speak"].lower()
+
+    await router.on_hook("stop", {
+        "prompt_id": "prompt-old", "last_assistant_message": "The game is open.",
+    })
+    assert router.state() == "idle"
+    assert fake_sender.context == []
+
+    next_task = asyncio.create_task(router.handle_tool_call(
+        {"id": "new", "name": "long_task", "args": {"request": "check the model"}}
+    ))
+    await asyncio.sleep(0.05)
+    await router.on_hook("user_prompt_submit", {
+        "prompt": "check the model", "prompt_id": "prompt-new",
+    })
+    # A duplicate/late Stop from the canceled episode must not complete the new one.
+    await router.on_hook("stop", {
+        "prompt_id": "prompt-old", "last_assistant_message": "The game is up and running.",
+    })
+    assert not next_task.done()
+    assert router.state() == "working"
+    assert router.semantic_state()["last_action"]["action"] == "long_task"
+
+    await router.on_hook("stop", {
+        "prompt_id": "prompt-new", "last_assistant_message": "The model is Fable.",
+    })
+    await next_task
+    assert fake_sender.results[-1][1]["speak"] == "The model is Fable."
+
+
+async def test_cancel_can_settle_from_verified_idle_ui_without_stop_hook(
+    router, fake_driver,
+):
+    router._verify_submissions = True
+    router.CANCEL_POLL_S = 0.01
+    router.CANCEL_GRACE_S = 0.01
+    router.CANCEL_IDLE_SAMPLES = 2
+    router.CANCEL_RETRY_S = 0.01
+    task = asyncio.create_task(router.handle_tool_call(
+        {"id": "old", "name": "long_task", "args": {"request": "long task"}}
+    ))
+    await asyncio.sleep(0.02)
+    await router.on_hook("user_prompt_submit", {
+        "prompt": "long task", "prompt_id": "prompt-old",
+    })
+    fake_driver.lines = ["✻ Working…", "esc to interrupt"]
+    await router.handle_tool_cancel({"type": "tool_cancel", "id": "old"})
+    await task
+    assert router.state() == "canceling"
+    deadline = asyncio.get_running_loop().time() + 1
+    while fake_driver.keys.count("escape") < 2 and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert fake_driver.keys.count("escape") >= 2
+
+    fake_driver.lines = [
+        "────────────────────────", "❯", "────────────────────────",
+    ]
+    deadline = asyncio.get_running_loop().time() + 1
+    while router.state() != "idle" and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+
+    assert router.state() == "idle"
+    assert router.semantic_state()["last_action"] == {
+        "action": "cancel_task", "status": "verified",
+        "effect": "idle_ui_observed", "completed": True,
+    }
+
+
 async def test_stop_hook_wakes_voice_for_terminal_typed_work(router, fake_sender):
     await router.on_hook("stop", {
         "transcript_path": str(router.transcript_path),
@@ -377,6 +465,27 @@ async def test_stop_hook_wakes_voice_for_terminal_typed_work(router, fake_sender
     assert "entered directly in the terminal" in text
     assert role == "context"
     assert reply is False  # telemetry, not a milestone: current, but silent
+
+
+async def test_terminal_prompt_submit_updates_semantic_state_until_matching_stop(
+    router, fake_sender,
+):
+    await router.on_hook("user_prompt_submit", {
+        "prompt": "inspect the deployment", "prompt_id": "terminal-prompt",
+    })
+    state = router.semantic_state()
+    assert state["phase"] == "working"
+    assert state["active_task"] == "inspect the deployment"
+    assert state["last_action"] == {
+        "action": "terminal_task", "status": "pending",
+        "effect": "working", "completed": False,
+    }
+
+    await router.on_hook("stop", {
+        "prompt_id": "terminal-prompt", "last_assistant_message": "Deployment is healthy.",
+    })
+    assert router.semantic_state()["phase"] == "idle"
+    assert "Deployment is healthy" in fake_sender.context[0][0]
 
 
 async def test_permission_hook_wakes_voice_for_terminal_typed_menu(
@@ -442,13 +551,124 @@ async def test_command_reports_menu(router, fake_driver, fake_sender):
     async def show_menu():
         await asyncio.sleep(0.02)
         fake_driver.lines = [" Select model:", " ❯ Sonnet", "   Opus", ""]
+        while "escape" not in fake_driver.keys:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [" > ", ""]
 
     side = asyncio.create_task(show_menu())
     await router.handle_tool_call({"id": "c1", "name": "command", "args": {"command": "/model"}})
     await side
     assert fake_driver.injected == ["/model"]
     _, content = fake_sender.results[0]
-    assert "Sonnet" in content["speak"] and "menu" in content["speak"]
+    assert "Sonnet" in content["speak"] and "no model was changed" in content["speak"]
+    assert content["data"]["phase"] == "idle"
+    assert content["data"]["last_action"] == {
+        "action": "command",
+        "status": "verified",
+        "effect": "model_observed",
+        "completed": True,
+    }
+
+
+async def test_observe_claude_returns_authoritative_menu_state(
+    router, fake_driver, fake_sender,
+):
+    fake_driver.lines = [" Select model:", " ❯ Fable ✔", "   Sonnet", "   Haiku", ""]
+    await router.handle_tool_call({"id": "c1", "name": "observe_claude", "args": {}})
+
+    content = fake_sender.results[0][1]
+    assert "model picker" in content["speak"].lower()
+    assert content["data"]["phase"] == "awaiting_input"
+    assert content["data"]["ui"] == {
+        "kind": "model_picker",
+        "title": "Select model:",
+        "options": ["Fable ✔", "Sonnet", "Haiku"],
+        "selected": "Fable ✔",
+    }
+
+
+async def test_observe_claude_reports_last_verified_model_while_idle(
+    router, fake_sender,
+):
+    router._known_model = "sonnet"
+    router._known_model_source = "verified"
+    router._last_action = {
+        "action": "set_model", "status": "verified", "effect": "model_changed",
+        "completed": True, "from": "haiku", "to": "sonnet",
+    }
+    await router.handle_tool_call({"id": "c1", "name": "observe_claude", "args": {}})
+
+    content = fake_sender.results[0][1]
+    assert "sonnet" in content["speak"].lower()
+    assert content["data"]["model"] == {"name": "sonnet", "source": "verified"}
+
+
+async def test_set_model_reports_success_only_after_reopening_and_verifying(
+    router, fake_driver, fake_sender,
+):
+    fake_driver.lines = [" > ", ""]
+
+    async def advance_model_ui():
+        while fake_driver.injected != ["/model"]:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [" Select model:", " ❯ Fable ✔", "   Sonnet", "   Haiku", ""]
+        while fake_driver.keys.count("enter") < 1:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [
+            " This conversation is cached for the current model.",
+            " ❯ 1. Yes, switch to Haiku 4.5",
+            "   2. No, go back",
+            "",
+        ]
+        while fake_driver.keys.count("enter") < 2:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [" > ", ""]
+        while fake_driver.injected != ["/model", "/model"]:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [" Select model:", "   Fable", "   Sonnet", " ❯ Haiku ✔", ""]
+        while "escape" not in fake_driver.keys:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [" > ", ""]
+
+    side = asyncio.create_task(advance_model_ui())
+    await router.handle_tool_call(
+        {"id": "c1", "name": "set_model", "args": {"model": "haiku"}}
+    )
+    await side
+
+    content = fake_sender.results[0][1]
+    assert "verified" in content["speak"].lower()
+    assert content["data"]["last_action"]["status"] == "verified"
+    assert content["data"]["last_action"]["from"] == "fable"
+    assert content["data"]["last_action"]["to"] == "haiku"
+    assert content["data"]["phase"] == "idle"
+    assert fake_driver.keys[-1] == "escape"
+
+
+async def test_set_model_does_not_claim_unverified_change(router, fake_driver, fake_sender):
+    fake_driver.lines = [" Select model:", " ❯ Fable ✔", "   Haiku", ""]
+
+    async def fail_to_change():
+        while fake_driver.keys.count("enter") < 1:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [" > ", ""]
+        while fake_driver.injected != ["/model"]:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [" Select model:", " ❯ Fable ✔", "   Haiku", ""]
+        while "escape" not in fake_driver.keys:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [" > ", ""]
+
+    side = asyncio.create_task(fail_to_change())
+    await router.handle_tool_call(
+        {"id": "c1", "name": "set_model", "args": {"model": "haiku"}}
+    )
+    await side
+
+    content = fake_sender.results[0][1]
+    assert "couldn't verify" in content["speak"].lower()
+    assert content["data"]["last_action"]["status"] == "failed"
+    assert content["data"]["last_action"]["completed"] is False
 
 
 async def test_command_requires_slash(router, fake_sender):

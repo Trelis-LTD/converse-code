@@ -95,6 +95,12 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security b
 - New work and steering are explicit: `long_task` starts an idle Claude turn, while `steer_task`
   adds requirements to work already in progress. A second task is never silently reinterpreted as
   guidance or claimed to be queued.
+- Voice responses receive an authoritative semantic snapshot of Claude's UI. `observe_claude`
+  reports idle/working/canceling/menu state and the last verified action; `set_model` selects,
+  confirms, and reopens the picker before it can report a successful model change.
+- Claude hook `prompt_id` values bind each voice episode to its actual completion. Cancellation
+  remains `canceling` until the matching Stop arrives or the terminal is stably idle. Late
+  completion from an older prompt cannot be attributed to newer work.
 - The browser SDK connects directly to Converse with a short-lived, session-bound credential.
   Its supported resume-state API preserves a live conversation across page reloads; only tool
   calls and Claude status cross the authenticated localhost link.

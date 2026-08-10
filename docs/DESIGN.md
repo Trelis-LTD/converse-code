@@ -42,7 +42,7 @@ The localhost server exposes:
 - `/hook/{event}`: native Claude Code HTTP lifecycle hooks.
 - `/vendor/converse/*.js`: the Apache-licensed browser SDK modules bundled with the wheel.
 
-The tool router reports `idle`, `working`, or `menu`. A `long_task` call is acknowledged as
+The tool router reports `idle`, `working`, `canceling`, or `menu`. A `long_task` call is acknowledged as
 deferred once its prompt is confirmed accepted, so no voice turn is held open while Claude works.
 The unit of work is a **working episode**: one run of Claude Code from accepting input until it
 comes to rest (`Stop`, `StopFailure`, or cancellation). `long_task` starts an episode only while
@@ -56,9 +56,19 @@ voice current; other activity is plain progress. The episode's closing message r
 and is announced by the broker. Episodes typed directly at the terminal inject their outcome
 silently — the user already read it there.
 
+Every tool result also includes a semantic snapshot: phase, active task, open UI and selection,
+known model, and the last action's verification status. `observe_claude` exposes that state without
+mutating the TUI. State-changing tools distinguish `pending`, `awaiting_input`, `unverified`,
+`failed`, and `verified`; opening `/model` is therefore never equivalent to changing a model.
+`set_model` owns the complete picker/confirmation flow and verifies its postcondition by reopening
+the picker.
+
 Prompt injection is acknowledged, not assumed. Text and Enter are separate PTY writes, concurrent
 injections are serialized, and `UserPromptSubmit` confirms that Claude accepted the exact prompt.
 A swallowed Enter is retried twice before the voice call resolves with a recovery instruction.
+The hook's `prompt_id` is retained for the episode and matched against `Stop`. After cancellation,
+the router stays in `canceling` until that prompt stops or the rendered terminal is stably idle;
+duplicate or late Stop events from it are ignored rather than applied to a newer episode.
 
 Claude menus are read from a rendered terminal emulator, never from raw ANSI output. The detector
 uses structure only and excludes the idle composer and historical prompt cursors. Menu choices

@@ -45,11 +45,24 @@ STEER_TASK_DESCRIPTION = (
     "If Claude Code is idle, use long_task instead."
 )
 
+OBSERVE_DESCRIPTION = (
+    "Inspect Claude Code's authoritative current UI state without changing it. Use this when the "
+    "user asks what is happening, challenges a claimed result, or when prior actions may have "
+    "been interrupted. Returns idle/working/canceling/menu state, the active task, open menu, "
+    "selected option, and the last verified action."
+)
+
+SET_MODEL_DESCRIPTION = (
+    "Change Claude Code's model as one verified operation. Pass the requested model name. This "
+    "opens the picker, selects and confirms the model, then reopens the picker to verify the "
+    "actual selected model. Never use command('/model') to claim a model was changed."
+)
+
 COMMAND_DESCRIPTION = (
     "Run a Claude Code slash command, e.g. /clear (reset context), /compact (compress "
-    "context), /model (switch model — opens a menu). Pass the full command string starting "
-    "with '/'. Any command the user names can be passed through. If a menu opens, its "
-    "options come back in the result — then use select_option."
+    "context), /model (safely inspect the selected model; use set_model to change models). Pass the "
+    "full command string starting with '/'. Any command the user names can be passed through. "
+    "If a menu opens, its options come back in the result; opening a menu is never completion."
 )
 
 SELECT_DESCRIPTION = (
@@ -94,6 +107,10 @@ def manifest() -> list[dict]:
         tool("steer_task", STEER_TASK_DESCRIPTION,
              {"request": {"type": "string", "description": "Guidance for the active task."}},
              ["request"], timeout=15),
+        tool("observe_claude", OBSERVE_DESCRIPTION, timeout=15),
+        tool("set_model", SET_MODEL_DESCRIPTION,
+             {"model": {"type": "string", "description": "Requested model name."}},
+             ["model"], timeout=30),
         tool("command", COMMAND_DESCRIPTION,
              {"command": {"type": "string", "description": "Slash command, starting with '/'."}},
              ["command"], timeout=15),
@@ -116,6 +133,11 @@ class ToolRouter:
     MENU_RESERVE = 2        # partial budget only blocking menus may spend
     SUBMIT_ACK_S = 2.0      # UserPromptSubmit should arrive almost immediately
     SUBMIT_ATTEMPTS = 3     # initial submit plus two bounded Enter retries
+    CANCEL_GRACE_S = 0.3    # let the submitted prompt leave the composer
+    CANCEL_POLL_S = 0.1
+    CANCEL_RETRY_S = 0.5    # an initial Escape can race prompt activation
+    CANCEL_ESCAPE_RETRIES = 3
+    CANCEL_IDLE_SAMPLES = 3 # avoid accepting a transient repaint as settled
 
     def __init__(self, driver, sender, handle: str, project_dir: str | Path | None = None,
                  verify_submissions: bool = False):
@@ -142,6 +164,14 @@ class ToolRouter:
         self._prompt_submitted = asyncio.Event()
         self._expected_prompt: str | None = None
         self._turn_failure = ""
+        self._active_request: str | None = None
+        self._last_action: dict | None = None
+        self._episode_prompt_ids: set[str] = set()
+        self._canceled_prompt_ids: set[str] = set()
+        self._canceling_prompt_ids: set[str] = set()
+        self._known_model: str | None = None
+        self._known_model_source: str | None = None
+        self._cancel_watch_task: asyncio.Task | None = None
         self.on_status = None  # async callback(dict) → browser tab
 
     # -- events from the Stop hook -------------------------------------------
@@ -150,7 +180,22 @@ class ToolRouter:
         if event == "user_prompt_submit":
             prompt = payload.get("prompt")
             if isinstance(prompt, str) and sanitize(prompt) == self._expected_prompt:
+                prompt_id = payload.get("prompt_id")
+                if isinstance(prompt_id, str) and prompt_id:
+                    self._episode_prompt_ids.add(prompt_id)
                 self._prompt_submitted.set()
+            elif isinstance(prompt, str) and self._expected_prompt is None:
+                prompt_id = payload.get("prompt_id")
+                self.working = True
+                self._active_request = sanitize(prompt)
+                self._episode_prompt_ids.clear()
+                if isinstance(prompt_id, str) and prompt_id:
+                    self._episode_prompt_ids.add(prompt_id)
+                self._last_action = {
+                    "action": "terminal_task", "status": "pending",
+                    "effect": "working", "completed": False,
+                }
+                await self._push_status()
             return
         if event == "permission_request":
             # HTTP hooks run before Claude paints the interactive prompt. Return
@@ -163,7 +208,31 @@ class ToolRouter:
             return
         if event != "stop":
             return
+        prompt_id = payload.get("prompt_id")
+        if isinstance(prompt_id, str) and prompt_id in self._canceled_prompt_ids:
+            was_canceling = prompt_id in self._canceling_prompt_ids
+            self._canceling_prompt_ids.discard(prompt_id)
+            if was_canceling:
+                if not self._canceling_prompt_ids:
+                    self._active_request = None
+                self._last_action = {
+                    "action": "cancel_task", "status": "verified",
+                    "effect": "stopped", "completed": True,
+                }
+            trace("canceled_stop_ignored", prompt_id=prompt_id)
+            if was_canceling:
+                await self._push_status()
+            return
+        if (
+            (self._active_call_id is not None or self.working)
+            and self._episode_prompt_ids
+            and isinstance(prompt_id, str)
+            and prompt_id not in self._episode_prompt_ids
+        ):
+            trace("unrelated_stop_ignored", prompt_id=prompt_id)
+            return
         voice_call_was_waiting = self._active_call_id is not None
+        work_was_active = self.working
         suppress_notification = self._suppress_next_stop_notification
         self._suppress_next_stop_notification = False
         # The hook tells us authoritatively which session/file is ours; that
@@ -186,6 +255,18 @@ class ToolRouter:
         voice_owed = self._voice_owed
         self._voice_owed = False
         self.working = False
+        self._active_request = None
+        self._episode_prompt_ids.clear()
+        if voice_call_was_waiting:
+            self._last_action = {
+                "action": "long_task", "status": "verified",
+                "effect": "completed", "completed": True,
+            }
+        elif work_was_active:
+            self._last_action = {
+                "action": "terminal_task", "status": "verified",
+                "effect": "completed", "completed": True,
+            }
         self._turn_done.set()
         await self._push_status()
         if not voice_call_was_waiting and not suppress_notification:
@@ -271,6 +352,8 @@ class ToolRouter:
         handlers = {
             "long_task": self._long_task,
             "steer_task": self._steer_task,
+            "observe_claude": self._observe_claude,
+            "set_model": self._set_model,
             "command": self._command,
             "select_option": self._select_option,
             "press_key": self._press_key,
@@ -278,7 +361,12 @@ class ToolRouter:
         }
         handler = handlers.get(name)
         try:
-            if handler is None:
+            if self._canceling_prompt_ids and name not in {"observe_claude", "end_session"}:
+                content = self._result(
+                    "Claude Code is still stopping the interrupted task. Wait for it to reach "
+                    "idle before starting another action."
+                )
+            elif handler is None:
                 content = self._result(f"Unknown tool {name}.")
             else:
                 content = await handler(call_id, args)
@@ -307,13 +395,61 @@ class ToolRouter:
             return
         self._server_canceled.add(call_id)
         self._interrupted = True
-        self._suppress_next_stop_notification = True
+        if self._episode_prompt_ids:
+            self._canceled_prompt_ids.update(self._episode_prompt_ids)
+            self._canceling_prompt_ids.update(self._episode_prompt_ids)
+            if self._cancel_watch_task is None or self._cancel_watch_task.done():
+                self._cancel_watch_task = asyncio.create_task(
+                    self._watch_cancellation(set(self._episode_prompt_ids))
+                )
+        else:
+            self._suppress_next_stop_notification = True
         self.driver.send_key("escape")
         self.working = False
         self.queue.clear()
         self._voice_owed = False  # canceled work owes no completion
+        self._last_action = {
+            "action": "cancel_task", "status": "pending",
+            "effect": "cancel_requested", "completed": False,
+        }
         self._turn_done.set()
         await self._push_status()
+
+    async def _watch_cancellation(self, prompt_ids: set[str]) -> None:
+        """Settle an interruption from visible idle state when Claude emits no Stop hook."""
+        await asyncio.sleep(self.CANCEL_GRACE_S)
+        idle_samples = 0
+        escape_retries = 0
+        last_escape = 0.0
+        while prompt_ids & self._canceling_prompt_ids:
+            if screenmod.is_idle(self.driver.snapshot()):
+                idle_samples += 1
+                if idle_samples >= self.CANCEL_IDLE_SAMPLES:
+                    self._canceling_prompt_ids.difference_update(prompt_ids)
+                    if not self._canceling_prompt_ids:
+                        self._active_request = None
+                    self._last_action = {
+                        "action": "cancel_task", "status": "verified",
+                        "effect": "idle_ui_observed", "completed": True,
+                    }
+                    trace("canceled_idle_observed", prompt_ids=sorted(prompt_ids))
+                    await self._push_status()
+                    return
+            else:
+                idle_samples = 0
+                now = asyncio.get_running_loop().time()
+                if (
+                    escape_retries < self.CANCEL_ESCAPE_RETRIES
+                    and now - last_escape >= self.CANCEL_RETRY_S
+                ):
+                    self.driver.send_key("escape")
+                    escape_retries += 1
+                    last_escape = now
+                    trace(
+                        "cancel_escape_retried", prompt_ids=sorted(prompt_ids),
+                        attempt=escape_retries,
+                    )
+            await asyncio.sleep(self.CANCEL_POLL_S)
 
     # -- state ------------------------------------------------------------------
 
@@ -321,12 +457,52 @@ class ToolRouter:
         return screenmod.detect_menu(self.driver.snapshot())
 
     def state(self) -> str:
+        if self._canceling_prompt_ids:
+            return "canceling"
         if self.menu():
             return "menu"
         return "working" if self.working else "idle"
 
+    def semantic_state(self) -> dict:
+        menu = self.menu()
+        state = self.state()
+        phase = "awaiting_input" if state == "menu" else state
+        ui = {"kind": "none"}
+        if menu:
+            ui = {
+                "kind": "model_picker" if self._is_model_menu(menu) else "menu",
+                "title": menu.title,
+                "options": list(menu.options),
+                "selected": menu.options[menu.selected] if menu.options else "",
+            }
+        visible_model = None
+        if menu and self._is_model_menu(menu) and menu.options:
+            visible_model = self._model_name(menu.options[menu.selected])
+        else:
+            visible_model = screenmod.detect_model(self.driver.snapshot())
+        if visible_model:
+            if visible_model != self._known_model or self._known_model_source != "verified":
+                self._known_model_source = "visible_ui"
+            self._known_model = visible_model
+        model = None
+        if self._known_model:
+            model = {
+                "name": self._known_model,
+                "source": self._known_model_source or "remembered",
+            }
+        return {
+            "phase": phase,
+            "active_task": self._active_request,
+            "ui": ui,
+            "model": model,
+            "last_action": dict(self._last_action) if self._last_action else None,
+        }
+
     def _status_data(self, **extra) -> dict:
-        data = {"state": self.state(), "queue": list(self.queue), **extra}
+        data = {
+            "state": self.state(), "queue": list(self.queue),
+            **self.semantic_state(), **extra,
+        }
         menu = self.menu()
         if menu:
             data["menu_title"] = menu.title
@@ -385,18 +561,33 @@ class ToolRouter:
         self.last_assistant_text = ""
         self._turn_failure = ""
         self._active_call_id = call_id
+        self._active_request = request
+        self._episode_prompt_ids.clear()
+        self._last_action = {
+            "action": "long_task", "status": "pending",
+            "effect": "submitting", "completed": False,
+        }
         self._ensure_transcript()
         start_offset, start_path = self._offset, self.transcript_path
 
         if not await self._inject_and_confirm(request):
             self.working = False
             self._active_call_id = None
+            self._active_request = None
+            self._last_action = {
+                "action": "long_task", "status": "failed",
+                "effect": "submission_unverified", "completed": False,
+            }
             return self._result(
                 "I put the instruction into Claude Code, but couldn't confirm it was submitted. "
                 "The text may still be visible in the terminal input; press Enter there or try again."
             )
         if self.on_status:
             await self.on_status({"type": "local", "event": "injected", "text": request})
+        self._last_action = {
+            "action": "long_task", "status": "pending",
+            "effect": "working", "completed": False,
+        }
 
         # Detach from the voice turn: the brain closes its reply naturally now,
         # and notify_on_complete announces the terminal result when it lands.
@@ -433,6 +624,130 @@ class ToolRouter:
         if self.on_status:
             await self.on_status({"type": "local", "event": "injected", "text": request})
         return self._result("Added that guidance to the current Claude Code task.")
+
+    async def _observe_claude(self, _call_id: str, _args: dict) -> dict:
+        snapshot = self.semantic_state()
+        phase, ui = snapshot["phase"], snapshot["ui"]
+        if ui["kind"] == "model_picker":
+            speak = (
+                f"Claude Code is showing the model picker. Currently selected: "
+                f"{ui['selected'] or 'unknown'}. No model changes should be claimed from "
+                "this observation alone."
+            )
+        elif ui["kind"] == "menu":
+            speak = (
+                f"Claude Code is awaiting input in {ui['title'] or 'a menu'}. "
+                f"Currently selected: {ui['selected'] or 'unknown'}."
+            )
+        elif phase == "working":
+            speak = f"Claude Code is working on: {snapshot['active_task'] or 'the active task'}."
+        elif phase == "canceling":
+            speak = "Claude Code is still stopping the interrupted task; it is not idle yet."
+        else:
+            model = snapshot["model"]
+            if model and model["source"] == "verified":
+                suffix = f" The last verified model is {model['name']}."
+            elif model:
+                suffix = f" The visible Claude UI reports model {model['name']}."
+            else:
+                suffix = ""
+            speak = f"Claude Code is idle with no menu open.{suffix}"
+        return self._result(speak)
+
+    async def _set_model(self, _call_id: str, args: dict) -> dict:
+        wanted = (args.get("model") or "").strip()
+        if not wanted:
+            return self._result("No model was requested.")
+        if self.working:
+            return self._result("Claude Code is working. Wait until it is idle before changing model.")
+
+        menu = self.menu()
+        if menu and not self._is_model_menu(menu):
+            return self._result(
+                f"Claude Code needs the current menu answered first: {menu.title or 'options'}."
+            )
+        if menu is None:
+            self.driver.inject("/model")
+            if self.on_status:
+                await self.on_status({"type": "local", "event": "injected", "text": "/model"})
+            await asyncio.sleep(self.SETTLE_S)
+            menu = self.menu()
+        if not self._is_model_menu(menu):
+            self._last_action = {
+                "action": "set_model", "status": "failed",
+                "effect": "picker_not_found", "completed": False,
+            }
+            return self._result("Couldn't open and verify Claude Code's model picker.")
+
+        before = self._model_name(menu.options[menu.selected])
+        idx = screenmod.match_option(menu, wanted)
+        if idx is None:
+            self._last_action = {
+                "action": "set_model", "status": "failed",
+                "effect": "model_not_found", "completed": False,
+            }
+            return self._result(
+                f"Couldn't find a model matching '{wanted}'. Options: {', '.join(menu.options)}."
+            )
+        target = self._model_name(menu.options[idx])
+        if before == target:
+            self.driver.send_key("escape")
+            await asyncio.sleep(self.SETTLE_S)
+            self._known_model = target
+            self._known_model_source = "verified"
+            self._last_action = {
+                "action": "set_model", "status": "verified", "effect": "already_selected",
+                "completed": True, "from": before, "to": target,
+            }
+            return self._result(f"Verified that {menu.options[idx]} is already selected.")
+
+        await self._choose_menu_index(menu, idx)
+        after = self.menu()
+        if self._is_matching_model_confirmation(after, menu.options[idx]):
+            yes_idx = next(
+                i for i, option in enumerate(after.options)
+                if option.lower().lstrip("0123456789. ").startswith("yes")
+            )
+            await self._choose_menu_index(after, yes_idx)
+        elif after:
+            self._last_action = {
+                "action": "set_model", "status": "failed",
+                "effect": "unexpected_confirmation", "completed": False,
+            }
+            return self._result(
+                f"Couldn't verify the model change because another menu is open: "
+                f"{after.title or 'options'}."
+            )
+
+        self.driver.inject("/model")
+        if self.on_status:
+            await self.on_status({"type": "local", "event": "injected", "text": "/model"})
+        await asyncio.sleep(self.SETTLE_S)
+        verified_menu = self.menu()
+        actual = (
+            self._model_name(verified_menu.options[verified_menu.selected])
+            if self._is_model_menu(verified_menu) and verified_menu.options else None
+        )
+        if verified_menu:
+            self.driver.send_key("escape")
+            await asyncio.sleep(self.SETTLE_S)
+        if actual != target:
+            self._last_action = {
+                "action": "set_model", "status": "failed",
+                "effect": "selection_unverified", "completed": False,
+                "from": before, "requested": target, "observed": actual,
+            }
+            return self._result(
+                f"Couldn't verify the model change. Requested {target}, but the picker shows "
+                f"{actual or 'an unknown selection'}."
+            )
+        self._last_action = {
+            "action": "set_model", "status": "verified", "effect": "model_changed",
+            "completed": True, "from": before, "to": actual,
+        }
+        self._known_model = actual
+        self._known_model_source = "verified"
+        return self._result(f"Verified that Claude Code changed from {before} to {actual}.")
 
     async def _inject_and_confirm(self, text: str) -> bool:
         """Inject one prompt and, in production, wait for Claude to acknowledge it.
@@ -570,12 +885,41 @@ class ToolRouter:
             await self.on_status({"type": "local", "event": "injected", "text": cmd})
         await asyncio.sleep(self.SETTLE_S)
         menu = self.menu()
+        if cmd == "/model" and self._is_model_menu(menu):
+            selected = menu.options[menu.selected] if menu.options else "unknown"
+            model = self._model_name(selected)
+            self.driver.send_key("escape")
+            await asyncio.sleep(self.SETTLE_S)
+            if self.menu():
+                self._last_action = {
+                    "action": "command", "status": "failed",
+                    "effect": "picker_close_unverified", "completed": False,
+                }
+                return self._result(
+                    f"The selected model appears to be {model}, but the model picker did not "
+                    "close cleanly. No model change was attempted."
+                )
+            self._known_model = model
+            self._known_model_source = "visible_ui"
+            self._last_action = {
+                "action": "command", "status": "verified",
+                "effect": "model_observed", "completed": True,
+            }
+            return self._result(f"Current model: {model.title()}; no model was changed.")
         if menu:
+            self._last_action = {
+                "action": "command", "status": "awaiting_input",
+                "effect": "menu_opened", "completed": False,
+            }
             return self._result(
                 f"{cmd} opened a menu: {menu.title or 'options'} — {', '.join(menu.options)}. "
                 f"Currently selected: {menu.options[menu.selected] if menu.options else 'unknown'}."
             )
-        return self._result(f"Sent {cmd}.")
+        self._last_action = {
+            "action": "command", "status": "unverified",
+            "effect": "sent", "completed": False,
+        }
+        return self._result(f"Sent {cmd}, but Claude Code exposed no state that verifies an effect.")
 
     async def _select_option(self, _call_id: str, args: dict) -> dict:
         wanted = (args.get("option") or "").strip()
@@ -587,13 +931,7 @@ class ToolRouter:
             return self._result(
                 f"Couldn't find an option matching '{wanted}'. Options: {', '.join(menu.options)}."
             )
-        delta = idx - menu.selected
-        key = "down" if delta > 0 else "up"
-        for _ in range(abs(delta)):
-            self.driver.send_key(key)
-            await asyncio.sleep(0.05)
-        self.driver.send_key("enter")
-        await asyncio.sleep(self.SETTLE_S)
+        await self._choose_menu_index(menu, idx)
         after = self.menu()
         if self._is_model_menu(menu) and self._is_matching_model_confirmation(
             after, menu.options[idx]
@@ -623,9 +961,32 @@ class ToolRouter:
             )
         return self._result(f"Chose {menu.options[idx]}.")
 
+    async def _choose_menu_index(self, menu: screenmod.Menu, idx: int) -> None:
+        delta = idx - menu.selected
+        key = "down" if delta > 0 else "up"
+        for _ in range(abs(delta)):
+            self.driver.send_key(key)
+            await asyncio.sleep(0.05)
+        self.driver.send_key("enter")
+        await asyncio.sleep(self.SETTLE_S)
+
     @staticmethod
     def _is_model_menu(menu: screenmod.Menu | None) -> bool:
-        return bool(menu and "model" in (menu.title or "").lower())
+        if not menu:
+            return False
+        if "model" in (menu.title or "").lower():
+            return True
+        known = {ToolRouter._model_name(option) for option in menu.options}
+        return len(known & {"default", "opus", "fable", "sonnet", "haiku"}) >= 2
+
+    @staticmethod
+    def _model_name(option: str) -> str:
+        lowered = option.lower()
+        return next(
+            (name for name in ("default", "opus", "fable", "sonnet", "haiku")
+             if name in lowered),
+            lowered.replace("✔", "").strip(),
+        )
 
     @staticmethod
     def _is_matching_model_confirmation(

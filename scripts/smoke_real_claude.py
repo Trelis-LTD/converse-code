@@ -64,8 +64,15 @@ async def main() -> None:
         verify_submissions=True,
     )
     router.POLL_S = 1.0
+    submitted_prompt_ids = []
+    stopped_prompt_ids = []
+
     async def on_hook(event, payload):
         print(f"HOOK {event}: keys={sorted(payload)} transcript_path={payload.get('transcript_path')}")
+        if event == "user_prompt_submit" and payload.get("prompt_id"):
+            submitted_prompt_ids.append(payload["prompt_id"])
+        if event == "stop" and payload.get("prompt_id"):
+            stopped_prompt_ids.append(payload["prompt_id"])
         await router.on_hook(event, payload)
 
     server.on_hook = on_hook
@@ -99,43 +106,91 @@ async def main() -> None:
         })
         menu_result = sender.results[-1]
         menu = router.menu()
-        menu_ok = menu is not None and bool(menu.options)
+        observed_model = (menu_result["data"].get("model") or {}).get("name")
+        menu_ok = (
+            menu is None
+            and menu_result["data"]["last_action"] == {
+                "action": "command", "status": "verified",
+                "effect": "model_observed", "completed": True,
+            }
+            and bool(observed_model)
+        )
         print("model menu:", menu_result["speak"])
         if menu_ok:
-            before = menu.options[menu.selected]
-            # A regression once made selection look successful while Claude was
-            # still one interaction behind. Choose a genuinely different model,
-            # then reopen /model and verify Claude itself reports that choice.
-            selected = next(option for option in reversed(menu.options) if option != before)
+            # set_model owns selection, confirmation, and postcondition
+            # verification. Choose a genuinely different model so this checks
+            # the complete transition rather than the already-selected path.
+            selected = "Haiku" if observed_model != "haiku" else "Sonnet"
             await router.handle_tool_call({
-                "id": "model-select",
-                "name": "select_option",
-                "args": {"option": selected},
+                "id": "model-set", "name": "set_model", "args": {"model": selected},
             })
+            changed = sender.results[-1]
             await router.handle_tool_call({
-                "id": "model-confirm", "name": "command", "args": {"command": "/model"},
+                "id": "model-observe", "name": "observe_claude", "args": {},
             })
-            confirmed = router.menu()
-            def model_name(option: str) -> str:
-                lowered = option.lower()
-                return next(
-                    (name for name in ("default", "opus", "fable", "sonnet", "haiku")
-                     if name in lowered),
-                    lowered.replace("✔", "").strip(),
-                )
             menu_ok = (
-                confirmed is not None
-                and bool(confirmed.options)
-                and model_name(confirmed.options[confirmed.selected]) == model_name(selected)
+                changed["data"]["last_action"]["status"] == "verified"
+                and changed["data"]["last_action"]["completed"] is True
+                and sender.results[-1]["data"]["last_action"] == changed["data"]["last_action"]
             )
-            if confirmed is not None:
-                host.send_key("escape")
+            print("model transition:", changed["speak"])
             if not menu_ok:
                 print("--- screen after menu selection ---")
                 print("\n".join(line for line in host.snapshot() if line.strip()))
         print("menu navigation:", "PASS" if menu_ok else "FAIL")
-        print("REAL-CLAUDE SMOKE:", "PASS" if ok and menu_ok else "FAIL")
-        if not (ok and menu_ok):
+
+        # Exercise real interruption rather than only synthesizing hook order in
+        # a unit test. Cancel as soon as Claude acknowledges the prompt, wait for
+        # its matching Stop, then prove a following prompt completes cleanly.
+        old_request = (
+            "Run the command sleep 15, then reply with exactly old-finished. "
+            "Do not do anything else."
+        )
+        canceled = asyncio.create_task(router.handle_tool_call({
+            "id": "cancel-real", "name": "long_task", "args": {"request": old_request},
+        }))
+        deadline = asyncio.get_running_loop().time() + 10
+        while not router._episode_prompt_ids and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.05)
+        cancel_ids = set(router._episode_prompt_ids)
+        if not cancel_ids:
+            raise RuntimeError("real cancellation prompt was never acknowledged")
+        await router.handle_tool_cancel({"type": "tool_cancel", "id": "cancel-real"})
+        await canceled
+        cancel_requested = router.state() == "canceling"
+        deadline = asyncio.get_running_loop().time() + 15
+        while router.state() == "canceling" and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.1)
+        cancel_state = router.semantic_state()["last_action"] or {}
+        settled_by_hook = cancel_ids.issubset(set(stopped_prompt_ids))
+        settled_by_ui = cancel_state.get("effect") == "idle_ui_observed"
+        cancel_ok = (
+            cancel_requested and router.state() == "idle"
+            and cancel_state.get("status") == "verified"
+            and (settled_by_hook or settled_by_ui)
+        )
+        settlement = "Stop hook" if settled_by_hook else "idle UI"
+        print(
+            "real cancellation:", "PASS" if cancel_ok else "FAIL",
+            f"(settled by {settlement})",
+        )
+
+        await router.handle_tool_call({
+            "id": "after-cancel", "name": "long_task",
+            "args": {"request": "Reply with exactly new-ok and do nothing else."},
+        })
+        followup = sender.results[-1]
+        followup_ok = (
+            "new-ok" in followup["speak"].lower()
+            and "old-finished" not in followup["speak"].lower()
+            and followup["data"]["phase"] == "idle"
+            and followup["data"]["last_action"]["status"] == "verified"
+        )
+        print("post-cancel episode:", "PASS" if followup_ok else "FAIL")
+
+        passed = ok and menu_ok and cancel_ok and followup_ok
+        print("REAL-CLAUDE SMOKE:", "PASS" if passed else "FAIL")
+        if not passed:
             raise RuntimeError("real Claude smoke assertions failed")
     finally:
         host.inject("/exit")

@@ -37,6 +37,17 @@ VOICE_RED_FLAGS = ("*", "#", "`", "http", "](")
 SCENARIOS = [
     {"id": "greeting", "say": "Hello! Just checking you can hear me okay.",
      "expect_tools": [], "timeout": 45},
+    {"id": "observe-model",
+     "say": "Inspect Claude Code's actual UI state and tell me which model is selected. Do not guess.",
+     "expect_tools_any": ["observe_claude", "command"],
+     "expect_spoken_any": ["default", "opus", "fable", "sonnet", "haiku"], "timeout": 60},
+    {"id": "change-model",
+     "say": "Change Claude Code's model to Sonnet and verify that it actually changed.",
+     "expect_tools": ["set_model"], "timeout": 90},
+    {"id": "challenge-model",
+     "say": "I don't believe the model changed. Inspect the actual Claude Code state again.",
+     "expect_tools_any": ["observe_claude", "command"],
+     "expect_spoken_any": ["sonnet"], "timeout": 60},
     {"id": "build-file", "say": "Could you create a Python file called hello.py that prints hello world?",
      "expect_tools": ["long_task"], "file": "hello.py", "timeout": 240},
     {"id": "run-it", "say": "Great, can you run it and tell me what it prints?",
@@ -123,6 +134,7 @@ async def run_turn(client, rec: Recorder, pending: set, sc: dict) -> tuple[int, 
 
 
 async def main() -> int:
+    sys.stdout.reconfigure(line_buffering=True)
     api_key = config.get_api_key()
     if not api_key:
         print("No Converse API key configured. Run: converse-code login", file=sys.stderr)
@@ -163,6 +175,10 @@ async def main() -> int:
         pending.add(task)
         task.add_done_callback(pending.discard)
 
+    async def on_tool_cancel(call: dict) -> None:
+        rec.note("tool_cancel", {"id": call.get("id")})
+        await router.handle_tool_cancel(call)
+
     async def on_json(msg: dict) -> None:
         rec.note(msg.get("type") or "unknown", {k: v for k, v in msg.items() if k != "type"})
 
@@ -170,7 +186,7 @@ async def main() -> int:
         rec.audio_bytes += len(frame)
 
     client.on_tool_call = on_tool_call
-    client.on_tool_cancel = router.handle_tool_cancel
+    client.on_tool_cancel = on_tool_cancel
     client.on_json = on_json
     client.on_audio = on_audio
 
@@ -193,19 +209,27 @@ async def main() -> int:
             start, finished = await run_turn(client, rec, pending, sc)
             called = rec.tool_calls(start)
             spoken = rec.spoken_text(start)
-            checks = {
-                "turn_finished": finished,
-                "tool_calls": called == sc["expect_tools"] or
-                              (bool(sc["expect_tools"]) and
-                               [c for c in called if c in sc["expect_tools"]] == sc["expect_tools"]),
-            }
+            expected = sc.get("expect_tools", [])
+            expected_any = sc.get("expect_tools_any", [])
+            if expected_any:
+                tool_calls_ok = any(name in expected_any for name in called)
+            else:
+                tool_calls_ok = called == expected or (
+                    bool(expected) and [c for c in called if c in expected] == expected
+                )
+            checks = {"turn_finished": finished, "tool_calls": tool_calls_ok}
             if sc.get("file"):
                 checks["file_exists"] = (project_dir / sc["file"]).exists()
+            if sc.get("expect_spoken_any"):
+                checks["spoken_state"] = any(
+                    token in spoken.lower() for token in sc["expect_spoken_any"]
+                )
             flags = [f for f in VOICE_RED_FLAGS if f in spoken]
             checks["voice_clean"] = not flags
             ok = all(checks.values())
             results.append((sc["id"], ok, checks, called, spoken, flags))
-            print(f"tools called: {called or 'none'}   expected: {sc['expect_tools'] or 'none'}")
+            expected_display = expected or expected_any or "none"
+            print(f"tools called: {called or 'none'}   expected: {expected_display}")
             print(f"assistant said: {spoken.strip() or '(no text captured)'}")
             print(f"checks: {checks}  -> {'PASS' if ok else 'FAIL'}")
             if client.closed.is_set():

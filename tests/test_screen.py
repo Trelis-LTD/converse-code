@@ -1,4 +1,4 @@
-from converse_code.screen import detect_menu, match_option
+from converse_code.screen import detect_menu, detect_model, is_idle, match_option
 
 PERMISSION_PROMPT = [
     "  Claude wants to run: pytest tests/",
@@ -54,6 +54,11 @@ REAL_IDLE_WITH_PROMPT_HISTORY = [
     "  ⏵⏵ auto mode on (shift+tab to cycle)",
 ]
 
+WELCOME_WITH_MODEL = [
+    "│  Sonnet 5 with medium effort · Claude Max · Ronan  │",
+    "│                 ~/TR/converse-code                  │",
+]
+
 # Numbered list in Claude's prose + the prompt cursor: not a menu either.
 PROSE_WITH_NUMBERS = [
     " Here's the plan:",
@@ -100,10 +105,20 @@ def test_idle_screen_is_not_a_menu():
 
 def test_real_claude_idle_prompt_is_not_a_menu():
     assert detect_menu(REAL_IDLE_SCREEN) is None
+    assert is_idle(REAL_IDLE_SCREEN) is True
+
+
+def test_non_idle_screen_has_no_empty_composer_between_rules():
+    assert is_idle(["✻ Working…", "esc to interrupt"]) is False
 
 
 def test_historical_prompt_cursors_are_not_menus():
     assert detect_menu(REAL_IDLE_WITH_PROMPT_HISTORY) is None
+
+
+def test_current_model_detected_from_visible_claude_state():
+    assert detect_model(WELCOME_WITH_MODEL) == "sonnet"
+    assert detect_model(REAL_IDLE_WITH_PROMPT_HISTORY) == "fable"
 
 
 def test_numbered_prose_is_not_a_menu():

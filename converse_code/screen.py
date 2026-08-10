@@ -20,6 +20,14 @@ CURSOR = "❯"
 # "❯ 1. Yes" / "  2. No, and tell Claude what to do differently (esc)"
 NUMBERED_RE = re.compile(r"^\s*(?P<cursor>❯)?\s*(?P<num>\d+)\.\s+(?P<label>\S.*?)\s*$")
 RULE_RE = re.compile(r"^\s*[─━═╭╰╮╯]+\s*$")
+SET_MODEL_RE = re.compile(
+    r"\bSet model to (?P<model>Default|Opus|Fable|Sonnet|Haiku)\b", re.IGNORECASE,
+)
+STATUS_MODEL_RE = re.compile(
+    r"\b(?P<model>Default|Opus|Fable|Sonnet|Haiku)(?:\s+\d+(?:\.\d+)?)?\s+with\s+"
+    r"(?:low|medium|high|max)\s+effort\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -80,6 +88,25 @@ def detect_menu(lines: list[str]) -> Menu | None:
         options = [l.replace(CURSOR, " ").strip() for l in block]
         return Menu(title=_title_above(cleaned, start), options=options, selected=i - start)
     return None
+
+
+def detect_model(lines: list[str]) -> str | None:
+    """Read Claude's visible model status without treating arbitrary prose as state."""
+    for line in reversed(lines):
+        cleaned = _clean(line)
+        match = SET_MODEL_RE.search(cleaned) or STATUS_MODEL_RE.search(cleaned)
+        if match:
+            return match.group("model").lower()
+    return None
+
+
+def is_idle(lines: list[str]) -> bool:
+    """Whether Claude's empty composer is visibly ready for a new prompt."""
+    cleaned = [_clean(line) for line in lines]
+    return any(
+        line.strip() == CURSOR and _neighbor_is_rule(cleaned, i)
+        for i, line in enumerate(cleaned)
+    )
 
 
 def _neighbor_is_rule(lines: list[str], idx: int) -> bool:
