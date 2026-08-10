@@ -111,7 +111,7 @@
     text-transform:uppercase; letter-spacing:.06em;
   }
   #muteBtn:hover:not(:disabled){color:var(--text); border-color:var(--muted);}
-  #muteBtn:disabled{opacity:.35; cursor:default;}
+  #muteBtn:disabled{opacity:.62; cursor:default;}
   #muteBtn.muted{color:var(--amber); border-color:var(--amber);}
   #muteBtn:focus-visible{outline:2px solid var(--text); outline-offset:3px;}
   .mic-copy{flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:.22rem;}
@@ -158,7 +158,7 @@
   </button>
   <div class="mic-copy"><span id="micLabel">Start voice</span><span id="micHint">Speak naturally — coding requests are handed to Claude Code</span></div>
   <span class="levels" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
-  <button id="muteBtn" type="button" aria-label="Mute microphone" aria-pressed="false" disabled>Mute</button>
+  <button id="muteBtn" type="button" aria-label="Mute microphone" aria-pressed="false" disabled>Mute mic</button>
   <span class="kbd">Classic voice</span>
 </footer>
 <script src="/assistant-transcript.js"></script>
@@ -533,7 +533,7 @@
     muteBtn.disabled = true;
     muteBtn.classList.remove("muted");
     muteBtn.setAttribute("aria-pressed", "false");
-    muteBtn.textContent = "Mute";
+    muteBtn.textContent = "Mute mic";
   }
 
   async function startSession(){
@@ -622,7 +622,7 @@
     client.setMicEnabled(!micMuted);
     muteBtn.classList.toggle("muted", micMuted);
     muteBtn.setAttribute("aria-pressed", String(micMuted));
-    muteBtn.textContent = micMuted ? "Unmute" : "Mute";
+    muteBtn.textContent = micMuted ? "Unmute mic" : "Mute mic";
     micLabel.textContent = micMuted ? "Muted" : "Listening";
     micDock.classList.toggle("live", !micMuted);
   }

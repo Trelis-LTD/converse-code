@@ -123,3 +123,21 @@ def test_write_retries_partial_nonblocking_pty_writes(monkeypatch):
     host._write(b"abcdef")
 
     assert calls == [(123, b"abcdef"), (123, b"cdef"), (123, b"ef")]
+
+
+def test_child_output_retries_partial_terminal_writes(monkeypatch):
+    """A large initial Claude paint must reach the terminal in full."""
+    host = ClaudeHost(["unused"], attach_terminal=True)
+    host._master_fd = 123
+    writes = []
+
+    monkeypatch.setattr(os, "read", lambda _fd, _size: b"abcdef")
+
+    def partial_write(fd, data):
+        writes.append((fd, bytes(data)))
+        return min(2, len(data))
+
+    monkeypatch.setattr(os, "write", partial_write)
+    host._on_child_output()
+
+    assert [data for _fd, data in writes] == [b"abcdef", b"cdef", b"ef"]

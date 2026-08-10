@@ -1,6 +1,6 @@
 [project]
 name = "converse-code"
-version = "0.2.0"
+version = "0.3.0"
 description = "Talk to Claude Code by voice via Converse"
 readme = "PYPI.md"
 license = "Apache-2.0"

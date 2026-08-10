@@ -49,6 +49,8 @@ def test_stop_is_a_clean_session_end_and_mute_is_independent():
     page = PAGE.read_text()
 
     assert 'id="muteBtn"' in page
+    assert ">Mute mic</button>" in page
+    assert "#muteBtn:disabled{opacity:.62" in page
     assert "setMicEnabled" in page
     assert "stopSession" in page
     assert "sessionGeneration" in page

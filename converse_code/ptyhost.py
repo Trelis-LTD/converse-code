@@ -73,6 +73,8 @@ class ClaudeHost:
         self._injecting = False
         self._pending_write = bytearray()
         self._writer_registered = False
+        self._pending_output = bytearray()
+        self._output_writer_registered = False
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -133,7 +135,39 @@ class ClaudeHost:
             return
         self._stream.feed(data)
         if self.attach_terminal:
-            os.write(sys.stdout.fileno(), data)
+            self._pending_output.extend(data)
+            self._flush_terminal_output()
+
+    def _flush_terminal_output(self) -> None:
+        """Forward a complete Claude paint even when stdout accepts only part.
+
+        Large initial TUI frames can be split by a terminal write. Dropping the
+        unwritten suffix also drops ANSI cursor/layout commands, leaving a
+        randomly malformed screen until Claude happens to repaint it.
+        """
+        fd = sys.stdout.fileno()
+        while self._pending_output:
+            try:
+                written = os.write(fd, self._pending_output)
+            except InterruptedError:
+                continue
+            except BlockingIOError:
+                if not self._output_writer_registered:
+                    asyncio.get_running_loop().add_writer(fd, self._flush_terminal_output)
+                    self._output_writer_registered = True
+                return
+            except OSError:
+                self._pending_output.clear()
+                break
+            if written <= 0:
+                if not self._output_writer_registered:
+                    asyncio.get_running_loop().add_writer(fd, self._flush_terminal_output)
+                    self._output_writer_registered = True
+                return
+            del self._pending_output[:written]
+        if self._output_writer_registered:
+            asyncio.get_running_loop().remove_writer(fd)
+            self._output_writer_registered = False
 
     def _on_terminal_input(self) -> None:
         try:
@@ -152,6 +186,9 @@ class ClaudeHost:
         if self._writer_registered:
             loop.remove_writer(self._master_fd)
             self._writer_registered = False
+        if self._output_writer_registered:
+            loop.remove_writer(sys.stdout.fileno())
+            self._output_writer_registered = False
         if self.attach_terminal:
             loop.remove_reader(sys.stdin.fileno())
         if self._pid:
@@ -167,6 +204,7 @@ class ClaudeHost:
                 pass
             self._master_fd = None
         self._pending_write.clear()
+        self._pending_output.clear()
         self.restore_terminal()
         self.exited.set()
 
