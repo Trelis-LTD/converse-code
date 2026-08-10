@@ -13,24 +13,28 @@ from pathlib import Path
 from . import screen as screenmod
 from . import transcript as tmod
 from .ptyhost import KEYMAP, sanitize
+from .tracelog import trace
 
 log = logging.getLogger(__name__)
 
-# The broker's per-tool ceiling rose from 120s to 600s; 600 is accepted by prod
-# today and 601+ is rejected with invalid_tools. Hold the call slightly inside it.
+# long_task is a deferred tool: `timeout` is only the acknowledgement deadline
+# (we defer within seconds of a confirmed injection); once deferred, the job
+# lives under deferred_timeout and the terminal result follows whenever Claude
+# finishes.
 TOOL_TIMEOUT_S = 600
-HOLD_MARGIN_S = 30
+DEFERRED_TIMEOUT_S = 7200
 
 LONG_TASK_DESCRIPTION = (
-    "Send a coding instruction to Claude Code, an AI coding agent working in the user's "
-    "project, and wait for it to finish (or report back if it is still working). Use only "
-    "when the user explicitly asks to write, edit, investigate, run, or explain code; never "
-    "infer an action from a general question or suggestion. Pass the user's "
-    "instruction in 'request', preserving their technical wording exactly — file names, "
-    "function names, flags, error text — compress filler, never editorialize. If Claude "
-    "Code is already working, the instruction is queued behind the current task. Not for "
-    "questions about progress (the latest status arrives with each result) and not for "
-    "stopping work (Converse manages cancellation of the pending job)."
+    "Send an instruction to Claude Code, an AI coding agent working in the user's project. "
+    "Claude Code can do anything a developer at this terminal could: read, write, and run "
+    "code, use git, open files or apps, and answer questions about the project. Call this "
+    "whenever the user asks for something to be done or answered from the project, passing "
+    "their instruction in 'request' with their technical wording preserved exactly — file "
+    "names, function names, flags, error text — compress filler, never editorialize. Work "
+    "runs in the background: meaningful milestones and completion are announced "
+    "automatically. If Claude Code is already working, the instruction is queued behind the "
+    "current task. Not for questions about progress (status arrives automatically) and not "
+    "for stopping work (Converse manages cancellation of the pending job)."
 )
 
 COMMAND_DESCRIPTION = (
@@ -76,6 +80,8 @@ def manifest() -> list[dict]:
         tool("long_task", LONG_TASK_DESCRIPTION,
              {"request": {"type": "string", "description": "The coding instruction."}},
              ["request"], timeout=TOOL_TIMEOUT_S,
+             deferred=True, deferred_timeout=DEFERRED_TIMEOUT_S,
+             notify_on_complete=True,
              status_label="Claude Code task"),
         tool("command", COMMAND_DESCRIPTION,
              {"command": {"type": "string", "description": "Slash command, starting with '/'."}},
@@ -91,10 +97,12 @@ def manifest() -> list[dict]:
 
 
 class ToolRouter:
-    HOLD_S = TOOL_TIMEOUT_S - HOLD_MARGIN_S   # resolve before the broker times the call out
-    POLL_S = 2.0            # transcript/menu poll cadence while holding
+    HOLD_S = DEFERRED_TIMEOUT_S - 120   # resolve before the broker expires the deferred job
+    POLL_S = 2.0            # transcript/menu poll cadence while monitoring
     SETTLE_S = 1.2          # wait after command/select before reading the screen
     MAX_PROGRESS = 10       # protocol cap is 12/call; keep headroom
+    MAX_PARTIALS = 6        # protocol cap is 8/call; keep headroom
+    MENU_RESERVE = 2        # partial budget only blocking menus may spend
     SUBMIT_ACK_S = 2.0      # UserPromptSubmit should arrive almost immediately
     SUBMIT_ATTEMPTS = 3     # initial submit plus two bounded Enter retries
 
@@ -117,6 +125,7 @@ class ToolRouter:
         self._active_call_id: str | None = None
         self._server_canceled: set[str] = set()
         self._suppress_next_stop_notification = False
+        self._voice_owed = False  # a resolved voice call still owes its outcome out loud
         self._verify_submissions = verify_submissions
         self._submit_lock = asyncio.Lock()
         self._prompt_submitted = asyncio.Event()
@@ -163,15 +172,20 @@ class ToolRouter:
         hook_text = msg.strip() if isinstance(msg, str) and msg.strip() else ""
         if hook_text:
             self.last_assistant_text = hook_text
+        voice_owed = self._voice_owed
+        self._voice_owed = False
         if self.queue:
             self.queue.pop(0)  # next queued instruction starts automatically
             self.working = True
+            # The next episode runs a queued voice instruction whose tool call
+            # already resolved — its completion is owed out loud.
+            self._voice_owed = True
         else:
             self.working = False
         self._turn_done.set()
         await self._push_status()
         if not voice_call_was_waiting and not suppress_notification:
-            await self._wake_voice_for_terminal_turn(hook_text)
+            await self._wake_voice_for_terminal_turn(hook_text, announce=voice_owed)
 
     async def _on_stop_failure(self, payload: dict) -> None:
         waiting = self._active_call_id is not None
@@ -179,9 +193,11 @@ class ToolRouter:
         self._turn_failure = str(detail)
         self.working = False
         self.queue.clear()
+        self._voice_owed = False  # the error itself is the announcement
         self._turn_done.set()
         await self._push_status()
         if not waiting:
+            trace("inject_context", reason="stop_failure", detail=self._turn_failure)
             await self.sender.send_context(
                 f"Claude Code stopped because of an error: {self._turn_failure}. "
                 "Tell the user briefly and suggest trying again after fixing the error.",
@@ -189,24 +205,37 @@ class ToolRouter:
                 reply=True,
             )
 
-    async def _wake_voice_for_terminal_turn(self, hook_text: str = "") -> None:
-        """Narrate a turn that did not originate from an open voice tool call.
+    async def _wake_voice_for_terminal_turn(self, hook_text: str = "",
+                                            announce: bool = False) -> None:
+        """Keep voice current on an episode no open tool call is watching.
 
-        `inject_context` is the Converse host-push path: context is added without
-        pretending the user said it, and reply=True asks the voice brain to wake
-        and briefly report the completion.
+        announce=True is for voice-initiated work whose call already resolved
+        (queued instruction, or the tracking window closed): the user asked out
+        loud and never heard the outcome, so completion is a milestone. A turn
+        the user typed at the terminal was read there — telemetry: inject
+        silently so the brain is current the moment they ask, without narrating
+        over their shoulder.
         """
         text = hook_text
         if not text:
             entries, self._offset = self._read_from(self._offset)
             text = tmod.summarize_entries(entries).text
         summary = tmod.speak_summary(text) if text else "Claude Code finished the terminal task."
-        await self.sender.send_context(
-            "Claude Code finished work entered directly in the terminal. "
-            f"Briefly tell the user it finished and summarize this update: {summary}",
-            role="context",
-            reply=True,
-        )
+        trace("inject_context", reason="episode_done", summary=summary, announce=announce)
+        if announce:
+            await self.sender.send_context(
+                "Claude Code finished the voice-requested task. Briefly tell the "
+                f"user it finished and summarize this update: {summary}",
+                role="context",
+                reply=True,
+            )
+        else:
+            await self.sender.send_context(
+                "Claude Code finished work entered directly in the terminal. "
+                f"Do not announce this unless asked; the update was: {summary}",
+                role="context",
+                reply=False,
+            )
 
     async def _announce_permission_request(self, payload: dict) -> None:
         await asyncio.sleep(min(self.SETTLE_S, 0.5))
@@ -222,6 +251,7 @@ class ToolRouter:
         tool_name = payload.get("tool_name")
         detail = f" for {tool_name}" if isinstance(tool_name, str) and tool_name else ""
         options = f" Options: {', '.join(menu.options)}." if menu.options else ""
+        trace("inject_context", reason="permission_request", tool=tool_name, options=menu.options)
         await self.sender.send_context(
             f"Claude Code is waiting for permission{detail}.{options} "
             "Tell the user briefly and ask which option they want; do not choose for them.",
@@ -233,6 +263,7 @@ class ToolRouter:
 
     async def handle_tool_call(self, call: dict) -> None:
         name, call_id, args = call.get("name"), call.get("id"), call.get("args") or {}
+        trace("tool_call", id=call_id, name=name, args=args)
         handlers = {
             "long_task": self._long_task,
             "command": self._command,
@@ -257,13 +288,16 @@ class ToolRouter:
         if call_id in self._server_canceled:
             self._server_canceled.discard(call_id)
             self._interrupted = False
+            trace("tool_result_dropped_after_cancel", id=call_id, name=name)
         else:
+            trace("tool_result", id=call_id, name=name, content=content)
             await self.sender.send_tool_result(call_id, content)
         await self._push_status()
 
     async def handle_tool_cancel(self, call: dict) -> None:
         """Honor Converse's managed cancellation for the matching pending job."""
         call_id = call.get("id")
+        trace("tool_cancel", id=call_id, active=self._active_call_id)
         if not call_id or call_id != self._active_call_id:
             return
         self._server_canceled.add(call_id)
@@ -272,6 +306,7 @@ class ToolRouter:
         self.driver.send_key("escape")
         self.working = False
         self.queue.clear()
+        self._voice_owed = False  # canceled work owes no completion
         self._turn_done.set()
         await self._push_status()
 
@@ -304,9 +339,25 @@ class ToolRouter:
     # -- tools -------------------------------------------------------------------
 
     async def _long_task(self, call_id: str, args: dict) -> dict:
-        request = (args.get("request") or "").strip()
+        # Guard the exact text that will be typed: sanitize() strips control
+        # characters, so testing the raw string would let "\x01!ls" reach the
+        # PTY as "!ls".
+        request = sanitize((args.get("request") or "").strip())
         if not request:
             return self._result("No instruction was given.")
+        # Voice input reaches the machine only as natural-language instructions
+        # to Claude Code. A leading '!' is the TUI's raw-shell mode: it would
+        # bypass Claude Code's permission system entirely (and never fires the
+        # UserPromptSubmit hook, so submission could not be confirmed anyway).
+        if request.startswith("!"):
+            return self._result(
+                "Raw shell commands are not allowed over voice. Phrase it as a plain "
+                "instruction instead — Claude Code will run the command itself."
+            )
+        if request.startswith("/"):
+            return self._result(
+                "That looks like a slash command — use the command tool for it."
+            )
         menu = self.menu()
         if menu:
             return self._result(
@@ -345,6 +396,12 @@ class ToolRouter:
                 "Queued behind the current task; it will run next. The current task is still going."
             )
 
+        # Detach from the voice turn: the brain closes its reply naturally now,
+        # and notify_on_complete announces the terminal result when it lands.
+        trace("tool_deferred", id=call_id)
+        await self.sender.send_tool_deferred(
+            call_id, f"{self.handle}-{call_id}", status_label="Claude Code task"
+        )
         return await self._await_turn(call_id, start_offset, start_path)
 
     async def _inject_and_confirm(self, text: str) -> bool:
@@ -376,10 +433,19 @@ class ToolRouter:
                 self._expected_prompt = None
 
     async def _await_turn(self, call_id: str, start_offset: int, start_path) -> dict:
-        """Hold the call open: progress from the transcript tail, resolve on the
-        Stop hook, a menu appearing, interruption, or the hold deadline."""
+        """Monitor the deferred turn until it resolves.
+
+        The call is already acknowledged with tool_deferred, so no voice turn is
+        held open. While the work runs, milestones go out as partial results —
+        spoken (reply=true) only for moments worth interrupting silence, per the
+        cadence rule "milestones speak, telemetry stays silent": blocked-on-a-
+        decision and test runs speak, file edits stay silent but current,
+        everything else is a plain progress note. The one terminal result lands
+        on the Stop hook, interruption, or failure."""
         deadline = asyncio.get_running_loop().time() + self.HOLD_S
-        sent_progress = 0
+        sent_progress = sent_partials = 0
+        tests_announced = False
+        announced_menu = None
         while True:
             try:
                 await asyncio.wait_for(self._turn_done.wait(), timeout=self.POLL_S)
@@ -395,24 +461,50 @@ class ToolRouter:
 
             menu = self.menu()
             if menu:
+                # A blocking menu is the one interjection that must never be
+                # starved: it draws on the full budget while edits/tests keep
+                # MENU_RESERVE partials free for it below.
+                key = (menu.title, tuple(menu.options))
+                if key != announced_menu and sent_partials < self.MAX_PARTIALS:
+                    announced_menu = key
+                    sent_partials += 1
+                    await self._send_partial(
+                        call_id,
+                        f"Claude Code needs input: {menu.title or 'a menu is open'} — "
+                        f"options: {', '.join(menu.options)}. Ask the user, then use select_option.",
+                        reply=True,
+                    )
+            else:
+                announced_menu = None
+
+            for m in self._new_milestones():
+                if m["kind"] == "note":
+                    if sent_progress < self.MAX_PROGRESS:
+                        trace("tool_progress", id=call_id, note=m["note"])
+                        await self.sender.send_tool_progress(call_id, m["note"])
+                        sent_progress += 1
+                elif m["kind"] == "tests":
+                    if not tests_announced and sent_partials < self.MAX_PARTIALS - self.MENU_RESERVE:
+                        tests_announced = True
+                        sent_partials += 1
+                        await self._send_partial(call_id, m["speak"], reply=True)
+                elif sent_partials < self.MAX_PARTIALS - self.MENU_RESERVE:
+                    sent_partials += 1
+                    await self._send_partial(call_id, m["speak"], files=m.get("files"))
+
+            if asyncio.get_running_loop().time() >= deadline:
+                self._voice_owed = True  # completion still gets announced
                 return self._result(
-                    f"Claude Code needs input: {menu.title or 'a menu is open'} — "
-                    f"options: {', '.join(menu.options)}. Ask the user, then use select_option."
+                    "Claude Code is still working as the tracking window closed — "
+                    "completion will be announced when it lands."
                 )
 
-            if sent_progress < self.MAX_PROGRESS:
-                for note in self._new_progress_notes():
-                    await self.sender.send_tool_progress(call_id, note)
-                    sent_progress += 1
-                    if sent_progress >= self.MAX_PROGRESS:
-                        break
-
-            now = asyncio.get_running_loop().time()
-            if now >= deadline:
-                return self._result(
-                    "Still working on it — this is taking a while. Completion will be "
-                    "announced automatically; no follow-up call is needed just to wait."
-                )
+    async def _send_partial(self, call_id: str, speak: str, reply: bool = False,
+                            files: list | None = None) -> None:
+        content = {"speak": speak, "data": {"files": files} if files else {},
+                   "handle": self.handle}
+        trace("tool_partial_result", id=call_id, speak=speak, reply=reply)
+        await self.sender.send_tool_partial_result(call_id, content, reply=reply)
 
     def _turn_result(self, start_offset: int, start_path) -> dict:
         # The Stop hook may have pointed us at a different session file than the
@@ -422,7 +514,11 @@ class ToolRouter:
             start_offset = 0
         entries, self._offset = self._read_from(start_offset)
         summary = tmod.summarize_entries(entries)
-        text = summary.text or self.last_assistant_text  # transcript can lag the hook
+        # The hook's last_assistant_message is authoritative for the turn that
+        # just stopped. The transcript is only a fallback: it can lag the hook,
+        # and a lagged entry flushed during idle would otherwise be read as the
+        # *next* turn's newest text, repeating the previous turn's summary.
+        text = self.last_assistant_text or summary.text
         speak = tmod.speak_summary(text) if text else "Done."
         extra = {}
         if summary.files:
@@ -524,11 +620,11 @@ class ToolRouter:
             return [], offset
         return tmod.read_new(self.transcript_path, offset)
 
-    def _new_progress_notes(self) -> list[str]:
+    def _new_milestones(self) -> list[dict]:
         entries, self._offset = self._read_from(self._offset)
-        notes = []
+        out: list[dict] = []
         for entry in entries:
-            note = tmod.progress_note(entry)
-            if note and note not in notes:
-                notes.append(note)
-        return notes[:3]
+            m = tmod.milestone(entry)
+            if m and m not in out:
+                out.append(m)
+        return out

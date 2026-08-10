@@ -79,6 +79,9 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security b
 
 - Nothing about voice reaches Claude Code directly; nothing about Claude Code's raw
   output reaches the user directly. `converse-code` translates in both directions.
+- Voice input reaches the machine only as natural-language instructions to Claude Code —
+  never as raw shell commands. The TUI's `!` bash-mode prefix is refused on the voice path,
+  so Claude Code's permission system remains the single safety chokepoint.
 - Prompt text and Enter are sent as separate PTY writes. A native `UserPromptSubmit` HTTP hook
   confirms that Claude accepted the prompt; swallowed submissions get two bounded Enter retries
   instead of an open tool call that silently waits for minutes.

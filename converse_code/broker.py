@@ -133,6 +133,23 @@ class BrokerClient:
     async def send_tool_progress(self, call_id: str, note: str) -> None:
         await self._send({"type": "tool_progress", "id": call_id, "note": note[:500]})
 
+    async def send_tool_deferred(self, call_id: str, handle: str,
+                                 status_label: str | None = None) -> None:
+        """Detach a call from its voice turn; the terminal result still follows."""
+        frame = {"type": "tool_deferred", "id": call_id, "handle": handle}
+        if status_label:
+            frame["status_label"] = status_label
+        await self._send(frame)
+
+    async def send_tool_partial_result(self, call_id: str, content: dict,
+                                       reply: bool = False) -> None:
+        """Structured milestone before the terminal result; reply=True asks the
+        brain to announce it now (silently skipped if the floor is occupied)."""
+        frame = {"type": "tool_partial_result", "id": call_id, "content": content}
+        if reply:
+            frame["reply"] = True
+        await self._send(frame)
+
     async def send_tool_cancel(self, call_id: str) -> None:
         await self._send({"type": "tool_cancel", "id": call_id})
 

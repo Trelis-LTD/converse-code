@@ -7,6 +7,7 @@ turn starts (including dev-typed ones).
 """
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,10 +68,19 @@ def summarize_entries(entries: list[dict]) -> TurnSummary:
     return TurnSummary(text=text, files=files, tools_used=tools)
 
 
-def progress_note(entry: dict) -> str | None:
-    """A short speakable checkpoint for one transcript entry, or None."""
+def milestone(entry: dict) -> dict | None:
+    """Classify one transcript entry for narration.
+
+    Cadence rule: milestones speak, telemetry stays silent. A test run is worth
+    interrupting silence for; a file edit is a silent partial that keeps the
+    voice current for "how's it going?"; everything else is a progress note.
+    Parallel tool calls share one entry, so every block is scanned and the
+    highest-priority classification wins: tests > edits > telemetry.
+    """
     if entry.get("type") != "assistant":
         return None
+    edited: list[str] = []
+    note = None
     for block in _content_blocks(entry):
         if block.get("type") != "tool_use":
             continue
@@ -78,12 +88,28 @@ def progress_note(entry: dict) -> str | None:
         inp = block.get("input", {})
         if name in FILE_TOOLS:
             target = Path(inp.get("file_path", "")).name or "a file"
-            return f"editing {target}"
-        if name == "Bash":
-            desc = inp.get("description") or ""
-            return desc[:120].lower() if desc else "running a command"
-        if name in ("Read", "Grep", "Glob"):
-            return "reading the code"
+            if target not in edited:
+                edited.append(target)
+        elif name == "Bash":
+            desc = (inp.get("description") or "")[:120]
+            if re.search(r"\btests?\b", desc.lower()):
+                return {"kind": "tests", "speak": "Running the tests now."}
+            note = note or {"kind": "note", "note": desc.lower() if desc else "running a command"}
+        elif name in ("Read", "Grep", "Glob"):
+            note = note or {"kind": "note", "note": "reading the code"}
+    if edited:
+        speak = f"Edited {edited[0]}." if len(edited) == 1 else f"Edited {len(edited)} files."
+        return {"kind": "edit", "speak": speak, "files": edited}
+    if note:
+        return note
+    # Claude's own interstitial prose is the best account of what it is doing
+    # and why — feed it as silent telemetry so "how's it going?" answers from
+    # Claude's narration, not just activity labels. Never spoken unprompted.
+    for block in _content_blocks(entry):
+        if block.get("type") == "text":
+            text = " ".join(str(block.get("text") or "").split())
+            if len(text) >= 12:
+                return {"kind": "note", "note": speak_summary(text, 200)}
     return None
 
 

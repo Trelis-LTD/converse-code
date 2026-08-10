@@ -18,12 +18,19 @@ from converse_code.tools import ToolRouter
 class Collector:
     def __init__(self):
         self.results, self.progress, self.context = [], [], []
+        self.deferred, self.partials = [], []
 
     async def send_tool_result(self, cid, content):
         self.results.append(content)
 
     async def send_tool_progress(self, cid, note):
         self.progress.append(note)
+
+    async def send_tool_deferred(self, cid, handle, status_label=None):
+        self.deferred.append((cid, handle))
+
+    async def send_tool_partial_result(self, cid, content, reply=False):
+        self.partials.append((content, reply))
 
     async def send_context(self, text, role="context", reply=False):
         self.context.append((text, role, reply))

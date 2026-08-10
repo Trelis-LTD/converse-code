@@ -56,7 +56,16 @@ async def test_full_loop(tmp_path):
     transcript.write_text("")
 
     server.on_hook = router.on_hook
-    client.on_tool_call = lambda call: asyncio.ensure_future(router.handle_tool_call(call))
+    # Spawn without awaiting, as cli._spawn_tool does — an open deferred call
+    # must not block the receive loop from reading the next tool_call.
+    tool_tasks = set()
+
+    async def on_tool_call(call):
+        task = asyncio.create_task(router.handle_tool_call(call))
+        tool_tasks.add(task)
+        task.add_done_callback(tool_tasks.discard)
+
+    client.on_tool_call = on_tool_call
     await client.connect()
     run_task = asyncio.create_task(client.run())
     await asyncio.wait_for(got_start.wait(), 5)
@@ -91,17 +100,22 @@ async def test_full_loop(tmp_path):
         assert result["content"]["handle"] == "cc-e2e-1"
         assert result["content"]["data"]["state"] == "idle"
 
-        # 4. menu flow end to end: open menu in TUI, brain answers it
+        # long_task detached from its voice turn before resolving
+        assert any(m["type"] == "tool_deferred" and m["id"] == "t1" for m in received)
+
+        # 4. menu flow end to end: the menu announces via a spoken partial, the
+        # call stays open, the brain answers it, and the turn resolves normally
         await broker_ws.send(json.dumps(
             {"type": "tool_call", "id": "t2", "name": "long_task", "args": {"request": "menu"}}
         ))
         deadline = asyncio.get_running_loop().time() + 5
-        while not any(m["type"] == "tool_result" and m["id"] == "t2" for m in received):
-            assert asyncio.get_running_loop().time() < deadline
+        while not any(m["type"] == "tool_partial_result" and m["id"] == "t2" for m in received):
+            assert asyncio.get_running_loop().time() < deadline, received
             await asyncio.sleep(0.05)
-        menu_result = next(m for m in received if m["id"] == "t2")
-        assert menu_result["content"]["data"]["state"] == "menu"
-        assert "Yes" in menu_result["content"]["data"]["options"]
+        partial = next(m for m in received if m["type"] == "tool_partial_result" and m["id"] == "t2")
+        assert partial["reply"] is True
+        assert "needs input" in partial["content"]["speak"]
+        assert not any(m["type"] == "tool_result" and m["id"] == "t2" for m in received)
 
         await broker_ws.send(json.dumps(
             {"type": "tool_call", "id": "t3", "name": "select_option", "args": {"option": "yes"}}
@@ -111,6 +125,19 @@ async def test_full_loop(tmp_path):
             assert asyncio.get_running_loop().time() < deadline
             await asyncio.sleep(0.05)
         assert "Chose Yes" in next(m for m in received if m["id"] == "t3")["content"]["speak"]
+
+        # answering the menu lets the turn finish; the Stop hook resolves t2
+        async with aiohttp.ClientSession() as http:
+            await http.post(server.hook_url("stop"), json={
+                "transcript_path": str(transcript),
+                "last_assistant_message": "Menu answered.",
+            })
+        deadline = asyncio.get_running_loop().time() + 5
+        while not any(m["type"] == "tool_result" and m["id"] == "t2" for m in received):
+            assert asyncio.get_running_loop().time() < deadline, received
+            await asyncio.sleep(0.05)
+        t2_result = next(m for m in received if m["type"] == "tool_result" and m["id"] == "t2")
+        assert t2_result["content"]["speak"] == "Menu answered."
     finally:
         host.inject("exit")
         await asyncio.wait_for(host.exited.wait(), 5)
