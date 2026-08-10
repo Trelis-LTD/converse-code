@@ -96,8 +96,9 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security b
   adds requirements to work already in progress. A second task is never silently reinterpreted as
   guidance or claimed to be queued.
 - Voice responses receive an authoritative semantic snapshot of Claude's UI. `observe_claude`
-  reports idle/working/canceling/menu state and the last verified action; `set_model` selects,
-  confirms, and reopens the picker before it can report a successful model change.
+  reports idle/working/canceling/menu state and the last verified action; `set_model` selects and
+  confirms the model, verifies Claude's explicit result, and falls back to reopening the picker
+  when that result is unavailable.
 - Claude hook `prompt_id` values bind each voice episode to its actual completion. Cancellation
   remains `canceling` until the matching Stop arrives or the terminal is stably idle. Late
   completion from an older prompt cannot be attributed to newer work.

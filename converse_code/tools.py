@@ -54,14 +54,14 @@ OBSERVE_DESCRIPTION = (
 
 SET_MODEL_DESCRIPTION = (
     "Change Claude Code's model as one verified operation. Pass the requested model name. This "
-    "opens the picker, selects and confirms the model, then reopens the picker to verify the "
-    "actual selected model. Never use command('/model') to claim a model was changed."
+    "opens the picker, selects and confirms the model, and verifies Claude's resulting UI state. "
+    "Use this both to change a model and to ensure a requested model is already selected."
 )
 
 COMMAND_DESCRIPTION = (
     "Run a Claude Code slash command, e.g. /clear (reset context), /compact (compress "
-    "context), /model (safely inspect the selected model; use set_model to change models). Pass the "
-    "full command string starting with '/'. Any command the user names can be passed through. "
+    "context). Do not use this for /model; use set_model with the requested model instead. Pass "
+    "the full command string starting with '/'. Any other command the user names can be passed through. "
     "If a menu opens, its options come back in the result; opening a menu is never completion."
 )
 
@@ -719,6 +719,20 @@ class ToolRouter:
                 f"{after.title or 'options'}."
             )
 
+        # Claude prints an explicit result after the picker closes. This is a
+        # stronger and less disruptive postcondition than opening the picker a
+        # second time; retain the picker round-trip below as a compatibility
+        # fallback when that acknowledgement is absent or changes format.
+        confirmed = screenmod.detect_model(self.driver.snapshot())
+        if confirmed == target:
+            self._last_action = {
+                "action": "set_model", "status": "verified", "effect": "model_changed",
+                "completed": True, "from": before, "to": confirmed,
+            }
+            self._known_model = confirmed
+            self._known_model_source = "verified"
+            return self._result(f"Verified that Claude Code changed from {before} to {confirmed}.")
+
         self.driver.inject("/model")
         if self.on_status:
             await self.on_status({"type": "local", "event": "injected", "text": "/model"})
@@ -876,8 +890,13 @@ class ToolRouter:
             return self._result("Commands must start with a slash, like /clear.")
         if self.menu():
             return self._result("A menu is open — answer it first with select_option.")
-        # Built-in UI commands such as /model are handled entirely inside the
-        # TUI and intentionally fire neither UserPromptSubmit nor
+        if cmd == "/model":
+            return self._result(
+                "Use set_model with the requested model; it checks whether that model is already "
+                "selected and changes it only when needed."
+            )
+        # Built-in UI commands are handled entirely inside the TUI and
+        # intentionally fire neither UserPromptSubmit nor
         # UserPromptExpansion. The PTY's split text/Enter write is therefore the
         # reliable submission path; menu/screen state below confirms the effect.
         self.driver.inject(cmd)
@@ -885,27 +904,6 @@ class ToolRouter:
             await self.on_status({"type": "local", "event": "injected", "text": cmd})
         await asyncio.sleep(self.SETTLE_S)
         menu = self.menu()
-        if cmd == "/model" and self._is_model_menu(menu):
-            selected = menu.options[menu.selected] if menu.options else "unknown"
-            model = self._model_name(selected)
-            self.driver.send_key("escape")
-            await asyncio.sleep(self.SETTLE_S)
-            if self.menu():
-                self._last_action = {
-                    "action": "command", "status": "failed",
-                    "effect": "picker_close_unverified", "completed": False,
-                }
-                return self._result(
-                    f"The selected model appears to be {model}, but the model picker did not "
-                    "close cleanly. No model change was attempted."
-                )
-            self._known_model = model
-            self._known_model_source = "visible_ui"
-            self._last_action = {
-                "action": "command", "status": "verified",
-                "effect": "model_observed", "completed": True,
-            }
-            return self._result(f"Current model: {model.title()}; no model was changed.")
         if menu:
             self._last_action = {
                 "action": "command", "status": "awaiting_input",

@@ -60,8 +60,8 @@ Every tool result also includes a semantic snapshot: phase, active task, open UI
 known model, and the last action's verification status. `observe_claude` exposes that state without
 mutating the TUI. State-changing tools distinguish `pending`, `awaiting_input`, `unverified`,
 `failed`, and `verified`; opening `/model` is therefore never equivalent to changing a model.
-`set_model` owns the complete picker/confirmation flow and verifies its postcondition by reopening
-the picker.
+`set_model` owns the complete picker/confirmation flow and verifies its postcondition from Claude's
+explicit model result, falling back to reopening the picker when that result is unavailable.
 
 Prompt injection is acknowledged, not assumed. Text and Enter are separate PTY writes, concurrent
 injections are serialized, and `UserPromptSubmit` confirms that Claude accepted the exact prompt.

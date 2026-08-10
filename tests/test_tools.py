@@ -547,27 +547,16 @@ async def test_completion_after_tool_deadline_wakes_voice(router, fake_sender):
     assert fake_sender.context and fake_sender.context[0][2] is True
 
 
-async def test_command_reports_menu(router, fake_driver, fake_sender):
-    async def show_menu():
-        await asyncio.sleep(0.02)
-        fake_driver.lines = [" Select model:", " ❯ Sonnet", "   Opus", ""]
-        while "escape" not in fake_driver.keys:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [" > ", ""]
-
-    side = asyncio.create_task(show_menu())
+async def test_command_model_redirects_to_atomic_tool_without_touching_picker(
+    router, fake_driver, fake_sender,
+):
     await router.handle_tool_call({"id": "c1", "name": "command", "args": {"command": "/model"}})
-    await side
-    assert fake_driver.injected == ["/model"]
+    assert fake_driver.injected == []
+    assert fake_driver.keys == []
     _, content = fake_sender.results[0]
-    assert "Sonnet" in content["speak"] and "no model was changed" in content["speak"]
+    assert "set_model" in content["speak"]
     assert content["data"]["phase"] == "idle"
-    assert content["data"]["last_action"] == {
-        "action": "command",
-        "status": "verified",
-        "effect": "model_observed",
-        "completed": True,
-    }
+    assert content["data"]["last_action"] is None
 
 
 async def test_observe_claude_returns_authoritative_menu_state(
@@ -643,6 +632,47 @@ async def test_set_model_reports_success_only_after_reopening_and_verifying(
     assert content["data"]["last_action"]["to"] == "haiku"
     assert content["data"]["phase"] == "idle"
     assert fake_driver.keys[-1] == "escape"
+
+
+async def test_set_model_uses_claude_confirmation_without_reopening_picker(
+    router, fake_driver, fake_sender,
+):
+    fake_driver.lines = [" > ", ""]
+
+    async def advance_model_ui():
+        while fake_driver.injected != ["/model"]:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [" Select model:", " ❯ Opus ✔", "   Sonnet", ""]
+        while fake_driver.keys.count("enter") < 1:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [
+            " This conversation is cached for the current model.",
+            " ❯ 1. Yes, switch to Sonnet 5",
+            "   2. No, go back",
+            "",
+        ]
+        while fake_driver.keys.count("enter") < 2:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [
+            "❯ /model",
+            "  ⎿  Set model to Sonnet 5 and saved as your default for new sessions",
+            "",
+            " > ",
+        ]
+
+    side = asyncio.create_task(advance_model_ui())
+    await router.handle_tool_call(
+        {"id": "c1", "name": "set_model", "args": {"model": "sonnet"}}
+    )
+    await side
+
+    content = fake_sender.results[0][1]
+    assert content["data"]["last_action"] == {
+        "action": "set_model", "status": "verified", "effect": "model_changed",
+        "completed": True, "from": "opus", "to": "sonnet",
+    }
+    assert fake_driver.injected == ["/model"]
+    assert "escape" not in fake_driver.keys
 
 
 async def test_set_model_does_not_claim_unverified_change(router, fake_driver, fake_sender):

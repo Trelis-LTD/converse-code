@@ -101,42 +101,33 @@ async def main() -> None:
             print("--- screen ---")
             print("\n".join(l for l in host.snapshot() if l.strip()))
 
+        # set_model owns inspection, selection, confirmation, and postcondition
+        # verification. If Haiku is already selected, Sonnet guarantees that
+        # this smoke test still exercises a real transition.
+        selected = "Haiku"
         await router.handle_tool_call({
-            "id": "model-menu", "name": "command", "args": {"command": "/model"},
+            "id": "model-set", "name": "set_model", "args": {"model": selected},
         })
-        menu_result = sender.results[-1]
-        menu = router.menu()
-        observed_model = (menu_result["data"].get("model") or {}).get("name")
-        menu_ok = (
-            menu is None
-            and menu_result["data"]["last_action"] == {
-                "action": "command", "status": "verified",
-                "effect": "model_observed", "completed": True,
-            }
-            and bool(observed_model)
-        )
-        print("model menu:", menu_result["speak"])
-        if menu_ok:
-            # set_model owns selection, confirmation, and postcondition
-            # verification. Choose a genuinely different model so this checks
-            # the complete transition rather than the already-selected path.
-            selected = "Haiku" if observed_model != "haiku" else "Sonnet"
+        changed = sender.results[-1]
+        if changed["data"]["last_action"].get("effect") == "already_selected":
+            selected = "Sonnet"
             await router.handle_tool_call({
                 "id": "model-set", "name": "set_model", "args": {"model": selected},
             })
             changed = sender.results[-1]
-            await router.handle_tool_call({
-                "id": "model-observe", "name": "observe_claude", "args": {},
-            })
-            menu_ok = (
-                changed["data"]["last_action"]["status"] == "verified"
-                and changed["data"]["last_action"]["completed"] is True
-                and sender.results[-1]["data"]["last_action"] == changed["data"]["last_action"]
-            )
-            print("model transition:", changed["speak"])
-            if not menu_ok:
-                print("--- screen after menu selection ---")
-                print("\n".join(line for line in host.snapshot() if line.strip()))
+        await router.handle_tool_call({
+            "id": "model-observe", "name": "observe_claude", "args": {},
+        })
+        menu_ok = (
+            changed["data"]["last_action"]["status"] == "verified"
+            and changed["data"]["last_action"]["completed"] is True
+            and changed["data"]["last_action"]["effect"] == "model_changed"
+            and sender.results[-1]["data"]["last_action"] == changed["data"]["last_action"]
+        )
+        print("model transition:", changed["speak"])
+        if not menu_ok:
+            print("--- screen after menu selection ---")
+            print("\n".join(line for line in host.snapshot() if line.strip()))
         print("menu navigation:", "PASS" if menu_ok else "FAIL")
 
         # Exercise real interruption rather than only synthesizing hook order in
