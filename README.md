@@ -5,29 +5,30 @@ terminal and connects it to [Converse](https://converse.trelis.com) over the pub
 WebSocket tool protocol — you speak into a browser tab, instructions appear in the
 terminal as typed text, and the voice tells you what happened.
 
+This repository is also the **reference implementation** for building a client against the
+[Converse WebSocket tool contract](https://converse.trelis.com/docs/api/websocket/#tools).
+It exercises the full surface — audio streaming, tool calls and resolutions, proactive
+wake-ups, and pending-job cancellation — against a real interactive CLI, so it doubles as
+a working example for wiring Converse to any terminal program or agent of your own.
+
 ## Install
 
-Not published to PyPI yet, so install from the repo:
+```bash
+uvx converse-code
+```
+
+`uvx` fetches the package into a throwaway environment and runs its CLI, so there's nothing
+to install or clean up. To put `converse-code` on your PATH permanently:
+
+```bash
+uv tool install converse-code
+```
+
+To run from a checkout instead (for development or to try unreleased changes):
 
 ```bash
 git clone https://github.com/Trelis-LTD/converse-code && cd converse-code
-uv tool install .                    # puts `converse-code` on your PATH
-```
-
-Or run it without installing — from anywhere, pointing at your clone:
-
-```bash
-uvx --from /path/to/converse-code converse-code
-```
-
-Once it's on PyPI, `uvx converse-code` will work directly (`uvx` fetches a package into a
-throwaway environment and runs its CLI, so there's nothing to install or clean up).
-
-To update an installation from this repository:
-
-```bash
-git pull
-uv tool install --force .
+uv tool install .                    # or: uvx --from /path/to/converse-code converse-code
 ```
 
 ## Use

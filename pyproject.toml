@@ -2,7 +2,7 @@
 name = "converse-code"
 version = "0.1.0"
 description = "Talk to Claude Code by voice via Converse"
-readme = "README.md"
+readme = "PYPI.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
@@ -10,6 +10,11 @@ dependencies = [
     "aiohttp>=3.9",
     "pyte>=0.8.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Trelis-LTD/converse-code"
+Repository = "https://github.com/Trelis-LTD/converse-code"
+Documentation = "https://github.com/Trelis-LTD/converse-code#readme"
 
 [project.scripts]
 converse-code = "converse_code.cli:main"
