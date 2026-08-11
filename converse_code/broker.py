@@ -18,7 +18,7 @@ from typing import Awaitable, Callable
 import websockets
 
 from . import audio as audiofmt
-from .converse import DEFAULT_WS_URL, validate_key
+from .converse import DEFAULT_WS_URL
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class BrokerClient:
         self._outbox: deque[dict] = deque()
         self._send_lock = asyncio.Lock()
 
-    async def connect(self, start_frame: dict | None = None) -> None:
+    async def connect(self) -> None:
         """Open (or re-open) the broker session.
 
         One client is reused across reconnects — the page's SDK sends a fresh
@@ -66,10 +66,7 @@ class BrokerClient:
         ws = await websockets.connect(self.url, max_size=4 * 1024 * 1024)
         self._ws = ws
         self.closed.clear()
-        if start_frame is not None:
-            await ws.send(json.dumps(start_frame))
-        else:
-            await ws.send(json.dumps({
+        await ws.send(json.dumps({
                 "type": "start",
                 "session_id": self.session_id,
                 "api_key": self.api_key,
@@ -78,7 +75,7 @@ class BrokerClient:
                 "audio": {"sr": audiofmt.SAMPLE_RATE, "output_encoding": audiofmt.OUTPUT_ENCODING},
                 "mode": {"kind": "converse", "web_search": False, "tools": self.tools},
                 "client": self.client_info,
-            }))
+        }))
         await self._flush_outbox(ws)
 
     async def run(self) -> None:
@@ -171,12 +168,6 @@ class BrokerClient:
             frame["reply"] = True
         await self._send(frame, durable=True)
 
-    async def send_tool_cancel(self, call_id: str) -> None:
-        await self._send({"type": "tool_cancel", "id": call_id}, durable=True)
-
-    async def send_client_event(self, event: str, **fields) -> None:
-        await self._send({"type": "client_event", "event": event, **fields})
-
     async def send_context(self, text: str, role: str = "context", reply: bool = False) -> None:
         """Push host context into the conversation and optionally trigger a reply."""
         await self._send({
@@ -185,7 +176,3 @@ class BrokerClient:
             "role": role,
             "reply": reply,
         }, durable=True)
-
-    async def send_raw(self, payload: dict | bytes) -> None:
-        """Relay a frame from the browser's SDK client straight through."""
-        await self._send(payload)

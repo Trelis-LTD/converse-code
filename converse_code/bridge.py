@@ -17,29 +17,27 @@ class BrowserBridge:
         self._lock = asyncio.Lock()
         self.on_tool_call: Callable[[dict], Awaitable[None]] | None = None
         self.on_tool_cancel: Callable[[dict], Awaitable[None]] | None = None
-        self.on_tool_resume: Callable[[dict], Awaitable[None]] | None = None
 
-    @property
-    def pending_count(self) -> int:
-        return len(self._pending)
-
-    def on_browser_disconnected(self) -> None:
-        self._ready = False
-        self._sent.clear()
+    async def on_browser_disconnected(self) -> None:
+        async with self._lock:
+            self._ready = False
+            self._sent.clear()
 
     async def handle_browser_message(self, message: dict) -> None:
         if message.get("type") != "local":
             return
         event = message.get("event")
         if event == "bridge_ready":
-            self._ready = True
-            self._sent.clear()
+            async with self._lock:
+                self._ready = True
+                self._sent.clear()
             await self._flush()
         elif event == "bridge_ack":
             seq = message.get("seq")
             if isinstance(seq, int):
-                self._pending.pop(seq, None)
-                self._sent.discard(seq)
+                async with self._lock:
+                    self._pending.pop(seq, None)
+                    self._sent.discard(seq)
         elif event == "tool_call" and self.on_tool_call:
             call = message.get("call")
             if isinstance(call, dict):
@@ -48,10 +46,6 @@ class BrowserBridge:
             call = message.get("call")
             if isinstance(call, dict):
                 await self.on_tool_cancel(call)
-        elif event == "tool_deferred_resume" and self.on_tool_resume:
-            call = message.get("call")
-            if isinstance(call, dict):
-                await self.on_tool_resume(call)
 
     async def _control(self, action: str, **fields) -> None:
         async with self._lock:
@@ -94,9 +88,6 @@ class BrowserBridge:
         self, call_id: str, content: dict, reply: bool = False,
     ) -> None:
         await self._control("tool_partial_result", id=call_id, content=content, reply=reply)
-
-    async def send_tool_cancel(self, call_id: str) -> None:
-        await self._control("tool_cancel", id=call_id)
 
     async def send_context(
         self, text: str, role: str = "context", reply: bool = False,

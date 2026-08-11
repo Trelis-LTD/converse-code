@@ -8,10 +8,6 @@ there takes down every invocation before anything useful happens.
 import subprocess
 import sys
 
-import pytest
-
-from converse_code.cli import DEFAULT_CLAUDE_CMD, _configure_logging
-
 ENTRY = [sys.executable, "-m", "converse_code.cli"]
 
 
@@ -29,16 +25,12 @@ def test_help_works():
     assert "--api-url" in proc.stdout
 
 
-def test_default_claude_command_uses_auto_permission_mode():
-    assert DEFAULT_CLAUDE_CMD == "claude --permission-mode auto"
-
-
 def test_startup_checks_credentials_before_launching_claude():
     """Exercises the whole startup path: logging setup, key load, credential
     check. The browser's direct socket is opened later, so an unreachable broker
     must still fail fast here with a clear
     message rather than a traceback or a silent start."""
-    proc = run(["--no-browser", "--headless", "--port", "0", "--broker-url", "ws://127.0.0.1:1"])
+    proc = run(["--no-browser", "--port", "0", "--broker-url", "ws://127.0.0.1:1"])
     assert proc.returncode == 1
     assert "Could not reach Converse" in proc.stderr
     assert "Claude Code was not started" in proc.stderr
@@ -54,16 +46,10 @@ def test_port_in_use_reports_cleanly():
     sock.listen(1)
     busy_port = sock.getsockname()[1]
     try:
-        proc = run(["--no-browser", "--headless", "--port", str(busy_port)])
+        proc = run(["--no-browser", "--port", str(busy_port)])
         assert proc.returncode == 1
         assert "Could not start the voice tab server" in proc.stderr
         assert "--port" in proc.stderr
         assert "Traceback" not in proc.stderr
     finally:
         sock.close()
-
-
-@pytest.mark.parametrize("owns_terminal", [True, False])
-def test_configure_logging_accepts_both_modes(owns_terminal):
-    """basicConfig rejects filename and stream together — even as None."""
-    _configure_logging(owns_terminal=owns_terminal)

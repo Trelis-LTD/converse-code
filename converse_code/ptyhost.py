@@ -56,8 +56,7 @@ KEYMAP = {
 
 
 class ClaudeHost:
-    def __init__(self, argv: list[str], env: dict | None = None, attach_terminal: bool = True,
-                 cols: int = 120, rows: int = 40):
+    def __init__(self, argv: list[str], env: dict | None = None, attach_terminal: bool = True):
         self.argv = argv
         self.env = env
         self.attach_terminal = attach_terminal
@@ -65,7 +64,7 @@ class ClaudeHost:
         self._master_fd: int | None = None
         self._saved_termios = None
         self._stdin_was_blocking: bool | None = None
-        self._screen = _Screen(cols, rows)
+        self._screen = _Screen(120, 40)
         self._stream = pyte.ByteStream(self._screen)
         self.exited = asyncio.Event()
         self.returncode: int | None = None

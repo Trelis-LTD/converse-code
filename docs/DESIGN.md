@@ -42,7 +42,7 @@ The localhost server exposes:
 - `/hook/{event}`: native Claude Code HTTP lifecycle hooks.
 - `/vendor/converse/*.js`: the Apache-licensed browser SDK modules bundled with the wheel.
 
-The tool router reports `idle`, `working`, `canceling`, or `menu`. A `long_task` call is acknowledged as
+The tool router reports an `idle`, `working`, `canceling`, or `awaiting_input` phase; structured UI distinguishes ordinary menus from the model picker. A `long_task` call is acknowledged as
 deferred once its prompt is confirmed accepted, so no voice turn is held open while Claude works.
 The unit of work is a **working episode**: one run of Claude Code from accepting input until it
 comes to rest (`Stop`, `StopFailure`, or cancellation). `long_task` starts an episode only while

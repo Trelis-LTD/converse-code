@@ -18,13 +18,6 @@ MODEL_PICKER = [
     "",
 ]
 
-IDLE_SCREEN = [
-    " Claude finished the task. All tests pass.",
-    "",
-    " > ",
-    "",
-]
-
 # Captured from the real Claude Code TUI: the input prompt is also a "❯",
 # sitting between two horizontal rules — must never be treated as a menu.
 REAL_IDLE_SCREEN = [
@@ -82,11 +75,11 @@ BOXED_PERMISSION_PROMPT = [
 def test_numbered_menu_detected():
     menu = detect_menu(PERMISSION_PROMPT)
     assert menu is not None
-    assert menu.options == [
+    assert menu.options == (
         "Yes",
         "Yes, and don't ask again this session",
         "No, and tell Claude what to do differently (esc)",
-    ]
+    )
     assert menu.selected == 0
     assert menu.title == "Do you want to proceed?"
 
@@ -94,13 +87,9 @@ def test_numbered_menu_detected():
 def test_unnumbered_menu_detected():
     menu = detect_menu(MODEL_PICKER)
     assert menu is not None
-    assert menu.options == ["Opus", "Sonnet", "Haiku"]
+    assert menu.options == ("Opus", "Sonnet", "Haiku")
     assert menu.selected == 1
     assert menu.title == "Select model:"
-
-
-def test_idle_screen_is_not_a_menu():
-    assert detect_menu(IDLE_SCREEN) is None
 
 
 def test_real_claude_idle_prompt_is_not_a_menu():
@@ -128,7 +117,7 @@ def test_numbered_prose_is_not_a_menu():
 def test_boxed_permission_prompt():
     menu = detect_menu(BOXED_PERMISSION_PROMPT)
     assert menu is not None
-    assert menu.options == ["Yes", "No, and tell Claude what to do"]
+    assert menu.options == ("Yes", "No, and tell Claude what to do")
     assert menu.selected == 0
     assert menu.title == "Do you want to proceed?"
 

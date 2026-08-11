@@ -97,11 +97,11 @@ async def _run(args) -> int:
         server.hook_url("stop_failure"),
     )
     claude_argv = shlex.split(args.claude) + ["--settings", str(settings_path)]
-    host = ClaudeHost(claude_argv, attach_terminal=not args.headless)
+    host = ClaudeHost(claude_argv)
 
     handle = _session_handle()
     bridge = BrowserBridge(server.send_json_to_tab)
-    router = tools.ToolRouter(host, bridge, handle=handle, verify_submissions=True)
+    router = tools.ToolRouter(host, bridge, handle=handle)
     router.on_status = server.send_json_to_tab
     server.on_hook = router.on_hook
 
@@ -119,17 +119,13 @@ async def _run(args) -> int:
         }
 
     async def tab_closed() -> None:
-        bridge.on_browser_disconnected()
-
-    async def tool_resumed(event: dict) -> None:
-        log.info("broker resumed deferred tool %s (%s)", event.get("id"), event.get("handle"))
+        await bridge.on_browser_disconnected()
 
     server.on_session_credential = issue_credential
     server.on_tab_json = bridge.handle_browser_message
     server.on_tab_closed = tab_closed
     bridge.on_tool_call = lambda call: _spawn_tool(router, call)
     bridge.on_tool_cancel = router.handle_tool_cancel
-    bridge.on_tool_resume = tool_resumed
 
     print(f"Converse Code — voice tab: {url}   (session: {handle})")
     print(f"Logs: {LOG_PATH}")
@@ -216,13 +212,12 @@ def main() -> None:
         help="Converse HTTP API base used to mint browser session credentials",
     )
     parser.add_argument("--no-browser", action="store_true", help="don't auto-open the voice tab")
-    parser.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)  # tests only
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("login", help="store and validate your Converse API key")
     sub.add_parser("selftest", help="check the audio path end to end, without a browser")
     args = parser.parse_args()
 
-    _configure_logging(owns_terminal=not (args.cmd in ("login", "selftest") or args.headless))
+    _configure_logging(owns_terminal=args.cmd not in ("login", "selftest"))
     if args.cmd == "login":
         raise SystemExit(asyncio.run(_login(args.broker_url)))
     if args.cmd == "selftest":

@@ -7,44 +7,9 @@ be turned into evidence: play the file, or read the statistics.
 """
 
 import struct
-import wave
 from dataclasses import dataclass
-from pathlib import Path
 
 from .audio import SAMPLE_RATE
-
-
-class WavRecorder:
-    """Appends PCM16 frames to a WAV file, finalising the header on close."""
-
-    def __init__(self, path: str | Path, rate: int = SAMPLE_RATE):
-        self.path = Path(path)
-        self.rate = rate
-        self._wav = wave.open(str(self.path), "wb")
-        self._wav.setnchannels(1)
-        self._wav.setsampwidth(2)
-        self._wav.setframerate(rate)
-        self.bytes_written = 0
-        self._closed = False
-
-    def add(self, pcm16: bytes) -> None:
-        if self._closed or not pcm16:
-            return
-        usable = len(pcm16) - (len(pcm16) % 2)
-        if usable <= 0:
-            return
-        self._wav.writeframes(pcm16[:usable])
-        self.bytes_written += usable
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._wav.close()
-
-    @property
-    def seconds(self) -> float:
-        return self.bytes_written / 2 / self.rate
 
 
 @dataclass
