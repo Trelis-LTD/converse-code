@@ -24,6 +24,7 @@ class FakeSender:
         self.deferred = []
         self.progress = []
         self.partials = []
+        self.voice_prompts = []
         self.results = []
 
     async def send_tool_deferred(self, call_id, handle, status_label=None):
@@ -37,6 +38,10 @@ class FakeSender:
     async def send_tool_partial_result(self, call_id, content, reply=False):
         self.timeline.append("partial")
         self.partials.append((call_id, content, reply))
+
+    async def send_voice_prompt(self, prompt_id, text):
+        self.timeline.append("voice_prompt")
+        self.voice_prompts.append((prompt_id, text))
 
     async def send_tool_result(self, call_id, content, **metadata):
         self.timeline.append("result")
@@ -85,7 +90,15 @@ async def test_pi_approval_is_spoken_then_resolved_by_an_explicit_voice_decision
             },
             "handle": "task-reference",
         },
-        True,
+        False,
+    )]
+    assert sender.voice_prompts == [(
+        "approval-7",
+        (
+            "A protected Pi action is waiting for explicit approval. Approval ID: approval-7. "
+            "Tool: bash. Target: uv run pytest -q. Ask the user now whether to allow once, "
+            "allow for this session, or block. Do not approve it until the user answers."
+        ),
     )]
 
     await router.handle_tool_call({

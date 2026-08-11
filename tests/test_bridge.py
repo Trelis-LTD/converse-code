@@ -78,6 +78,20 @@ async def test_partial_result_maps_reply_to_public_browser_sdk_action():
     assert partial["reply"] is True
 
 
+async def test_voice_prompt_is_an_acknowledged_replayable_browser_control():
+    tab = FakeTab()
+    tab.connected = True
+    bridge = BrowserBridge(tab.send)
+    await bridge.handle_browser_message({"type": "local", "event": "bridge_ready"})
+
+    await bridge.send_voice_prompt("approval-7", "Ask for explicit approval")
+
+    prompt = tab.frames[0]
+    assert prompt["action"] == "voice_prompt"
+    assert prompt["prompt_id"] == "approval-7"
+    assert prompt["text"] == "Ask for explicit approval"
+
+
 async def test_browser_tool_calls_and_cancellation_reach_python_handlers():
     bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True))
     calls, cancels = [], []
