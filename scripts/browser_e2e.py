@@ -8,19 +8,16 @@ import os
 import struct
 import subprocess
 import sys
+import tempfile
 import wave
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
-WAV_PATH = ROOT / "tests" / "browser" / "microphone.wav"
-
-
-def write_microphone_fixture() -> None:
+def write_microphone_fixture(path: Path) -> None:
     sample_rate = 48_000
     duration_s = 2
     amplitude = 0.15 * 32767
-    with wave.open(str(WAV_PATH), "wb") as output:
+    with wave.open(str(path), "wb") as output:
         output.setnchannels(1)
         output.setsampwidth(2)
         output.setframerate(sample_rate)
@@ -33,15 +30,15 @@ def write_microphone_fixture() -> None:
 
 
 def main() -> int:
-    write_microphone_fixture()
-    env = dict(os.environ)
-    env["PYTHONUNBUFFERED"] = "1"
-    env["CONVERSE_CODE_BROWSER_E2E"] = "1"
-    command = [sys.executable, "-m", "pytest", "-q", "-m", "browser_e2e", *sys.argv[1:]]
-    try:
+    with tempfile.TemporaryDirectory(prefix="converse-code-browser-") as directory:
+        wav_path = Path(directory) / "microphone.wav"
+        write_microphone_fixture(wav_path)
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+        env["CONVERSE_CODE_BROWSER_E2E"] = "1"
+        env["CONVERSE_CODE_TEST_WAV"] = str(wav_path)
+        command = [sys.executable, "-m", "pytest", "-q", "-m", "browser_e2e", *sys.argv[1:]]
         return subprocess.run(command, cwd=ROOT, env=env, check=False).returncode
-    finally:
-        WAV_PATH.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

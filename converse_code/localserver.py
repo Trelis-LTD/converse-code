@@ -1,6 +1,7 @@
 """Local server for the Browser SDK reference client.
 
   /ws     acknowledged Browser SDK controls
+  /pi     semantic controls for the visible Pi TUI extension
   /session-credential  mints a scoped credential for the direct Browser SDK
 
 Everything here is reachable from any web page the dev happens to have open —
@@ -16,8 +17,9 @@ import json
 import logging
 import re
 import secrets
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import ClassVar
 from urllib.parse import urlparse
 
 from aiohttp import WSMsgType, web
@@ -33,8 +35,12 @@ class LocalServer:
         self.token = token or secrets.token_urlsafe(24)
         self.on_tab_json: Callable[[dict], Awaitable[None]] | None = None
         self.on_tab_closed: Callable[[], Awaitable[None]] | None = None
+        self.on_pi_json: Callable[[dict], Awaitable[None]] | None = None
+        self.on_pi_connected: Callable[[], Awaitable[None]] | None = None
+        self.on_pi_closed: Callable[[], Awaitable[None]] | None = None
         self.on_session_credential: Callable[[str], Awaitable[dict]] | None = None
         self._tab: web.WebSocketResponse | None = None
+        self._pi: web.WebSocketResponse | None = None
         self._runner: web.AppRunner | None = None
         self._host = "127.0.0.1"
         self.port: int | None = None
@@ -44,6 +50,7 @@ class LocalServer:
         app = web.Application()
         app.router.add_get("/", self._index)
         app.router.add_get("/ws", self._ws)
+        app.router.add_get("/pi", self._pi_ws)
         app.router.add_post("/session-credential", self._session_credential)
         app.router.add_get("/vendor/converse/{name}", self._vendor)
         self._runner = web.AppRunner(app)
@@ -57,9 +64,15 @@ class LocalServer:
     def url(self) -> str:
         return f"http://{self._host}:{self.port}/?t={self.token}"
 
+    @property
+    def pi_url(self) -> str:
+        return f"ws://{self._host}:{self.port}/pi?t={self.token}"
+
     async def stop(self) -> None:
         if self._tab is not None and not self._tab.closed:
             await self._tab.close()
+        if self._pi is not None and not self._pi.closed:
+            await self._pi.close()
         if self._runner:
             await self._runner.cleanup()
 
@@ -89,11 +102,23 @@ class LocalServer:
                 pass
         return False
 
+    async def send_json_to_pi(self, msg: dict) -> bool:
+        if self._pi is not None and not self._pi.closed:
+            try:
+                await self._pi.send_str(json.dumps(msg))
+                return True
+            except ConnectionError:
+                pass
+        return False
+
     # -- handlers ----------------------------------------------------------
 
     # A cached page is indistinguishable from a fixed one, which has already cost
     # a debugging round — never let the browser keep these.
-    NO_STORE = {"Cache-Control": "no-store, must-revalidate", "Pragma": "no-cache"}
+    NO_STORE: ClassVar[dict[str, str]] = {
+        "Cache-Control": "no-store, must-revalidate",
+        "Pragma": "no-cache",
+    }
 
     async def _index(self, request: web.Request) -> web.StreamResponse:
         if not self._authorized(request):
@@ -148,6 +173,33 @@ class LocalServer:
             self._tab = None
             if self.on_tab_closed:
                 await self.on_tab_closed()
+        return ws
+
+    async def _pi_ws(self, request: web.Request) -> web.StreamResponse:
+        if not self._authorized(request) or not self._same_origin(request):
+            return web.Response(status=403, text="forbidden")
+        ws = web.WebSocketResponse(heartbeat=30)
+        await ws.prepare(request)
+        previous = self._pi
+        self._pi = ws
+        if previous is not None and not previous.closed:
+            await previous.close()
+        if self.on_pi_connected:
+            await self.on_pi_connected()
+        async for msg in ws:
+            if msg.type != WSMsgType.TEXT or self.on_pi_json is None:
+                continue
+            try:
+                data = json.loads(msg.data)
+            except json.JSONDecodeError:
+                log.warning("bad JSON from Pi extension: %.100s", msg.data)
+                continue
+            if isinstance(data, dict):
+                await self.on_pi_json(data)
+        if self._pi is ws:
+            self._pi = None
+            if self.on_pi_closed:
+                await self.on_pi_closed()
         return ws
 
     async def _session_credential(self, request: web.Request) -> web.Response:

@@ -1,4 +1,4 @@
-"""Run Pi/Codex behind a minimal Converse Browser SDK reference client."""
+"""Use the Converse browser as voice control for a visible Pi terminal."""
 
 from __future__ import annotations
 
@@ -16,11 +16,10 @@ from . import agent_tools, config, converse
 from .agent_tools import AgentToolRouter
 from .bridge import BrowserBridge
 from .localserver import LocalServer
-from .pi_rpc import PiRPC, PiRPCError
+from .pi_tui import PiTUIBridge, PiTUIBridgeError
 
 DEFAULT_PORT = 8737
-DEFAULT_PI_CMD = "pi --mode rpc --provider openai-codex"
-_tool_tasks: set[asyncio.Task] = set()
+DEFAULT_PI_CMD = "pi --provider openai-codex"
 
 
 def _session_handle() -> str:
@@ -53,24 +52,10 @@ async def _login(url: str) -> int:
     return 1
 
 
-async def _spawn_tool(router: AgentToolRouter, call: dict) -> None:
-    task = asyncio.create_task(router.handle_tool_call(call))
-    _tool_tasks.add(task)
-    task.add_done_callback(_tool_tasks.discard)
-
-
 def _pi_argv(command: str) -> list[str]:
+    bridge = Path(__file__).with_name("pi_bridge.ts")
     approval = Path(__file__).with_name("pi_approval.ts")
-    return [*shlex.split(command), "-e", str(approval)]
-
-
-def _require_pi_model(response: dict) -> None:
-    model = (response.get("data") or {}).get("model") or {}
-    if model.get("id") in {None, "", "unknown"}:
-        raise PiRPCError(
-            "the Codex provider is not authenticated; run `pi`, then `/login`, and choose "
-            "ChatGPT Plus/Pro (Codex)"
-        )
+    return [*shlex.split(command), "-e", str(bridge), "-e", str(approval)]
 
 
 async def _run(args) -> int:
@@ -94,24 +79,17 @@ async def _run(args) -> int:
             await server.stop()
             print("Converse rejected that API key. Run: converse-code login", file=sys.stderr)
             return 1
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - normalize broker failures at the CLI boundary
         await server.stop()
         print(f"Could not reach Converse ({exc}). Pi was not started.", file=sys.stderr)
         return 1
 
-    pi = PiRPC(_pi_argv(args.pi), cwd=Path.cwd())
-    try:
-        await pi.start()
-        _require_pi_model(await pi.command("get_state"))
-    except PiRPCError as exc:
-        await pi.stop()
-        await server.stop()
-        print(f"Could not start Pi: {exc}", file=sys.stderr)
-        return 1
-
     stopped = asyncio.Event()
+    tool_tasks: set[asyncio.Task] = set()
     bridge = BrowserBridge(server.send_json_to_tab)
+    pi = PiTUIBridge(server.send_json_to_pi)
     router = AgentToolRouter(pi, bridge, handle=_session_handle())
+    pi.on_event = router.on_event
     async def end_session() -> None:
         stopped.set()
 
@@ -126,20 +104,55 @@ async def _run(args) -> int:
     server.on_session_credential = issue_credential
     server.on_tab_json = bridge.handle_browser_message
     server.on_tab_closed = bridge.on_browser_disconnected
-    bridge.on_tool_call = lambda call: _spawn_tool(router, call)
+    server.on_pi_json = pi.handle_message
+    server.on_pi_connected = lambda: pi.set_connected(True)
+    server.on_pi_closed = lambda: pi.set_connected(False)
+    async def spawn_tool(call: dict) -> None:
+        task = asyncio.create_task(router.handle_tool_call(call))
+        tool_tasks.add(task)
+        task.add_done_callback(tool_tasks.discard)
+
+    bridge.on_tool_call = spawn_tool
     bridge.on_tool_cancel = router.handle_tool_cancel
 
-    print(f"Converse Code reference session: {server.url}")
+    environment = {**os.environ, "CONVERSE_CODE_PI_BRIDGE_URL": server.pi_url}
+    try:
+        process = await asyncio.create_subprocess_exec(*_pi_argv(args.pi), env=environment)
+    except FileNotFoundError:
+        await server.stop()
+        print("Could not launch Pi. Install it first, then run converse-code again.", file=sys.stderr)
+        return 1
+
+    print(f"Converse voice control: {server.url}")
     if not args.no_browser:
         webbrowser.open(server.url)
+    process_wait = asyncio.create_task(process.wait())
+    stop_wait = asyncio.create_task(stopped.wait())
+    completed = set()
     try:
-        await stopped.wait()
+        completed, _ = await asyncio.wait(
+            {process_wait, stop_wait}, return_when=asyncio.FIRST_COMPLETED,
+        )
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
-        if router.active_call_id:
+        if process_wait in completed and router.active_call_id:
+            await router.on_event({"type": "process_exit", "status": process.returncode})
+        elif router.active_call_id:
             await router.handle_tool_cancel({"id": router.active_call_id})
-        await pi.stop()
+        if tool_tasks:
+            await asyncio.wait(tool_tasks, timeout=2)
+        if process.returncode is None:
+            try:
+                await pi.command("shutdown")
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except (PiTUIBridgeError, TimeoutError):
+                process.terminate()
+                await process.wait()
+        for task in (process_wait, stop_wait):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(process_wait, stop_wait, return_exceptions=True)
         await server.stop()
     return 0
 
@@ -147,12 +160,12 @@ async def _run(args) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="converse-code",
-        description="A minimal Converse background-tool reference using Pi and Codex.",
+        description="Minimal Converse voice control for the visible Pi terminal.",
     )
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument(
         "--pi", default=os.environ.get("CONVERSE_CODE_PI_CMD", DEFAULT_PI_CMD),
-        help="Pi RPC command",
+        help="Visible Pi TUI command",
     )
     parser.add_argument("--broker-url", default=os.environ.get("CONVERSE_URL", converse.DEFAULT_WS_URL))
     parser.add_argument(

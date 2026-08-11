@@ -71,3 +71,20 @@ async def test_websocket_is_gated_and_relays_both_directions(server):
 
 async def test_send_without_connected_page_returns_false(server):
     assert await server.send_json_to_tab({"type": "local"}) is False
+
+
+async def test_pi_extension_socket_is_separate_authenticated_and_bidirectional(server):
+    received = []
+    server.on_pi_json = lambda frame: received.append(frame) or asyncio.sleep(0)
+    async with aiohttp.ClientSession() as session:
+        with pytest.raises(aiohttp.WSServerHandshakeError):
+            await session.ws_connect(f"{base(server)}/pi")
+        async with session.ws_connect(f"{base(server)}/pi?t=test-token") as websocket:
+            await websocket.send_json({"type": "agent_start"})
+            await asyncio.sleep(0.01)
+            assert received == [{"type": "agent_start"}]
+            assert await server.send_json_to_pi({"id": "command-1", "type": "prompt"})
+            assert json.loads((await websocket.receive()).data) == {
+                "id": "command-1", "type": "prompt",
+            }
+    assert await server.send_json_to_pi({"type": "prompt"}) is False

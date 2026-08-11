@@ -15,7 +15,6 @@ import re
 import shutil
 from pathlib import Path
 
-
 ROOT = Path(__file__).parents[1]
 DEST = ROOT / "converse_code" / "web" / "vendor" / "converse"
 METADATA = ("LICENSE", "NOTICE", "CHANGELOG.md", "package.json")

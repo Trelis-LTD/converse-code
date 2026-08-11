@@ -1,11 +1,14 @@
-import asyncio
 import json
 
 import pytest
 import websockets
 from aiohttp import web
 
-from converse_code.converse import CredentialError, mint_session_credential, validate_key
+from converse_code.converse import (
+    CredentialError,
+    mint_session_credential,
+    validate_key,
+)
 
 
 async def test_validate_key_uses_non_billable_auth_frame():

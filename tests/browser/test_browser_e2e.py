@@ -4,7 +4,6 @@ import asyncio
 
 import pytest
 
-
 pytestmark = pytest.mark.browser_e2e
 
 
@@ -15,20 +14,20 @@ async def wait_for_frame(frames, predicate):
 
 
 async def open_session(page):
-    await page.locator("#text").fill("Start a coding task")
-    await page.locator("#send").click()
-    await page.locator(".entry.user").wait_for()
-
-
-async def test_page_drives_text_and_voice_through_one_browser_sdk_client(browser_page):
-    page, errors = browser_page
-    assert await page.title() == "Converse Code"
-    await open_session(page)
-    assert await page.evaluate("__fakeConverse.clients.length") == 1
-    assert await page.evaluate("__fakeConverse.clients[0].injected[0].text") == "Start a coding task"
-
     await page.locator("#voice").click()
     await page.locator("#voice").get_by_text("Stop voice", exact=True).wait_for()
+
+
+async def test_page_is_a_voice_only_remote_for_the_visible_pi_terminal(browser_page):
+    page, errors = browser_page
+    assert await page.title() == "Converse Code"
+    assert await page.locator("#text").count() == 0
+    assert await page.locator("#send").count() == 0
+    await open_session(page)
+    assert await page.evaluate("__fakeConverse.clients.length") == 1
+    instructions = await page.evaluate("__fakeConverse.clients[0].options.mode.instructions")
+    assert "Always pass every substantive or actionable user request to coding_task" in instructions
+    assert "visible Pi terminal" in instructions
     await page.locator("#voice").click()
     await page.locator("#voice").get_by_text("Start voice", exact=True).wait_for()
     assert errors == []
@@ -46,7 +45,6 @@ async def test_deferred_silent_partial_reply_partial_and_completion(browser_page
     })
     await wait_for_frame(frames, lambda frame: frame.get("seq") == 1)
     assert await page.locator("#status").inner_text() == "working"
-    assistant_count = await page.locator(".entry.assistant").count()
 
     await server.send_json_to_tab({
         "type": "local", "event": "bridge_control", "seq": 2,
@@ -54,14 +52,13 @@ async def test_deferred_silent_partial_reply_partial_and_completion(browser_page
         "content": {"speak": "Updated app.py"}, "reply": False,
     })
     await wait_for_frame(frames, lambda frame: frame.get("seq") == 2)
-    assert await page.locator(".entry.assistant").count() == assistant_count
 
     await server.send_json_to_tab({
         "type": "local", "event": "bridge_control", "seq": 3,
         "action": "tool_partial_result", "id": "task-1",
         "content": {"speak": "The tests now pass"}, "reply": True,
     })
-    await page.locator(".entry.assistant").get_by_text("The tests now pass", exact=True).wait_for()
+    await wait_for_frame(frames, lambda frame: frame.get("seq") == 3)
 
     await server.send_json_to_tab({
         "type": "local", "event": "bridge_control", "seq": 4,
@@ -77,7 +74,6 @@ async def test_deferred_silent_partial_reply_partial_and_completion(browser_page
     ]
     assert calls[1]["options"]["reply"] is False
     assert calls[2]["options"]["reply"] is True
-    assert await page.locator(".entry.assistant").count() == 2  # typed reply + spoken partial
 
 
 async def test_sdk_cancellation_reaches_the_local_host(browser_page, browser_server):

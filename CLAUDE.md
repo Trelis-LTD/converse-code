@@ -1,8 +1,11 @@
 # Converse Code engineering contract
 
-Keep this package a small reference implementation of Converse background tools and the Browser
-SDK. Pi/Codex owns coding; do not add terminal emulation, screen parsing, model menus, generic
-keypresses, or provider-specific UI automation.
+Keep this package a small voice remote for the visible Pi terminal and a reference implementation
+of Converse background tools and the Browser SDK. Pi/Codex owns coding; do not add terminal
+emulation, screen parsing, model menus, generic keypresses, or provider-specific UI automation.
+
+Voice requests must enter Pi through its documented extension `sendUserMessage()` API. Pi owns
+its transcript and all terminal menus. The browser remains voice-only.
 
 Preserve the public lifecycle: accepted prompt → deferred tool → bounded progress/partials → one
 terminal result. Use `reply: true` only for information worth prompting an immediate conversational

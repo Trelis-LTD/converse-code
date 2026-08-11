@@ -6,19 +6,17 @@ from converse_code.agent_tools import AgentToolRouter, manifest
 class FakePi:
     def __init__(self):
         self.commands = []
-        self.extension_responses = []
         self.on_event = None
+        self.next_id = 1
 
     async def command(self, kind, **fields):
         self.commands.append((kind, fields))
-        return {"success": True}
+        response = {"success": True, "id": f"fake-{self.next_id}"}
+        self.next_id += 1
+        return response
 
     async def emit(self, event):
         await self.on_event(event)
-
-    async def send_extension_response(self, request_id, **fields):
-        self.extension_responses.append((request_id, fields))
-
 
 class FakeSender:
     def __init__(self):
@@ -66,6 +64,7 @@ async def test_task_backgrounds_then_emits_silent_and_spoken_partials_and_final_
     assert pi.commands == [("prompt", {"message": "Fix it"})]
     assert sender.deferred == [("call-1", "task-reference", "Coding task")]
 
+    await pi.emit({"type": "input_seen", "owner": "bridge", "commandId": "fake-1"})
     await pi.emit({
         "type": "tool_execution_start", "toolCallId": "edit-1", "toolName": "edit",
         "args": {"path": "app.py"},
@@ -89,6 +88,65 @@ async def test_task_backgrounds_then_emits_silent_and_spoken_partials_and_final_
         {"speak": "Fixed and tested.", "data": {}, "handle": "task-reference"},
         {"outcome": "succeeded", "verified": False},
     )]
+
+
+async def test_unrelated_terminal_input_fails_closed_and_cannot_supply_final_evidence():
+    pi, sender = FakePi(), FakeSender()
+    router = AgentToolRouter(pi, sender, handle="task-reference")
+    running = asyncio.create_task(router.handle_tool_call({
+        "id": "call-1", "name": "coding_task", "args": {"request": "Fix it"},
+    }))
+    await asyncio.sleep(0)
+    await pi.emit({"type": "input_seen", "owner": "interactive", "text": "Unrelated work"})
+    await pi.emit({"type": "message_end", "message": {
+        "role": "assistant", "content": "Unrelated result",
+    }})
+    await pi.emit({"type": "agent_settled"})
+    await running
+
+    assert sender.results[-1][2]["outcome"] == "failed"
+    assert "unrelated" in sender.results[-1][1]["speak"].lower()
+    assert "Unrelated result" not in sender.results[-1][1]["speak"]
+
+
+async def test_bridge_input_with_wrong_command_id_cannot_claim_task_ownership():
+    pi, sender = FakePi(), FakeSender()
+    router = AgentToolRouter(pi, sender, handle="task-reference")
+    running = asyncio.create_task(router.handle_tool_call({
+        "id": "call-1", "name": "coding_task", "args": {"request": "Fix it"},
+    }))
+    await asyncio.sleep(0)
+    await pi.emit({"type": "input_seen", "owner": "bridge", "commandId": "stale-command"})
+    await running
+
+    assert sender.results[-1][2]["outcome"] == "failed"
+    assert "did not match" in sender.results[-1][1]["speak"]
+
+
+async def test_session_shutdown_or_bridge_disconnect_settles_active_task_as_failed():
+    for event in ({"type": "session_shutdown"}, {"type": "bridge_disconnect"}):
+        pi, sender = FakePi(), FakeSender()
+        router = AgentToolRouter(pi, sender, handle="task-reference")
+        running = asyncio.create_task(router.handle_tool_call({
+            "id": "call-1", "name": "coding_task", "args": {"request": "Fix it"},
+        }))
+        await asyncio.sleep(0)
+        await pi.emit(event)
+        await running
+        assert sender.results[-1][2]["outcome"] == "failed"
+
+
+async def test_settled_without_bridge_owned_input_is_not_success():
+    pi, sender = FakePi(), FakeSender()
+    router = AgentToolRouter(pi, sender, handle="task-reference")
+    running = asyncio.create_task(router.handle_tool_call({
+        "id": "call-1", "name": "coding_task", "args": {"request": "Fix it"},
+    }))
+    await asyncio.sleep(0)
+    await pi.emit({"type": "agent_settled"})
+    await running
+    assert sender.results[-1][2]["outcome"] == "failed"
+    assert "attributed safely" in sender.results[-1][1]["speak"].lower()
 
 
 async def test_continue_task_steers_active_work():
@@ -132,90 +190,23 @@ async def test_cancelled_task_uses_the_browser_sdk_outcome_spelling():
     assert sender.results[-1][2] == {"outcome": "cancelled", "verified": False}
 
 
-async def test_structured_blocking_request_is_a_reply_true_partial():
-    pi, sender = FakePi(), FakeSender()
-    router = AgentToolRouter(pi, sender, handle="task-reference")
-    router.phase = "running"
-    router.active_call_id = "call-1"
-    router._deferred_sent = True
-
-    await router.on_event({
-        "type": "extension_ui_request", "id": "approval-1", "method": "confirm",
-        "title": "Run deployment?", "message": "This changes production.",
-    })
-
-    call_id, content, reply = sender.partials[-1]
-    assert call_id == "call-1"
-    assert reply is True
-    assert content["data"]["request_id"] == "approval-1"
-    assert "Run deployment?" in content["speak"]
-
-    await router.handle_tool_call({
-        "id": "call-2", "name": "continue_task", "args": {"request": "yes"},
-    })
-    assert pi.extension_responses == [("approval-1", {"confirmed": True})]
-    assert router.phase == "running"
-
-
-async def test_select_requires_an_exact_structured_option():
-    pi, sender = FakePi(), FakeSender()
-    router = AgentToolRouter(pi, sender, handle="task-reference")
-    router.phase = "awaiting_input"
-    router.active_call_id = "call-1"
-    router._deferred_sent = True
-    router.pending_ui = {
-        "id": "choice-1", "method": "select", "title": "Choose", "options": ["A", "B"],
-    }
-
-    await router.handle_tool_call({
-        "id": "bad", "name": "continue_task", "args": {"request": "something else"},
-    })
-    assert pi.extension_responses == []
-    assert sender.results[-1][2]["outcome"] == "failed"
-
-    await router.handle_tool_call({
-        "id": "good", "name": "continue_task", "args": {"request": "b"},
-    })
-    assert pi.extension_responses == [("choice-1", {"value": "B"})]
-
-
-async def test_failed_ui_answer_delivery_returns_a_clean_tool_failure():
-    class BrokenPi(FakePi):
-        async def send_extension_response(self, request_id, **fields):
-            from converse_code.pi_rpc import PiRPCError
-
-            raise PiRPCError("connection closed")
-
-    pi, sender = BrokenPi(), FakeSender()
-    router = AgentToolRouter(pi, sender, handle="task-reference")
-    router.phase = "awaiting_input"
-    router.active_call_id = "call-1"
-    router._deferred_sent = True
-    router.pending_ui = {
-        "id": "choice-1", "method": "select", "title": "Choose", "options": ["A", "B"],
-    }
-
-    await router.handle_tool_call({
-        "id": "reply-1", "name": "continue_task", "args": {"request": "A"},
-    })
-
-    assert sender.results[-1][2] == {"outcome": "failed", "verified": False}
-    assert "connection closed" in sender.results[-1][1]["speak"]
-    assert router.phase == "awaiting_input"
-
-
 async def test_events_that_race_prompt_acceptance_still_follow_deferred():
     class EagerPi(FakePi):
         async def command(self, kind, **fields):
             self.commands.append((kind, fields))
             if kind == "prompt":
+                await self.emit({
+                    "type": "input_seen", "owner": "bridge", "commandId": "fake-1",
+                })
                 await self.emit({"type": "tool_execution_start", "toolName": "edit",
                                  "args": {"path": "raced.py"}})
                 await self.emit({"type": "message_end", "message": {
                     "role": "assistant", "content": "Done despite the race.",
                 }})
                 await self.emit({"type": "agent_settled"})
-            return {"success": True}
+            response = {"success": True, "id": f"fake-{self.next_id}"}
+            self.next_id += 1
+            return response
 
     pi, sender = EagerPi(), FakeSender()
     router = AgentToolRouter(pi, sender, handle="task-reference")
