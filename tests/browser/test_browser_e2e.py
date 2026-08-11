@@ -302,7 +302,7 @@ async def test_voice_partial_cannot_ack_or_overwrite_pending_typed_turn(browser_
     await page.evaluate("__fakeConverse.autoReply = false; __fakeConverse.deferTextAck = true")
     await page.locator("#textInput").fill("Keep this typed turn")
     await page.locator("#textSendBtn").click()
-    await page.wait_for_function("__fakeConverse.clients[0]?.injected.length === 1")
+    await page.wait_for_function("__fakeConverse.clients?.[0]?.injected.length === 1")
 
     await page.evaluate("__fakeConverse.clients[0].emit({type:'asr', text:'Keep this typed turn', final:false, turn_id:'voice-1'})")
     assert await page.locator("#textForm").get_attribute("aria-busy") == "true"
@@ -325,7 +325,7 @@ async def test_rapid_second_submit_is_not_delivered(browser_page):
     await page.evaluate("__fakeConverse.autoReply = false; __fakeConverse.deferTextAck = true")
     await page.locator("#textInput").fill("First turn")
     await page.locator("#textSendBtn").click()
-    await page.wait_for_function("__fakeConverse.clients[0]?.injected.length === 1")
+    await page.wait_for_function("__fakeConverse.clients?.[0]?.injected.length === 1")
     await page.evaluate("textInput.disabled=false; textInput.value='Second turn'; textForm.dispatchEvent(new Event('submit', {cancelable:true}))")
     await page.wait_for_timeout(50)
     injected = await page.evaluate("__fakeConverse.clients[0].injected")
