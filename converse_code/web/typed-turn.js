@@ -5,27 +5,29 @@
     constructor(view, options){
       options = options || {};
       this.view = view;
-      this.timeoutMs = options.timeoutMs || 15000;
-      this.setTimer = options.setTimer || ((callback, delay) => setTimeout(callback, delay));
-      this.clearTimer = options.clearTimer || ((timer) => clearTimeout(timer));
+      this.messageId = options.messageId || (() => globalThis.crypto?.randomUUID?.()
+        || `typed-${Date.now()}-${Math.random().toString(36).slice(2)}`);
       this.pending = null;
+      this.expectedEchoes = new Map();
     }
 
     async submit(rawText){
       var text = String(rawText || "").trim();
       if(!text || this.pending) return false;
-      var pending = {text: text, timer: null};
+      var pending = {text: text, messageId: this.messageId()};
       this.pending = pending;
       this.view.setBusy(true);
       try{
-        await this.view.send(text);
-        if(this.pending === pending){
-          pending.timer = this.setTimer(() => {
-            if(this.pending === pending){
-              this.fail("Typed turn was not acknowledged. It remains in the input so you can retry.");
-            }
-          }, this.timeoutMs);
+        var acknowledgement = await this.view.send(text, pending.messageId);
+        if(this.pending !== pending) return false;
+        if(!acknowledgement || acknowledgement.message_id !== pending.messageId){
+          throw new Error("Converse returned an uncorrelated acknowledgement");
         }
+        if(acknowledgement.accepted !== true){
+          throw new Error(acknowledgement.reason || "Converse rejected the typed turn");
+        }
+        this.expectedEchoes.set(pending.messageId, text);
+        this._settle(true);
         return true;
       }catch(error){
         this.fail("Could not send typed turn: " + (error && error.message ? error.message : error));
@@ -33,9 +35,13 @@
       }
     }
 
-    handleAsr(text){
-      if(!this.pending || text !== this.pending.text) return false;
-      this._settle(true);
+    handleAsr(event, text){
+      var messageId = event && (event.message_id !== undefined
+        ? event.message_id : event.messageId);
+      if(!event || event.input_source !== "text" || !messageId) return false;
+      messageId = String(messageId);
+      if(this.expectedEchoes.get(messageId) !== text) return false;
+      this.expectedEchoes.delete(messageId);
       return true;
     }
 
@@ -47,11 +53,11 @@
 
     reset(){
       this._settle(false);
+      this.expectedEchoes.clear();
     }
 
     _settle(acknowledged){
       if(!this.pending) return;
-      this.clearTimer(this.pending.timer);
       this.pending = null;
       this.view.setBusy(false);
       if(acknowledged) this.view.clearInput();

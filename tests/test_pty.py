@@ -45,7 +45,7 @@ async def test_startup_and_echo(host):
 
 
 async def test_clean_exit(host):
-    assert await wait_for(lambda: "> " in screen_text(host))
+    assert await wait_for(lambda: "❯" in screen_text(host))
     host.inject("exit")
     await asyncio.wait_for(host.exited.wait(), 5)
     assert host.returncode == 0

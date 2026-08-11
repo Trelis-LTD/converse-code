@@ -37,7 +37,7 @@ def main() -> int:
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
     env["CONVERSE_CODE_BROWSER_E2E"] = "1"
-    command = ["uv", "run", "pytest", "-q", "-m", "browser_e2e", *sys.argv[1:]]
+    command = [sys.executable, "-m", "pytest", "-q", "-m", "browser_e2e", *sys.argv[1:]]
     try:
         return subprocess.run(command, cwd=ROOT, env=env, check=False).returncode
     finally:

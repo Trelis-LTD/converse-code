@@ -115,6 +115,32 @@ async def test_inject_separates_text_from_submit_keystroke():
     assert writes == [b"read the test file", b"\r"]
 
 
+async def test_inject_command_dismisses_autocomplete_then_submits_once():
+    host = ClaudeHost(["unused"], attach_terminal=False)
+    writes = []
+    host._master_fd = 1
+    host._write = writes.append
+
+    host.inject_command("/model", submit_delay_s=INJECT_SUBMIT_DELAY_S)
+
+    assert writes == [b"/model"]
+    await asyncio.sleep(INJECT_SUBMIT_DELAY_S * 5)
+    assert writes == [b"/model", b"\x1b", b"\r"]
+
+
+async def test_inject_argument_command_dismisses_before_typing_argument():
+    host = ClaudeHost(["unused"], attach_terminal=False)
+    writes = []
+    host._master_fd = 1
+    host._write = writes.append
+
+    host.inject_command("/model sonnet", submit_delay_s=INJECT_SUBMIT_DELAY_S)
+
+    assert writes == [b"/model"]
+    await asyncio.sleep(INJECT_SUBMIT_DELAY_S * 7)
+    assert writes == [b"/model", b"\x1b", b" sonnet", b"\r"]
+
+
 async def test_concurrent_injections_are_serialized():
     host = ClaudeHost(["unused"], attach_terminal=False)
     writes = []

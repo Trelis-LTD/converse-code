@@ -46,6 +46,41 @@ async def test_unacked_control_is_replayed_after_tab_reconnect():
     assert tab.frames[-1] == first
 
 
+async def test_tool_result_maps_router_verification_to_sdk_outcome():
+    tab = FakeTab()
+    tab.connected = True
+    bridge = BrowserBridge(tab.send)
+    await bridge.handle_browser_message({"type": "local", "event": "bridge_ready"})
+
+    await bridge.send_tool_result("ok", {"speak": "done"},
+                                  outcome="succeeded", verified=True)
+    assert tab.frames[-1]["outcome"] == "succeeded"
+    assert tab.frames[-1]["verified"] is True
+
+    await bridge.send_tool_result("bad", {"speak": "failed"},
+                                  outcome="failed", verified=False)
+    assert tab.frames[-1]["outcome"] == "failed"
+    assert tab.frames[-1]["verified"] is False
+
+
+async def test_rejected_context_control_is_not_replayed():
+    tab = FakeTab()
+    tab.connected = True
+    bridge = BrowserBridge(tab.send)
+    await bridge.handle_browser_message({"type": "local", "event": "bridge_ready"})
+    await bridge.send_context("context", reply=True)
+    seq = tab.frames[-1]["seq"]
+
+    await bridge.handle_browser_message({
+        "type": "local", "event": "bridge_reject", "seq": seq,
+        "reason": "rejected",
+    })
+    before = len(tab.frames)
+    await bridge.on_browser_disconnected()
+    await bridge.handle_browser_message({"type": "local", "event": "bridge_ready"})
+    assert len(tab.frames) == before
+
+
 async def test_context_and_partial_result_map_to_public_browser_sdk_actions():
     tab = FakeTab()
     tab.connected = True

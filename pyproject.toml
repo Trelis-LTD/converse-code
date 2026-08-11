@@ -1,6 +1,6 @@
 [project]
 name = "converse-code"
-version = "0.5.2"
+version = "0.6.0"
 description = "Talk or type to Claude Code via Converse, with headless JSONL control"
 readme = "PYPI.md"
 license = "Apache-2.0"
@@ -22,6 +22,7 @@ converse-code = "converse_code.cli:main"
 
 [dependency-groups]
 dev = [
+    "claude-agent-sdk>=0.2.135",
     "playwright>=1.54",
     "pytest>=8",
     "pytest-asyncio>=0.24",

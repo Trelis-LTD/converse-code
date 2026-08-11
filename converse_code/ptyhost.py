@@ -126,11 +126,7 @@ KEYMAP = {
     "enter": b"\r",
     "up": b"\x1b[A",
     "down": b"\x1b[B",
-    "left": b"\x1b[D",
-    "right": b"\x1b[C",
-    "tab": b"\t",
-    "shift-tab": b"\x1b[Z",
-    "ctrl-c": b"\x03",
+    "ctrl-u": b"\x15",
     "s": b"s",
 }
 
@@ -149,7 +145,9 @@ class ClaudeHost:
         self._screen_filter = _ScreenByteFilter()
         self.exited = asyncio.Event()
         self.returncode: int | None = None
-        self._injection_queue: deque[bytes] = deque()
+        self._injection_queue: deque[tuple[bytes, float, bool, bytes]] = deque()
+        self._dismiss_autocomplete = False
+        self._command_suffix = b""
         self._injecting = False
         self._pending_write = bytearray()
         self._writer_registered = False
@@ -326,7 +324,7 @@ class ClaudeHost:
 
     # -- injection & snapshots -----------------------------------------------
 
-    def inject(self, text: str) -> None:
+    def inject(self, text: str, submit_delay_s: float = INJECT_SUBMIT_DELAY_S) -> None:
         """Type an instruction into Claude Code and submit it.
 
         Text arrives from the far side of the WebSocket and is written to the
@@ -336,7 +334,23 @@ class ClaudeHost:
         """
         if self._master_fd is None:
             raise OSError("Claude Code session has exited")
-        self._injection_queue.append(sanitize(text).encode())
+        delay = max(INJECT_SUBMIT_DELAY_S, min(float(submit_delay_s), 2.0))
+        self._injection_queue.append((sanitize(text).encode(), delay, False, b""))
+        if not self._injecting:
+            self._start_next_injection()
+
+    def inject_command(self, text: str, submit_delay_s: float = 0.4) -> None:
+        """Submit a slash command once, after dismissing its autocomplete.
+
+        For argument commands, type the command name first, dismiss the command-name popup, then
+        type the argument. Escaping after the full string can clear it; pressing Enter before
+        dismissing can select an autocomplete row instead of executing the command.
+        """
+        delay = max(INJECT_SUBMIT_DELAY_S, min(float(submit_delay_s), 2.0))
+        cleaned = sanitize(text)
+        payload, separator, argument = cleaned.partition(" ")
+        suffix = (separator + argument).encode() if separator else b""
+        self._injection_queue.append((payload.encode(), delay, True, suffix))
         if not self._injecting:
             self._start_next_injection()
 
@@ -346,20 +360,43 @@ class ClaudeHost:
             self._injection_queue.clear()
             return
         self._injecting = True
-        self._write(self._injection_queue.popleft())
-        asyncio.get_running_loop().call_later(INJECT_SUBMIT_DELAY_S, self._submit_injection)
+        (
+            payload, submit_delay_s, self._dismiss_autocomplete, self._command_suffix,
+        ) = self._injection_queue.popleft()
+        self._write(payload)
+        asyncio.get_running_loop().call_later(submit_delay_s, self._submit_injection)
 
     def _submit_injection(self) -> None:
+        if self._dismiss_autocomplete:
+            self._dismiss_autocomplete = False
+            try:
+                self._write(KEYMAP["escape"])
+            except OSError:
+                self._finish_injection()
+                return
+            asyncio.get_running_loop().call_later(0.1, self._submit_after_autocomplete)
+            return
+        self._submit_after_autocomplete()
+
+    def _submit_after_autocomplete(self) -> None:
         if self._master_fd is None:
             self._injecting = False
             self._injection_queue.clear()
             return
         try:
+            if self._command_suffix:
+                suffix, self._command_suffix = self._command_suffix, b""
+                self._write(suffix)
+                asyncio.get_running_loop().call_later(0.1, self._submit_after_autocomplete)
+                return
             self._write(b"\r")
         except OSError:
             self._injecting = False
             self._injection_queue.clear()
             return
+        self._finish_injection()
+
+    def _finish_injection(self) -> None:
         self._injecting = False
         if self._injection_queue:
             asyncio.get_running_loop().call_later(INJECT_SUBMIT_DELAY_S, self._start_next_injection)

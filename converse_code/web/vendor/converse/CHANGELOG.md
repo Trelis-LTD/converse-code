@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.12.3 - 2026-08-11
+
+- Tool result, progress, deferred, partial-result, and cancellation methods now return whether a
+  live transport accepted the frame, allowing durable bridges to retain controls across reconnects.
+
+## 0.12.2 - 2026-08-11
+
+- Keep a newer successful connection authoritative when an older failed WebSocket delivers its
+  close event late, so explicit capacity retries cannot clear the live transport.
+
+## 0.12.1 - 2026-08-11
+
+- Bound correlated injection acknowledgement waits and reject with cleanup when an older or
+  mismatched broker never returns `inject_context_ack`.
+
+## 0.12.0 - 2026-08-11
+
+- `injectContext(text, {messageId, role, reply})` now returns the broker's authoritative
+  accepted/rejected acknowledgement. The client-generated ID and `input_source: "text"` are
+  echoed on the canonical final `asr` event; spoken transcripts carry `input_source: "voice"`.
+- `sendText(text, {messageId})` exposes the same correlation and acknowledgement contract.
+
+## 0.11.0 - 2026-08-11
+
+- Add `sendText(text)` as the concise alias for a typed user turn that should receive a reply.
+  Typed and spoken turns use the same `asr` event contract, including a stable `turn_id`.
+
 ## 0.10.0 - 2026-08-10
 
 - Add a supported, versioned Browser SDK resume-state API for full page reloads:

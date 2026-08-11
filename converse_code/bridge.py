@@ -32,7 +32,7 @@ class BrowserBridge:
                 self._ready = True
                 self._sent.clear()
             await self._flush()
-        elif event == "bridge_ack":
+        elif event in {"bridge_ack", "bridge_reject"}:
             seq = message.get("seq")
             if isinstance(seq, int):
                 async with self._lock:
@@ -70,8 +70,14 @@ class BrowserBridge:
                     return
                 self._sent.add(seq)
 
-    async def send_tool_result(self, call_id: str, content: dict) -> None:
-        await self._control("tool_result", id=call_id, content=content)
+    async def send_tool_result(
+        self, call_id: str, content: dict, *,
+        outcome: str = "unknown", verified: bool = False,
+    ) -> None:
+        await self._control(
+            "tool_result", id=call_id, content=content,
+            outcome=outcome, verified=verified,
+        )
 
     async def send_tool_progress(self, call_id: str, note: str) -> None:
         await self._control("tool_progress", id=call_id, note=note[:500])

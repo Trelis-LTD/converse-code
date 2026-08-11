@@ -4,30 +4,26 @@ const sent = [];
 const busy = [];
 const errors = [];
 let clears = 0;
-let timerCallback = null;
 const controller = new globalThis.TypedTurnController({
-  send: async (text) => { sent.push(text); },
+  send: async (text, messageId) => { sent.push({text, messageId}); return {message_id: messageId, accepted: true}; },
   setBusy: (value) => { busy.push(value); },
   clearInput: () => { clears += 1; },
   showError: (detail) => { errors.push(detail); },
-}, {
-  setTimer: (callback) => { timerCallback = callback; return 1; },
-  clearTimer: () => {},
-});
+}, {messageId: () => "message-1"});
 
 if (!await controller.submit(" first ")) throw new Error("first typed turn was rejected");
-if (await controller.submit("second")) throw new Error("concurrent typed turn was accepted");
-if (sent.join(",") !== "first") throw new Error(`unexpected sends: ${sent}`);
-if (controller.handleAsr("voice transcript")) throw new Error("voice ASR acknowledged typed turn");
-if (!controller.handleAsr("first")) throw new Error("canonical ASR did not acknowledge typed turn");
+if (sent.length !== 1 || sent[0].text !== "first" || sent[0].messageId !== "message-1") {
+  throw new Error(`unexpected send: ${JSON.stringify(sent)}`);
+}
+if (controller.handleAsr({input_source: "voice", message_id: "message-1"}, "first")) {
+  throw new Error("voice ASR acknowledged typed turn");
+}
+if (!controller.handleAsr({input_source: "text", message_id: "message-1"}, "first")) {
+  throw new Error("canonical correlated ASR did not confirm typed turn");
+}
 if (clears !== 1 || busy.join(",") !== "true,false") {
   throw new Error("acknowledgement did not clear and unlock the composer");
 }
-
-await controller.submit("retry me");
-timerCallback();
-if (!errors.at(-1).includes("not acknowledged")) throw new Error("timeout was not surfaced");
-if (clears !== 1 || busy.at(-1) !== false) throw new Error("timeout destroyed input or left it busy");
 
 const failed = new globalThis.TypedTurnController({
   send: async () => { throw new Error("offline"); },
@@ -39,23 +35,28 @@ if (await failed.submit("keep me")) throw new Error("failed send reported succes
 if (!errors.at(-1).includes("offline")) throw new Error("send failure was not surfaced");
 
 let resolveDeferred;
-let deferredTimer = null;
 const deferred = new globalThis.TypedTurnController({
-  send: () => new Promise((resolve) => { resolveDeferred = resolve; }),
+  send: (_text, messageId) => new Promise((resolve) => { resolveDeferred = () => resolve({
+    message_id: messageId, accepted: true,
+  }); }),
   setBusy: () => {},
   clearInput: () => {},
   showError: (detail) => { errors.push(detail); },
-}, {
-  setTimer: (callback) => { deferredTimer = callback; return 2; },
-  clearTimer: () => {},
-});
+}, {messageId: () => "slow-1"});
 const inFlight = deferred.submit("slow connection");
 await Promise.resolve();
-if (deferredTimer !== null) throw new Error("ack timer started before send completed");
-if (await deferred.submit("must serialize")) throw new Error("send-in-flight was not serialized");
+if (await deferred.submit("must serialize")) throw new Error("ack-in-flight turn was not serialized");
 resolveDeferred();
-await inFlight;
-if (!deferredTimer) throw new Error("ack timer did not start after send completed");
+if (!await inFlight) throw new Error("accepted deferred acknowledgement failed");
+
+const rejected = new globalThis.TypedTurnController({
+  send: async (_text, messageId) => ({message_id: messageId, accepted: false, reason: "busy"}),
+  setBusy: () => {},
+  clearInput: () => { throw new Error("rejected sends must not clear input"); },
+  showError: (detail) => { errors.push(detail); },
+}, {messageId: () => "rejected-1"});
+if (await rejected.submit("keep rejected")) throw new Error("rejected send reported success");
+if (!errors.at(-1).includes("busy")) throw new Error("broker rejection was not surfaced");
 let resolveSession;
 let currentVoiceRequest = true;
 let micStarts = 0;

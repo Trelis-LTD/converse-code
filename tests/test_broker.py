@@ -115,7 +115,7 @@ async def test_control_result_survives_reconnect_but_stale_audio_drops(mock_brok
     second_run = asyncio.create_task(client.run())
     await asyncio.sleep(0.1)
 
-    assert {"type": "tool_result", "id": "x", "content": {"speak": "late"}} in mock_broker.received
+    assert {"type": "tool_result", "id": "x", "content": {"speak": "late"}, "outcome": "unknown", "verified": False} in mock_broker.received
     assert b"stale audio" not in mock_broker.audio
 
     await client.close()

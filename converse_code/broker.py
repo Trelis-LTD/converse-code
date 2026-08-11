@@ -143,8 +143,14 @@ class BrokerClient:
     async def send_audio(self, pcm16: bytes) -> None:
         await self._send(pcm16)
 
-    async def send_tool_result(self, call_id: str, content: dict) -> None:
-        await self._send({"type": "tool_result", "id": call_id, "content": content}, durable=True)
+    async def send_tool_result(
+        self, call_id: str, content: dict, *,
+        outcome: str = "unknown", verified: bool = False,
+    ) -> None:
+        await self._send({
+            "type": "tool_result", "id": call_id, "content": content,
+            "outcome": outcome, "verified": verified,
+        }, durable=True)
 
     async def send_tool_progress(self, call_id: str, note: str) -> None:
         await self._send(

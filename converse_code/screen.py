@@ -22,6 +22,10 @@ NUMBERED_RE = re.compile(
     r"^\s*(?P<cursor>❯)?\s*[✻✽✶●·*]?\s*(?P<num>\d+)\.\s+(?P<label>\S.*?)\s*$"
 )
 RULE_RE = re.compile(r"^\s*[─━═╭╰╮╯]+\s*$")
+STATUS_MARKER_RE = re.compile(r"^[✻✽✶✢●·*]\s+")
+EMPTY_PLACEHOLDER_RE = re.compile(
+    r'^\s*❯\s*Try\s+["“].+["”]\s*$', re.IGNORECASE,
+)
 SET_MODEL_RE = re.compile(
     r"\bSet model to (?P<model>Default|Opus|Fable|Sonnet|Haiku)\b", re.IGNORECASE,
 )
@@ -73,6 +77,15 @@ def detect_menu(lines: list[str]) -> Menu | None:
     numbered = [(i, m) for i, l in enumerate(cleaned) if (m := NUMBERED_RE.match(l))]
     cursor_on_numbered = [n for n, (_, m) in enumerate(numbered) if m.group("cursor")]
     if cursor_on_numbered:
+        selected_row = numbered[cursor_on_numbered[0]][0]
+        # A newer live composer below the numbered rows proves this menu is scrollback, not a
+        # blocking control. Never press Enter based on historical menu text.
+        if any(
+            CURSOR in cleaned[i] and _neighbor_is_rule(cleaned, i)
+            for i in range(selected_row + 1, len(cleaned))
+        ):
+            cursor_on_numbered = []
+    if cursor_on_numbered:
         # A numbered menu only counts when the cursor sits on one of its rows —
         # numbered lists in Claude's prose plus the prompt ❯ must not match.
         options = [m.group("label") for _, m in numbered]
@@ -104,8 +117,13 @@ def detect_menu(lines: list[str]) -> Menu | None:
         block = cleaned[start : end + 1]
         if len(block) < 2:
             continue
+        title = _title_above(cleaned, start)
+        # Claude's only supported unnumbered control is the model picker.
+        # Prompt history can otherwise resemble an arbitrary option list.
+        if "model" not in title.lower():
+            continue
         options = [l.replace(CURSOR, " ").strip() for l in block]
-        return Menu(title=_title_above(cleaned, start), options=tuple(options), selected=i - start)
+        return Menu(title=title, options=tuple(options), selected=i - start)
     return None
 
 
@@ -150,13 +168,61 @@ def detect_model(lines: list[str]) -> str | None:
     return None
 
 
-def has_empty_composer(lines: list[str]) -> bool:
-    """Whether the structural empty composer is visible, ignoring overlays."""
+def detect_current_model(lines: list[str]) -> str | None:
+    """Read only Claude's current model header or live picker selection.
+
+    Unlike ``detect_model``, this deliberately ignores result rows in scrollback. Those rows are
+    useful history, but cannot prove the model selected for the current invocation.
+    """
+    menu = detect_menu(lines)
+    if menu and "model" in menu.title.lower() and menu.options:
+        selected = menu.options[menu.selected]
+        match = re.search(r"\b(Default|Opus|Fable|Sonnet|Haiku)\b", selected, re.IGNORECASE)
+        if match:
+            return match.group(1).lower()
+    for line in reversed(lines):
+        cleaned = _clean(line)
+        if match := HEADER_MODEL_RE.search(cleaned):
+            return match.group("model").lower()
+        # Welcome/current status header used by recent Claude builds. Requiring the Claude
+        # product suffix prevents ordinary transcript prose about effort from becoming state.
+        if "· Claude" in cleaned and (match := STATUS_MODEL_RE.search(cleaned)):
+            return match.group("model").lower()
+    return None
+
+
+def has_empty_composer(lines: list[str], *, allow_stale_scope: bool = False) -> bool:
+    """Whether the latest prompt row is an active, structurally empty composer."""
     cleaned = [_clean(line) for line in lines]
-    return any(
-        line.strip() == CURSOR and _neighbor_is_rule(cleaned, i)
-        for i, line in enumerate(cleaned)
-    )
+    prompt_rows = [
+        i for i, line in enumerate(cleaned)
+        if line.lstrip().startswith(CURSOR)
+    ]
+    if not prompt_rows:
+        return False
+    index = prompt_rows[-1]
+    prompt = cleaned[index]
+    if prompt.strip() != CURSOR and not EMPTY_PLACEHOLDER_RE.match(prompt):
+        return False
+    # Historical prompt rows have transcript/output below them. A live composer
+    # is followed only by Ink rules or its shortcut footer.
+    tail = cleaned[index + 1:]
+    if allow_stale_scope and is_model_scope_prompt(tail):
+        return True
+    for line in tail:
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if (
+            not stripped
+            or RULE_RE.match(line)
+            or "? for shortcuts" in lowered
+            or "mode on" in lowered
+            or "cooked" in lowered
+            or STATUS_MARKER_RE.match(stripped)
+        ):
+            continue
+        return False
+    return True
 
 
 def is_idle(lines: list[str]) -> bool:
@@ -175,14 +241,6 @@ def session_model_ack_count(lines: list[str], target: str | None = None) -> int:
         1 for match in matches
         if target is None or match.group("model").lower() == target
     )
-
-
-def detect_session_model(lines: list[str]) -> str | None:
-    """Return the latest authoritative session-only model acknowledgement."""
-    for line in reversed(lines):
-        if match := SESSION_MODEL_RE.search(_clean(line)):
-            return match.group("model").lower()
-    return None
 
 
 def _neighbor_is_rule(lines: list[str], idx: int) -> bool:

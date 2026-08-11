@@ -25,8 +25,8 @@ class FakeRouter:
         self.calls = []
         self.cancels = []
 
-    def _status_data(self):
-        return {"state": "idle", "phase": "idle", "active_task": None}
+    def semantic_state(self):
+        return {"phase": "idle", "active_task": None}
 
     async def handle_tool_call(self, call):
         self.calls.append(call)
@@ -62,7 +62,7 @@ async def test_screen_snapshot_exposes_state_screen_and_full_response():
     event = events(stream)[0]
     assert event["type"] == "screen_snapshot"
     assert event["id"] == "s1"
-    assert event["data"]["state"] == "idle"
+    assert event["data"]["phase"] == "idle"
     assert event["data"]["screen"][:2] == ["Claude Code", "❯"]
     assert event["data"]["last_response"] == "Full response text."
 
@@ -131,12 +131,14 @@ async def test_status_and_context_use_canonical_event_names():
     controller = HeadlessController(router, FakeDriver(), bridge)
 
     await controller.status_event({"type": "local", "event": "status", "state": "idle"})
-    await controller.status_event({"type": "local", "event": "injected", "text": "do work"})
+    await controller.status_event({
+        "type": "local", "event": "prompt_accepted", "text": "do work",
+    })
     await bridge.send_context("finished", reply=True)
 
     assert events(stream) == [
         {"type": "status", "state": "idle", "last_response": "Full response text."},
-        {"type": "injected", "text": "do work", "last_response": "Full response text."},
+        {"type": "prompt_accepted", "text": "do work", "last_response": "Full response text."},
         {"type": "inject_context", "text": "finished", "role": "context", "reply": True},
     ]
 

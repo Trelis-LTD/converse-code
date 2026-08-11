@@ -17,7 +17,7 @@ uv run scripts/audio_loopback_probe.py
 
 Chromium receives a generated WAV file through its fake microphone device. The suite verifies page
 boot, terminal-link state, typed-turn canonical echoes and streaming replies, microphone lifecycle,
-mute/unmute, stopping voice while preserving the session, text reuse, injected status rendering,
+mute/unmute, stopping voice while preserving the session, text reuse, accepted-prompt rendering,
 and bridge acknowledgements.
 
 On failure, the suite writes a full-page screenshot and Playwright trace under

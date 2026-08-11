@@ -8,7 +8,7 @@ def test_browser_has_typed_turn_composer():
     assert 'id="textForm"' in PAGE
     assert 'id="textInput"' in PAGE
     assert 'maxlength="2000"' in PAGE
-    assert 'injectContext(text, {role: "user", reply: true})' in PAGE
+    assert 'sendText(text, {messageId: messageId})' in PAGE
 
 
 def test_typed_session_suppresses_greeting_and_reuses_canonical_asr_entry():
