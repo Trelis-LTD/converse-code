@@ -52,7 +52,9 @@ screen snapshots, and shutdown requests on stdin. Screen snapshots include rende
 rows, semantic state, the last full response, and the transcript path. Closing stdin or sending
 `shutdown` ends the wrapped Claude process.
 
-The tool router reports an `idle`, `working`, `canceling`, or `awaiting_input` phase; structured UI distinguishes ordinary menus from the model picker. A `long_task` call is acknowledged as
+The tool router reports an `idle`, `working`, `canceling`, or `awaiting_input` phase. Blocking UI
+is exposed as a structured decision with an exact title, options, selection, and rendered-state
+revision. A `long_task` call is acknowledged as
 deferred once its prompt is confirmed accepted, so no voice turn is held open while Claude works.
 The unit of work is a **working episode**: one run of Claude Code from accepting input until it
 comes to rest (`Stop`, `StopFailure`, or cancellation). `long_task` starts an episode only while
@@ -74,12 +76,15 @@ open. Ordinary completed turns therefore resolve as `outcome: succeeded, verifie
 attribute their report to Claude Code. `verified: true` requires target-specific evidence from the
 current invocation, such as a rendered model change or an observed blocking-UI transition.
 
-The public tool surface is semantic: `long_task`, `steer_task`, `observe_claude`, `set_model`,
-`select_option`, and `end_session`. Arbitrary slash commands and generic keypresses are not exposed.
-Managed cancellation may use Escape internally. `set_model` uses Claude Code's documented
-`/model <alias>` form, verifies a fresh rendered model result, and preserves the observed scope in
-its evidence. Some Claude Code versions save that selection as the default for new sessions; the
-result reports this explicitly instead of claiming a session-only change.
+The public tool surface is semantic: `long_task`, `steer_task`, `observe_claude`, `change_model`,
+`resolve_decision`, and `end_session`. Arbitrary slash commands and generic keypresses are not
+exposed. Ordinary work is prompted through `long_task`. `change_model` is the narrow exception:
+it accepts only documented aliases, runs Claude Code's session-only `/model <alias>` command, and
+requires current-call rendered evidence before claiming success. Managed cancellation may use
+Escape internally. `resolve_decision` accepts only the exact revision and
+option label from the currently rendered blocking state. When the requested row is not selected,
+one call focuses it and returns a new revision; a second revalidates that already-selected row
+immediately before submission. The observed transition is verified afterward.
 
 Prompt injection is acknowledged, not assumed. Text and Enter are separate PTY writes, concurrent
 injections are serialized, and `UserPromptSubmit` confirms that Claude accepted the exact prompt.
@@ -89,13 +94,11 @@ the router stays in `canceling` until that prompt stops or the rendered terminal
 duplicate or late Stop events from it are ignored rather than applied to a newer episode.
 
 Claude menus are read from a rendered terminal emulator, never from raw ANSI output. The detector
-uses structure only and excludes the idle composer and historical prompt cursors. A menu remains
-open only for a genuine user decision; `PermissionRequest` can wake voice but never approves a tool
-automatically. Deterministic internal confirmations are owned by the semantic operation that opened
-them, and unrecognized UI fails closed. When Claude asks whether a model should become the global
-default or apply only to this session, `set_model` chooses session-only; it never intentionally
-requests a default change. If Claude applies the semantic `/model <alias>` command as the default,
-the verified result reports that observed scope explicitly.
+uses structure only and excludes the idle composer and historical prompt cursors. `PermissionRequest`
+can wake voice but never approves a tool automatically. A decision is resolved only after the user
+chooses or when it deterministically confirms the active instruction the user already authorized.
+Every resolution handles one transition; a replacement menu receives a new revision and requires a
+new decision. Stale, changed, and unrecognized UI fails closed.
 
 Claude response prose comes from its JSONL transcript or documented hook payloads, not screen
 scraping. Voice transcript corrections are keyed by Converse turn and barge sequence so revised

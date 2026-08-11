@@ -14,7 +14,6 @@ Calibrated against the real Claude Code TUI, which is full of traps:
 
 import re
 from dataclasses import dataclass
-from typing import Literal
 
 CURSOR = "❯"
 
@@ -40,16 +39,6 @@ HEADER_MODEL_RE = re.compile(
     r"\s+·\s+Claude(?:\s|$)",
     re.IGNORECASE,
 )
-SESSION_MODEL_RE = re.compile(
-    r"\bSet model to (?P<model>Default|Opus|Fable|Sonnet|Haiku)\b.*"
-    r"\bfor this session(?: only)?\b",
-    re.IGNORECASE,
-)
-DEFAULT_MODEL_RE = re.compile(
-    r"\bSet model to (?P<model>Default|Opus|Fable|Sonnet|Haiku)\b.*"
-    r"\bsaved as your default for new sessions\b",
-    re.IGNORECASE,
-)
 KEPT_MODEL_RE = re.compile(
     r"\bKept model as (?P<model>Default|Opus|Fable|Sonnet|Haiku)\b", re.IGNORECASE,
 )
@@ -64,12 +53,6 @@ class Menu:
     def __post_init__(self) -> None:
         if not self.options or not 0 <= self.selected < len(self.options):
             raise ValueError("a menu needs options and an in-range selection")
-
-
-@dataclass(frozen=True)
-class ModelAcknowledgement:
-    model: str
-    scope: Literal["current_session", "default_for_new_sessions", "unspecified"]
 
 
 def _clean(line: str) -> str:
@@ -139,6 +122,30 @@ def detect_menu(lines: list[str]) -> Menu | None:
     return None
 
 
+def menu_context(lines: list[str], menu: Menu) -> list[str]:
+    """Return the current menu's rendered block without scrollback above its boundary."""
+    expected = set(menu.options)
+    option_rows = []
+    for index, line in enumerate(lines):
+        match = NUMBERED_RE.match(_clean(line))
+        if match and match.group("label") in expected:
+            option_rows.append(index)
+    if not option_rows:
+        return []
+    start = min(option_rows)
+    while start > 0:
+        previous = _clean(lines[start - 1])
+        if RULE_RE.match(previous):
+            break
+        if previous.lstrip().startswith(CURSOR) and not NUMBERED_RE.match(previous):
+            break
+        start -= 1
+    end = max(option_rows) + 1
+    while end < len(lines) and not _clean(lines[end]).strip():
+        end += 1
+    return lines[start:end]
+
+
 def is_model_scope_prompt(lines: list[str]) -> bool:
     """Whether Claude is asking if a selected model applies by default or this session."""
     # Search the complete rendered screen: on short terminals the explanatory
@@ -192,6 +199,11 @@ def detect_current_model(lines: list[str]) -> str | None:
         match = re.search(r"\b(Default|Opus|Fable|Sonnet|Haiku)\b", selected, re.IGNORECASE)
         if match:
             return match.group(1).lower()
+    return detect_header_model(lines)
+
+
+def detect_header_model(lines: list[str]) -> str | None:
+    """Read only the active Claude model header, never a picker row or result history."""
     for line in reversed(lines):
         cleaned = _clean(line)
         if match := HEADER_MODEL_RE.search(cleaned):
@@ -231,6 +243,17 @@ def has_empty_composer(lines: list[str], *, allow_stale_scope: bool = False) -> 
             or "mode on" in lowered
             or "cooked" in lowered
             or STATUS_MARKER_RE.match(stripped)
+            # Claude's interrupted repaint can interleave a horizontal rule with its footer,
+            # producing fragments such as "manual mod──on" and "Esc─again to─clear".
+            # Require substantial rule chrome as well as footer vocabulary so ordinary response
+            # prose containing these words is not mistaken for an idle composer.
+            or (
+                line.count("─") >= 4
+                and (
+                    "manual mod" in lowered
+                    or ("esc" in lowered and "clear" in lowered)
+                )
+            )
         ):
             continue
         return False
@@ -240,37 +263,6 @@ def has_empty_composer(lines: list[str], *, allow_stale_scope: bool = False) -> 
 def is_idle(lines: list[str]) -> bool:
     """Whether Claude's empty composer is ready and no scope picker blocks it."""
     return not is_model_scope_prompt(lines) and has_empty_composer(lines)
-
-
-def session_model_ack_count(lines: list[str], target: str | None = None) -> int:
-    """Count visible session-only model acknowledgements, optionally by model."""
-    return sum(
-        1 for ack in model_acknowledgements(lines, target)
-        if ack.scope == "current_session"
-    )
-
-
-def model_acknowledgements(
-    lines: list[str], target: str | None = None,
-) -> tuple[ModelAcknowledgement, ...]:
-    """Parse rendered model-change results without treating them as current state."""
-    acknowledgements = []
-    for line in lines:
-        cleaned = _clean(line)
-        match = SET_MODEL_RE.search(cleaned)
-        if not match:
-            continue
-        model = match.group("model").lower()
-        if target is not None and model != target:
-            continue
-        if SESSION_MODEL_RE.search(cleaned):
-            scope = "current_session"
-        elif DEFAULT_MODEL_RE.search(cleaned):
-            scope = "default_for_new_sessions"
-        else:
-            scope = "unspecified"
-        acknowledgements.append(ModelAcknowledgement(model, scope))
-    return tuple(acknowledgements)
 
 
 def _neighbor_is_rule(lines: list[str], idx: int) -> bool:

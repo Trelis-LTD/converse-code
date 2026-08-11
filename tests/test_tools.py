@@ -218,7 +218,7 @@ async def test_long_task_refused_while_menu_open(router, fake_driver, fake_sende
     await router.handle_tool_call({"id": "c1", "name": "long_task", "args": {"request": "x"}})
     assert fake_driver.injected == []
     _, content = fake_sender.results[0]
-    assert "menu" in content["speak"].lower()
+    assert "decision" in content["speak"].lower()
 
 
 async def test_long_task_waits_for_matching_prompt_submission_hook(
@@ -454,7 +454,7 @@ async def test_prompt_correlated_cancel_blocks_new_ui_work_and_ignores_late_stop
 
     assert router.semantic_state()["phase"] == "canceling"
     await router.handle_tool_call(
-        {"id": "model", "name": "set_model", "args": {"model": "sonnet"}}
+        {"id": "new", "name": "long_task", "args": {"request": "check the model"}}
     )
     assert fake_driver.injected == ["open the game"]
     assert "still stopping" in fake_sender.results[-1][1]["speak"].lower()
@@ -532,6 +532,38 @@ async def test_cancel_can_settle_from_verified_idle_ui_without_stop_hook(
     assert router._needs_ready_gate is True
 
 
+async def test_cancel_settles_on_real_corrupted_idle_footer_without_stop_hook(
+    router, fake_driver,
+):
+    fake_driver.auto_ack = False
+    router.CANCEL_POLL_S = 0.01
+    router.CANCEL_GRACE_S = 0.01
+    router.CANCEL_IDLE_SAMPLES = 2
+    task = asyncio.create_task(router.handle_tool_call(
+        {"id": "old", "name": "long_task", "args": {"request": "long task"}}
+    ))
+    await asyncio.sleep(0.02)
+    await router.on_hook("user_prompt_submit", {
+        "prompt": "long task", "prompt_id": "prompt-old",
+    })
+    await router.handle_tool_cancel({"type": "tool_cancel", "id": "old"})
+    await task
+    fake_driver.lines = [
+        "❯\xa0", "────────────────",
+        "  ⏸ manual mode on · ? for shortcuts · ────────────────",
+        "──⏸─manual mod──on    ─    ─   ─    ─   ─  ─     ─       Esc─again to─clear──",
+    ]
+
+    deadline = asyncio.get_running_loop().time() + 1
+    while router.semantic_state()["phase"] != "idle" and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+
+    state = router.semantic_state()
+    assert state["phase"] == "idle"
+    assert state["last_action"]["status"] == "verified"
+    assert state["last_action"]["effect"] == "idle_ui_observed"
+
+
 async def test_stop_hook_wakes_voice_for_terminal_typed_work(router, fake_sender):
     await router.on_hook("stop", {
         "transcript_path": str(router.transcript_path),
@@ -601,11 +633,13 @@ def test_manifest_exposes_only_semantic_controls():
 
     tools = {tool["name"]: tool for tool in manifest()}
     assert set(tools) == {
-        "long_task", "steer_task", "observe_claude", "set_model", "select_option", "end_session",
+        "long_task", "steer_task", "observe_claude", "change_model",
+        "resolve_decision", "end_session",
     }
     assert "contextual requests to open or close" in tools["long_task"]["description"]
     assert "never call long_task merely to inspect" in tools["observe_claude"]["description"]
     assert "Never use this to close a file" in tools["end_session"]["description"]
+    assert tools["resolve_decision"]["parameters"]["required"] == ["revision", "option"]
 
 
 async def test_observe_claude_returns_authoritative_menu_state(
@@ -615,512 +649,17 @@ async def test_observe_claude_returns_authoritative_menu_state(
     await router.handle_tool_call({"id": "c1", "name": "observe_claude", "args": {}})
 
     content = fake_sender.results[0][1]
-    assert "model picker" in content["speak"].lower()
+    assert "blocking decision" in content["speak"].lower()
     assert content["data"]["phase"] == "awaiting_input"
-    assert content["data"]["ui"] == {
+    ui = content["data"]["ui"]
+    revision = ui.pop("revision")
+    assert revision
+    assert ui == {
         "kind": "model_picker",
         "title": "Select model:",
         "options": ["Fable ✔", "Sonnet", "Haiku"],
         "selected": "Fable ✔",
     }
-
-
-async def test_set_model_uses_documented_direct_command(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = ["Haiku 4.5 · Claude", " > ", ""]
-
-    async def advance_model_ui():
-        while fake_driver.injected != ["/model sonnet"]:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            "  ⎿  Set model to Sonnet 5 for this session",
-            "Sonnet 5 · Claude", " > ",
-        ]
-
-    side = asyncio.create_task(advance_model_ui())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "sonnet"}}
-    )
-    await side
-
-    content = fake_sender.results[0][1]
-    assert content["data"]["last_action"] == {
-        "action": "set_model", "status": "verified", "effect": "model_changed",
-        "completed": True, "from": "haiku", "to": "sonnet",
-        "postcondition_verified": True,
-        "evidence": {"kind": "current_model_header", "model": "sonnet"},
-    }
-    assert fake_driver.injected == ["/model sonnet"]
-    assert fake_driver.keys == []
-
-
-async def test_direct_model_verifies_fresh_default_acknowledgement(
-    router, fake_driver, fake_sender,
-):
-    """Reproduce Claude Code's default-saving acknowledgement for `/model opus`."""
-    fake_driver.lines = ["Sonnet 5 · Claude", " > ", ""]
-
-    async def advance_model_ui():
-        while fake_driver.injected != ["/model opus"]:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            "❯ /model opus",
-            "  ⎿  Set model to Opus 5 and saved as your default for new sessions",
-            " > ",
-        ]
-
-    side = asyncio.create_task(advance_model_ui())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "opus"}}
-    )
-    await side
-
-    result = fake_sender.results[-1][1]
-    assert fake_driver.injected == ["/model opus"]
-    assert fake_driver.keys == []
-    assert result["speak"] == (
-        "Verified that Claude Code changed from sonnet to opus and saved it as the default "
-        "for new sessions."
-    )
-    assert result["data"]["last_action"] == {
-        "action": "set_model", "status": "verified", "effect": "model_changed",
-        "completed": True, "from": "sonnet", "to": "opus",
-        "postcondition_verified": True,
-        "evidence": {
-            "kind": "fresh_model_ack", "model": "opus",
-            "scope": "default_for_new_sessions",
-        },
-    }
-    assert fake_sender.result_metadata[-1] == {"outcome": "succeeded", "verified": True}
-
-
-async def test_direct_model_ignores_historical_default_acknowledgement(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = [
-        "❯ /model opus",
-        "  ⎿  Set model to Opus 5 and saved as your default for new sessions",
-        "Sonnet 5 · Claude", " > ",
-    ]
-
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "opus"}}
-    )
-
-    result = fake_sender.results[-1][1]
-    assert fake_driver.injected == ["/model opus"]
-    assert result["data"]["last_action"]["status"] == "failed"
-    assert fake_sender.result_metadata[-1] == {"outcome": "failed", "verified": False}
-
-
-async def test_direct_model_rejects_fresh_acknowledgement_for_wrong_model(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = ["Sonnet 5 · Claude", " > ", ""]
-
-    async def advance_model_ui():
-        while fake_driver.injected != ["/model opus"]:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            "❯ /model opus",
-            "  ⎿  Set model to Haiku 4.5 and saved as your default for new sessions",
-            " > ",
-        ]
-
-    side = asyncio.create_task(advance_model_ui())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "opus"}}
-    )
-    await side
-
-    result = fake_sender.results[-1][1]
-    assert result["data"]["last_action"]["status"] == "failed"
-    assert fake_sender.result_metadata[-1] == {"outcome": "failed", "verified": False}
-
-
-async def test_direct_model_ignores_historical_target_ack(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = [
-        "  ⎿  Set model to Sonnet 5 for this session",
-        "Haiku 4.5 · Claude", " > ",
-    ]
-
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "sonnet"}}
-    )
-
-    result = fake_sender.results[-1][1]
-    assert fake_driver.injected == ["/model sonnet"]
-    assert result["data"]["last_action"]["status"] == "failed"
-    assert fake_sender.result_metadata[-1] == {"outcome": "failed", "verified": False}
-
-
-async def test_direct_model_command_handles_cached_context_confirmation(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = ["Opus 5 · Claude", " > ", ""]
-
-    async def advance_model_ui():
-        while fake_driver.injected != ["/model sonnet"]:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            " This conversation is cached for the current model.",
-            " ❯ 1. Yes, switch to Sonnet 5",
-            "   2. No, go back",
-            "",
-        ]
-        while fake_driver.keys.count("enter") < 1:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            "  ⎿  Set model to Sonnet 5 for this session",
-            "Sonnet 5 · Claude", " > ",
-        ]
-
-    side = asyncio.create_task(advance_model_ui())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "sonnet"}}
-    )
-    await side
-
-    content = fake_sender.results[0][1]
-    assert content["data"]["last_action"] == {
-        "action": "set_model", "status": "verified", "effect": "model_changed",
-        "completed": True, "from": "opus", "to": "sonnet",
-        "postcondition_verified": True,
-        "evidence": {"kind": "current_model_header", "model": "sonnet"},
-    }
-    assert fake_driver.injected == ["/model sonnet"]
-    assert fake_driver.keys == ["enter"]
-
-
-async def test_direct_model_confirmation_preserves_default_scope(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = ["Sonnet 5 · Claude", " > ", ""]
-
-    async def advance_model_ui():
-        while fake_driver.injected != ["/model opus"]:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            " This conversation is cached for the current model.",
-            " ❯ 1. Yes, switch to Opus 5",
-            "   2. No, go back",
-            "",
-        ]
-        while fake_driver.keys.count("enter") < 1:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            "❯ /model opus",
-            "  ⎿  Set model to Opus 5 and saved as your default for new sessions",
-            " > ",
-        ]
-
-    side = asyncio.create_task(advance_model_ui())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "opus"}}
-    )
-    await side
-
-    result = fake_sender.results[-1][1]
-    assert result["data"]["last_action"]["status"] == "verified"
-    assert result["data"]["last_action"]["evidence"] == {
-        "kind": "fresh_model_ack", "model": "opus",
-        "scope": "default_for_new_sessions",
-    }
-    assert fake_driver.keys == ["enter"]
-    assert fake_sender.result_metadata[-1] == {"outcome": "succeeded", "verified": True}
-
-
-async def test_already_selected_model_still_settles_session_scope(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = [
-        " Select model:", " ❯ Haiku ✔", "   Sonnet",
-        "Enter to set as default · s to use this session only · Esc to cancel",
-    ]
-
-    async def show_scope_after_current_selection():
-        while "s" not in fake_driver.keys:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = ["  ⎿  Set model to Haiku 4.5 for this session only", " > "]
-
-    side = asyncio.create_task(show_scope_after_current_selection())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "haiku"}}
-    )
-    await side
-
-    result = fake_sender.results[-1][1]
-    assert result["data"]["last_action"]["effect"] == "already_selected"
-    assert result["data"]["phase"] == "idle"
-    assert fake_driver.keys == ["s"]
-
-
-async def test_unchanged_scope_screen_cannot_claim_session_selection(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = [
-        "  ⎿  Set model to Haiku 4.5 for this session only",
-        " Select model:", " ❯ Haiku ✔", "   Sonnet",
-        "Enter to set as default · s to use this session only · Esc to cancel",
-    ]
-
-    async def ignore_scope_keys():
-        while "s" not in fake_driver.keys:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            "  ⎿  Set model to Haiku 4.5 for this session only",
-            "❯ /model", "  ⎿  Kept model as Haiku 4.5",
-            "────────────────", "❯", "────────────────",
-            "Enter to set as default · s to use this session only · Esc to cancel",
-        ]
-
-    side = asyncio.create_task(ignore_scope_keys())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "haiku"}}
-    )
-    await side
-
-    result = fake_sender.results[-1][1]
-    assert result["data"]["last_action"]["effect"] == "scope_prompt_not_closed"
-    assert result["data"]["last_action"]["completed"] is False
-    assert fake_driver.keys == ["s", "escape"]
-
-
-async def test_set_model_uses_session_only_scope_prompt(router, fake_driver, fake_sender):
-    fake_driver.lines = [
-        " Select model:", " ❯ Haiku ✔", "   Sonnet",
-        "Enter to set as default · s to use this session only · Esc to cancel",
-    ]
-
-    async def advance_model_ui():
-        while "s" not in fake_driver.keys:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            "❯ /model",
-            "  ⎿  Set model to Sonnet 5 for this session",
-            " > ",
-        ]
-
-    side = asyncio.create_task(advance_model_ui())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "sonnet"}}
-    )
-    await side
-
-    content = fake_sender.results[0][1]
-    assert content["data"]["last_action"] == {
-        "action": "set_model", "status": "verified", "effect": "model_changed",
-        "completed": True, "from": "haiku", "to": "sonnet",
-        "postcondition_verified": True,
-        "evidence": {"kind": "fresh_session_model_ack", "model": "sonnet"},
-    }
-    assert fake_sender.result_metadata[-1] == {
-        "outcome": "succeeded", "verified": True,
-    }
-    assert fake_driver.injected == []
-    assert fake_driver.keys == ["down", "s"]
-
-
-
-async def test_session_scope_action_closes_picker_with_escape(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = [
-        " Select model:", " ❯ Haiku ✔", "   Sonnet",
-        "Enter to set as default · s to use this session only · Esc to cancel",
-    ]
-
-    async def keep_scope_open():
-        while "s" not in fake_driver.keys:
-            await asyncio.sleep(0.01)
-        scope = [
-            " Select model:", "   Haiku ✔", " ❯ Sonnet",
-            "Enter to set as default · s to use this session only · Esc to cancel",
-        ]
-        fake_driver.lines = scope
-        while "escape" not in fake_driver.keys:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = ["  ⎿  Set model to Sonnet 5 for this session", " > "]
-
-    side = asyncio.create_task(keep_scope_open())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "sonnet"}}
-    )
-    await side
-
-    result = fake_sender.results[-1][1]
-    assert result["data"]["last_action"]["effect"] == "model_changed"
-    assert fake_driver.injected == []
-    assert fake_driver.keys == ["down", "s", "escape"]
-
-
-async def test_legacy_model_confirmation_then_session_scope(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = [" Select model:", " ❯ Opus ✔", "   Haiku", ""]
-
-    async def advance_both_confirmations():
-        while fake_driver.keys.count("enter") < 1:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            " This conversation is cached for the current model.",
-            " ❯ 1. Yes, switch to Haiku 4.5",
-            "   2. No, go back",
-            "",
-        ]
-        while fake_driver.keys.count("enter") < 2:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            "────────────────────────────────────────",
-            "❯",
-            "────────────────────────────────────────",
-            "Enter to set as default · s to use this session only · Esc to cancel",
-        ]
-        while "s" not in fake_driver.keys:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = ["  ⎿  Set model to Haiku 4.5 for this session", " > "]
-
-    side = asyncio.create_task(advance_both_confirmations())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "haiku"}}
-    )
-    await side
-
-    result = fake_sender.results[-1][1]
-    assert result["data"]["last_action"]["to"] == "haiku"
-    assert result["data"]["last_action"]["status"] == "verified"
-    assert fake_driver.keys == ["down", "enter", "enter", "s"]
-async def test_model_scope_prompt_blocks_new_work_and_is_observable(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = [
-        "  ⎿  Kept model as Haiku 4.5",
-        "────────────────────────────────────────",
-        "❯",
-        "────────────────────────────────────────",
-        "Enter to set as default · s to use this session only · Esc to cancel",
-    ]
-    await router.handle_tool_call({"id": "observe", "name": "observe_claude", "args": {}})
-    observed = fake_sender.results[-1][1]
-    assert observed["data"]["phase"] == "awaiting_input"
-    assert observed["data"]["ui"]["kind"] == "model_scope_prompt"
-
-    await router.handle_tool_call({
-        "id": "task", "name": "long_task", "args": {"request": "Do not inject this"},
-    })
-    blocked = fake_sender.results[-1][1]
-    assert "model scope" in blocked["speak"].lower()
-    assert fake_driver.injected == []
-async def test_legacy_picker_does_not_reuse_historical_target_ack(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = [
-        "  ⎿  Set model to Haiku 4.5 for this session",
-        " Select model:", " ❯ Fable ✔", "   Haiku", "",
-    ]
-
-    async def fail_to_change():
-        while fake_driver.keys.count("enter") < 1:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            "  ⎿  Set model to Haiku 4.5 for this session",
-            "Fable 5 · Claude", " > ",
-        ]
-        while fake_driver.injected != ["/model"]:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [" Select model:", " ❯ Fable ✔", "   Haiku", ""]
-        while "escape" not in fake_driver.keys:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [" > ", ""]
-
-    side = asyncio.create_task(fail_to_change())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "set_model", "args": {"model": "haiku"}}
-    )
-    await side
-
-    content = fake_sender.results[0][1]
-    assert "couldn't verify" in content["speak"].lower()
-    assert content["data"]["last_action"]["status"] == "failed"
-    assert content["data"]["last_action"]["completed"] is False
-
-
-async def test_select_option_arrow_math(router, fake_driver, fake_sender):
-    fake_driver.lines = [" Select model:", " ❯ Opus", "   Sonnet", "   Haiku", ""]
-
-    async def close_menu():
-        while "enter" not in fake_driver.keys:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = ["────", "❯", "────"]
-
-    side = asyncio.create_task(close_menu())
-    await router.handle_tool_call({"id": "c1", "name": "select_option", "args": {"option": "haiku"}})
-    await side
-    assert fake_driver.keys == ["down", "down", "enter"]
-    assert "Chose Haiku" in fake_sender.results[0][1]["speak"]
-
-
-async def test_select_option_never_enters_after_menu_closes(
-    router, fake_driver, fake_sender,
-):
-    fake_driver.lines = [" Select model:", " ❯ Opus", "   Sonnet", "   Haiku", ""]
-
-    async def close_after_first_navigation_key():
-        while "down" not in fake_driver.keys:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = ["────", "❯", "────"]
-
-    side = asyncio.create_task(close_after_first_navigation_key())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "select_option", "args": {"option": "haiku"}}
-    )
-    await side
-
-    assert "enter" not in fake_driver.keys
-    assert "menu changed" in fake_sender.results[-1][1]["speak"].lower()
-    assert fake_sender.result_metadata[-1] == {"outcome": "failed", "verified": False}
-
-
-async def test_selecting_model_confirms_second_phase(router, fake_driver, fake_sender):
-    """Claude Code 2.1.226 asks for a second confirmation when a model change
-    affects speed/token use. The explicit model selection authorizes that exact
-    confirmation; leaving it open makes the next voice action one phase behind."""
-    fake_driver.lines = [" Select model:", " ❯ Opus", "   Sonnet", "   Haiku", ""]
-
-    async def advance_menus():
-        while fake_driver.keys.count("enter") < 1:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = [
-            # The screen parser intentionally uses the line immediately above
-            # the first option as its title; Claude renders explanatory copy
-            # there, not the top-level "Switch model?" heading.
-            " This conversation is cached for the current model.",
-            " ❯ 1. Yes, switch to Haiku 4.5",
-            "   2. No, go back",
-            "",
-        ]
-        while fake_driver.keys.count("enter") < 2:
-            await asyncio.sleep(0.01)
-        fake_driver.lines = ["────", "❯", "────"]
-
-    side = asyncio.create_task(advance_menus())
-    await router.handle_tool_call(
-        {"id": "c1", "name": "select_option", "args": {"option": "haiku"}}
-    )
-    await side
-
-    assert fake_driver.keys == ["down", "down", "enter", "enter"]
-    result = fake_sender.results[0][1]
-    assert "confirmed" in result["speak"].lower()
-    assert result["data"]["phase"] == "idle"
-
-
-async def test_select_option_without_menu(router, fake_sender):
-    await router.handle_tool_call({"id": "c1", "name": "select_option", "args": {"option": "yes"}})
-    assert "no menu" in fake_sender.results[0][1]["speak"].lower()
 
 
 async def test_end_session_arms_browser_close_after_goodbye(router, fake_sender):
@@ -1149,7 +688,7 @@ async def test_cancel_before_prompt_id_remains_non_idle_until_ui_settles(
 
     assert router.semantic_state()["phase"] == "canceling"
     await router.handle_tool_call({
-        "id": "new", "name": "set_model", "args": {"model": "sonnet"},
+        "id": "new", "name": "long_task", "args": {"request": "switch to Sonnet"},
     })
     assert "still stopping" in fake_sender.results[-1][1]["speak"]
 

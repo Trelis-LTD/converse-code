@@ -113,10 +113,14 @@ async def test_full_local_tool_loop(tmp_path):
                 partial = await receive_action(ws, "tool_partial_result", "t2")
                 assert partial["reply"] is True
                 assert "needs input" in partial["content"]["speak"]
+                revision = router.semantic_state()["ui"]["revision"]
 
                 await ws.send_json({
                     "type": "local", "event": "tool_call",
-                    "call": {"id": "t3", "name": "select_option", "args": {"option": "yes"}},
+                    "call": {
+                        "id": "t3", "name": "resolve_decision",
+                        "args": {"revision": revision, "option": "Yes"},
+                    },
                 })
                 selected = await receive_action(ws, "tool_result", "t3")
                 assert "Chose Yes" in selected["content"]["speak"]
