@@ -50,6 +50,39 @@ def test_screen_filter_drops_claude_terminal_queries_across_chunks():
         b"beforeafter\x1b[31mred\x1b[0m"
     )
 
+def test_screen_filter_tracks_kitty_all_keys_mode():
+    filter_ = _ScreenByteFilter()
+    assert filter_.feed(b"\x1b[>9u") == b""
+    assert filter_.keyboard_flags == 9
+    assert filter_.feed(b"\x1b[<u") == b""
+    assert filter_.keyboard_flags == 0
+
+
+def test_send_key_encodes_plain_shortcut_in_kitty_all_keys_mode():
+    host = ClaudeHost(["unused"], attach_terminal=False)
+    writes = []
+    host._master_fd = 1
+    host._write = writes.append
+
+    host.send_key("s")
+    host.send_key("escape")
+    host._screen_filter.feed(b"\x1b[>9u")
+    host.send_key("s")
+    host.send_key("escape")
+    host.send_key("up")
+    host.send_key("down")
+    host._screen_filter.feed(b"\x1b[?1h")
+    host.send_key("up")
+    host.send_key("down")
+    host._screen_filter.feed(b"\x1b[?1l")
+
+    assert writes == [
+        b"s", b"\x1b", b"\x1b[115u", b"\x1b",
+        b"\x1b[A", b"\x1b[B", b"\x1bOA", b"\x1bOB",
+    ]
+    assert host._screen_filter.application_cursor_keys is False
+
+
 def test_sanitize_caps_length():
     assert len(sanitize("x" * (MAX_INJECT_CHARS + 500))) == MAX_INJECT_CHARS
 

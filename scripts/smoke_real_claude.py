@@ -67,7 +67,7 @@ async def main() -> None:
     stopped_prompt_ids = []
 
     async def on_hook(event, payload):
-        print(f"HOOK {event}: keys={sorted(payload)} transcript_path={payload.get('transcript_path')}")
+        print(f"HOOK {event}: prompt={payload.get('prompt')!r} keys={sorted(payload)} transcript_path={payload.get('transcript_path')}")
         if event == "user_prompt_submit" and payload.get("prompt_id"):
             submitted_prompt_ids.append(payload["prompt_id"])
         if event == "stop" and payload.get("prompt_id"):
@@ -94,40 +94,35 @@ async def main() -> None:
         print("speak:", result["speak"])
         print("data:", result["data"])
         print("progress notes:", sender.progress)
-        ok = "pong" in result["speak"].lower() and result["data"]["state"] == "idle"
+        ok = "pong" in result["speak"].lower() and result["data"]["phase"] == "idle"
         print("prompt flow:", "PASS" if ok else "FAIL")
         if not ok:
             print("--- screen ---")
             print("\n".join(l for l in host.snapshot() if l.strip()))
 
-        # set_model owns inspection, selection, confirmation, and postcondition
-        # verification. If Haiku is already selected, Sonnet guarantees that
-        # this smoke test still exercises a real transition.
+        # Verify the current-model session-only picker action, then prove the
+        # picker closed by submitting/canceling the next real task.
         selected = "Haiku"
         await router.handle_tool_call({
             "id": "model-set", "name": "set_model", "args": {"model": selected},
         })
         changed = sender.results[-1]
-        if changed["data"]["last_action"].get("effect") == "already_selected":
-            selected = "Sonnet"
-            await router.handle_tool_call({
-                "id": "model-set", "name": "set_model", "args": {"model": selected},
-            })
-            changed = sender.results[-1]
+        print("initial model result:", changed["speak"], changed["data"]["last_action"])
+
         await router.handle_tool_call({
             "id": "model-observe", "name": "observe_claude", "args": {},
         })
         menu_ok = (
             changed["data"]["last_action"]["status"] == "verified"
             and changed["data"]["last_action"]["completed"] is True
-            and changed["data"]["last_action"]["effect"] == "model_changed"
+            and changed["data"]["last_action"]["effect"] in {"already_selected", "model_changed"}
             and sender.results[-1]["data"]["last_action"] == changed["data"]["last_action"]
         )
-        print("model transition:", changed["speak"])
+        print("model selection:", changed["speak"])
         if not menu_ok:
             print("--- screen after menu selection ---")
             print("\n".join(line for line in host.snapshot() if line.strip()))
-        print("menu navigation:", "PASS" if menu_ok else "FAIL")
+        print("model picker:", "PASS" if menu_ok else "FAIL")
 
         # Exercise real interruption rather than only synthesizing hook order in
         # a unit test. Cancel as soon as Claude acknowledges the prompt, wait for

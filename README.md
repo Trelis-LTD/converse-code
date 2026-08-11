@@ -140,11 +140,20 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security b
 ```bash
 uv sync
 uv run pytest -q
+uv run playwright install chromium
+uv run scripts/browser_e2e.py       # real Chromium + deterministic microphone
+uv run scripts/audio_loopback_probe.py  # Xvfb + private PulseAudio output capture
 uv run scripts/smoke_real_claude.py  # real Claude CLI, isolated temporary project
 ```
 
 The real smoke test covers fresh-folder trust, auto mode, prompt acknowledgement and completion,
 plus opening and selecting the `/model` menu. It consumes a small Claude request.
+
+The browser suite drives the shipped page in Chromium against a deterministic fake SDK, including
+real microphone permissions and WAV input; it does not replace live SDK/broker evaluation. Failed
+scenarios retain screenshots and traces. See
+[docs/BROWSER_TESTING.md](docs/BROWSER_TESTING.md) for setup and the opt-in Linux virtual-output
+loopback used for deeper audio diagnostics.
 
 ## License
 

@@ -42,6 +42,8 @@ class _ScreenByteFilter:
     def __init__(self):
         self._state = "normal"
         self._sequence = bytearray()
+        self.keyboard_flags = 0
+        self.application_cursor_keys = False
 
     def feed(self, data: bytes) -> bytes:
         output = bytearray()
@@ -73,7 +75,20 @@ class _ScreenByteFilter:
                     self._state = "normal"
                 elif 0x40 <= byte <= 0x7E:
                     params = self._sequence[2:-1]
-                    if not (byte == ord("u") and params[:1] in (b"<", b">")):
+                    if params == b"?1" and byte in (ord("h"), ord("l")):
+                        self.application_cursor_keys = byte == ord("h")
+                    keyboard_control = (
+                        byte == ord("u") and params[:1] in (b"<", b">")
+                    )
+                    if keyboard_control:
+                        if params[:1] == b">":
+                            try:
+                                self.keyboard_flags = int(params[1:].split(b";", 1)[0] or b"0")
+                            except ValueError:
+                                self.keyboard_flags = 0
+                        else:
+                            self.keyboard_flags = 0
+                    else:
                         output.extend(self._sequence)
                     self._sequence.clear()
                     self._state = "normal"
@@ -116,6 +131,7 @@ KEYMAP = {
     "tab": b"\t",
     "shift-tab": b"\x1b[Z",
     "ctrl-c": b"\x03",
+    "s": b"s",
 }
 
 
@@ -164,6 +180,13 @@ class ClaudeHost:
             # The wrapped claude is a fresh top-level session; drop the markers.
             env.pop("CLAUDE_CODE_CHILD_SESSION", None)
             env.pop("CLAUDECODE", None)
+            if not self.attach_terminal:
+                # A detached child owns a plain PTY, even when converse-code was
+                # launched from tmux. Inheriting tmux identity makes Claude emit
+                # focus/keyboard sequences for a terminal that is not present.
+                env.pop("TMUX", None)
+                env.pop("TMUX_PANE", None)
+                env["TERM"] = "xterm-256color"
             try:
                 os.execvpe(self.argv[0], self.argv, env)
             except OSError:
@@ -342,7 +365,16 @@ class ClaudeHost:
             asyncio.get_running_loop().call_later(INJECT_SUBMIT_DELAY_S, self._start_next_injection)
 
     def send_key(self, name: str) -> None:
-        self._write(KEYMAP[name])
+        data = KEYMAP[name]
+        # Kitty keyboard protocol flag 8 asks the terminal to encode even plain
+        # printable keys as CSI-u. Claude 2.1.227 uses this for single-key modal
+        # choices such as the model-scope `s` shortcut.
+        flags = self._screen_filter.keyboard_flags
+        if name in {"up", "down"} and self._screen_filter.application_cursor_keys:
+            data = b"\x1bOA" if name == "up" else b"\x1bOB"
+        elif name == "s" and flags & 8:
+            data = b"\x1b[115u"
+        self._write(data)
 
     def _write(self, data: bytes) -> None:
         if self._master_fd is None:

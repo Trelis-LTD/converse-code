@@ -6,8 +6,8 @@
       options = options || {};
       this.view = view;
       this.timeoutMs = options.timeoutMs || 15000;
-      this.setTimer = options.setTimer || setTimeout;
-      this.clearTimer = options.clearTimer || clearTimeout;
+      this.setTimer = options.setTimer || ((callback, delay) => setTimeout(callback, delay));
+      this.clearTimer = options.clearTimer || ((timer) => clearTimeout(timer));
       this.pending = null;
     }
 

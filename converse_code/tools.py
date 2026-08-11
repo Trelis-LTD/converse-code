@@ -175,6 +175,7 @@ class ToolRouter:
         self._canceled_prompt_ids: deque[str] = deque(maxlen=128)
         self._canceling_prompt_ids: set[str] | None = None
         self._known_model: ModelObservation | None = None
+        self._model_scope_dismissed = False
         self._cancel_watch_task: asyncio.Task | None = None
         self.on_status = None  # async callback(dict) → browser tab
 
@@ -463,7 +464,11 @@ class ToolRouter:
         escape_retries = 0
         last_escape = 0.0
         while self._canceling_prompt_ids is not None:
-            if screenmod.is_idle(self.driver.snapshot()):
+            snapshot = self.driver.snapshot()
+            idle = screenmod.is_idle(snapshot) or (
+                self._model_scope_dismissed and screenmod.has_empty_composer(snapshot)
+            )
+            if idle:
                 idle_samples += 1
                 if idle_samples >= self.CANCEL_IDLE_SAMPLES:
                     settled_prompt_ids = self._canceling_prompt_ids
@@ -497,19 +502,27 @@ class ToolRouter:
     def menu(self) -> screenmod.Menu | None:
         return screenmod.detect_menu(self.driver.snapshot())
 
+    def _model_scope_visible(self, lines: list[str] | None = None) -> bool:
+        lines = self.driver.snapshot() if lines is None else lines
+        visible = screenmod.is_model_scope_prompt(lines)
+        if not visible:
+            self._model_scope_dismissed = False
+        return visible and not self._model_scope_dismissed
+
     def state(self) -> str:
         if self._canceling_prompt_ids is not None:
             return "canceling"
-        if self.menu():
+        if self.menu() or self._model_scope_visible():
             return "menu"
         return "working" if self.working else "idle"
 
     def semantic_state(self) -> dict:
         lines = self.driver.snapshot()
         menu = screenmod.detect_menu(lines)
+        model_scope = self._model_scope_visible(lines)
         if self._canceling_prompt_ids is not None:
             phase = "canceling"
-        elif menu:
+        elif menu or model_scope:
             phase = "awaiting_input"
         else:
             phase = "working" if self.working else "idle"
@@ -520,6 +533,13 @@ class ToolRouter:
                 "title": menu.title,
                 "options": list(menu.options),
                 "selected": menu.options[menu.selected] if menu.options else "",
+            }
+        elif model_scope:
+            ui = {
+                "kind": "model_scope_prompt",
+                "title": "Apply selected model",
+                "options": ["Set as default", "Use this session only", "Cancel"],
+                "selected": "",
             }
         visible_model = None
         if menu and self._is_model_menu(menu) and menu.options:
@@ -578,6 +598,10 @@ class ToolRouter:
         if request.startswith("/"):
             return self._result(
                 "That looks like a slash command — use the command tool for it."
+            )
+        if self._model_scope_visible():
+            return self._result(
+                "Claude Code needs its model scope answered before starting another task."
             )
         menu = self.menu()
         if menu:
@@ -648,6 +672,10 @@ class ToolRouter:
             )
         if request.startswith("/"):
             return self._result("That looks like a slash command — use the command tool for it.")
+        if self._model_scope_visible():
+            return self._result(
+                "Claude Code needs its model scope answered before it can be steered."
+            )
         menu = self.menu()
         if menu:
             return self._result(
@@ -679,6 +707,11 @@ class ToolRouter:
                 f"Claude Code is awaiting input in {ui['title'] or 'a menu'}. "
                 f"Currently selected: {ui['selected'] or 'unknown'}."
             )
+        elif ui["kind"] == "model_scope_prompt":
+            speak = (
+                "Claude Code is asking whether the selected model should be the default or apply "
+                "only to this session."
+            )
         elif phase == "working":
             speak = f"Claude Code is working on: {snapshot['active_task'] or 'the active task'}."
         elif phase == "canceling":
@@ -702,11 +735,19 @@ class ToolRouter:
             return self._result("Claude Code is working. Wait until it is idle before changing model.")
 
         menu = self.menu()
+        if (
+            self._model_scope_visible()
+            and not self._is_model_menu(menu)
+        ):
+            return self._result(
+                "Claude Code needs the existing model scope answered before changing model again."
+            )
         if menu and not self._is_model_menu(menu):
             return self._result(
                 f"Claude Code needs the current menu answered first: {menu.title or 'options'}."
             )
         if menu is None:
+            self._model_scope_dismissed = False
             self.driver.inject("/model")
             if self.on_status:
                 await self.on_status({"type": "local", "event": "injected", "text": "/model"})
@@ -729,10 +770,35 @@ class ToolRouter:
             return self._result(
                 f"Couldn't find a model matching '{wanted}'. Options: {', '.join(menu.options)}."
             )
+        await asyncio.sleep(min(self.SETTLE_S, 0.8))
+        refreshed_menu = self.menu()
+        if self._is_model_menu(refreshed_menu):
+            refreshed_idx = screenmod.match_option(refreshed_menu, wanted)
+            if refreshed_idx is not None:
+                menu, idx = refreshed_menu, refreshed_idx
+                before = self._model_name(menu.options[menu.selected])
         target = self._model_name(menu.options[idx])
+        if target not in {"default", "opus", "fable", "sonnet", "haiku"}:
+            requested_name = self._model_name(wanted)
+            if requested_name in {"default", "opus", "fable", "sonnet", "haiku"}:
+                target = requested_name
+        scope_actions = screenmod.is_model_scope_prompt(self.driver.snapshot())
         if before == target:
-            self.driver.send_key("escape")
-            await asyncio.sleep(self.SETTLE_S)
+            if scope_actions:
+                # Claude 2.1.227 exposes scope as picker actions: `s` selects
+                # the current row for this session; Enter changes the default.
+                scope_closed = await self._choose_session_model_scope(target)
+            else:
+                self.driver.send_key("escape")
+                await asyncio.sleep(self.SETTLE_S)
+                scope_closed = True
+            if not scope_closed:
+                self._last_action = {
+                    "action": "set_model", "status": "failed",
+                    "effect": "scope_prompt_not_closed", "completed": False,
+                    "from": before, "requested": target,
+                }
+                return self._result("The model scope prompt stayed open, so I canceled it.")
             self._known_model = ModelObservation(target, "verified")
             self._last_action = {
                 "action": "set_model", "status": "verified", "effect": "already_selected",
@@ -740,8 +806,20 @@ class ToolRouter:
             }
             return self._result(f"Verified that {menu.options[idx]} is already selected.")
 
-        await self._choose_menu_index(menu, idx)
-        after = self.menu()
+        if scope_actions:
+            await self._move_menu_index(menu, idx)
+            if not await self._choose_session_model_scope(target):
+                self._last_action = {
+                    "action": "set_model", "status": "failed",
+                    "effect": "scope_prompt_not_closed", "completed": False,
+                    "from": before, "requested": target,
+                }
+                return self._result(
+                    "Claude Code's model scope picker did not close; I canceled it."
+                )
+        else:
+            await self._choose_menu_index(menu, idx)
+        after = None if scope_actions else self.menu()
         if self._is_matching_model_confirmation(after, menu.options[idx]):
             yes_idx = next(
                 i for i, option in enumerate(after.options)
@@ -758,6 +836,17 @@ class ToolRouter:
                 f"{after.title or 'options'}."
             )
 
+        if not scope_actions and not await self._choose_session_model_scope(target):
+            self._last_action = {
+                "action": "set_model", "status": "failed",
+                "effect": "scope_prompt_not_closed", "completed": False,
+                "from": before, "requested": target,
+            }
+            return self._result(
+                "Claude Code's model scope prompt did not close; I canceled it and did not "
+                "send another command."
+            )
+
         # Claude prints an explicit result after the picker closes. This is a
         # stronger and less disruptive postcondition than opening the picker a
         # second time; retain the picker round-trip below as a compatibility
@@ -771,6 +860,21 @@ class ToolRouter:
             self._known_model = ModelObservation(confirmed, "verified")
             return self._result(f"Verified that Claude Code changed from {before} to {confirmed}.")
 
+        # A scope prompt can render late after the picker closes. Check again
+        # immediately before the compatibility fallback so a command can never
+        # be typed into that modal.
+        if not await self._choose_session_model_scope(target):
+            self._last_action = {
+                "action": "set_model", "status": "failed",
+                "effect": "scope_prompt_not_closed", "completed": False,
+                "from": before, "requested": target,
+            }
+            return self._result(
+                "Claude Code's model scope prompt did not close; I canceled it and did not "
+                "send another command."
+            )
+
+        self._model_scope_dismissed = False
         self.driver.inject("/model")
         if self.on_status:
             await self.on_status({"type": "local", "event": "injected", "text": "/model"})
@@ -923,6 +1027,10 @@ class ToolRouter:
         cmd = (args.get("command") or "").strip()
         if not cmd.startswith("/"):
             return self._result("Commands must start with a slash, like /clear.")
+        if self._model_scope_visible():
+            return self._result(
+                "Claude Code needs its model scope answered before another command can run."
+            )
         if self.menu():
             return self._result("A menu is open — answer it first with select_option.")
         if cmd == "/model":
@@ -956,6 +1064,21 @@ class ToolRouter:
 
     async def _select_option(self, _call_id: str, args: dict) -> dict:
         wanted = (args.get("option") or "").strip()
+        if self._model_scope_visible():
+            lowered = wanted.lower()
+            if "session" in lowered:
+                key, label = "s", "Use this session only"
+            elif "default" in lowered:
+                key, label = "enter", "Set as default"
+            elif "cancel" in lowered:
+                key, label = "escape", "Cancel"
+            else:
+                return self._result(
+                    "Choose Set as default, Use this session only, or Cancel."
+                )
+            self.driver.send_key(key)
+            await asyncio.sleep(self.SETTLE_S)
+            return self._result(f"Chose {label}.")
         menu = self.menu()
         if not menu:
             return self._result("There is no menu open right now.")
@@ -977,9 +1100,13 @@ class ToolRouter:
             key = "down" if delta > 0 else "up"
             for _ in range(abs(delta)):
                 self.driver.send_key(key)
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.25)
             self.driver.send_key("enter")
             await asyncio.sleep(self.SETTLE_S)
+            if not await self._choose_session_model_scope(self._model_name(menu.options[idx])):
+                return self._result(
+                    "The model scope prompt stayed open, so I canceled it."
+                )
             final_menu = self.menu()
             if final_menu:
                 return self._result(
@@ -987,6 +1114,12 @@ class ToolRouter:
                     f"{final_menu.title or 'options'} — {', '.join(final_menu.options)}."
                 )
             return self._result(f"Chose and confirmed {menu.options[idx]}.")
+        if self._is_model_menu(menu) and screenmod.is_model_scope_prompt(
+            self.driver.snapshot()
+        ):
+            if not await self._choose_session_model_scope(self._model_name(menu.options[idx])):
+                return self._result("The model scope prompt stayed open, so I canceled it.")
+            return self._result(f"Chose {menu.options[idx]} for this session.")
         if after:
             return self._result(
                 f"Chose {menu.options[idx]}; another menu opened: {after.title or 'options'} — "
@@ -994,12 +1127,44 @@ class ToolRouter:
             )
         return self._result(f"Chose {menu.options[idx]}.")
 
-    async def _choose_menu_index(self, menu: screenmod.Menu, idx: int) -> None:
+    async def _choose_session_model_scope(self, target: str) -> bool:
+        for attempt in range(10):
+            if self._model_scope_visible():
+                break
+            if attempt < 9:
+                await asyncio.sleep(min(self.SETTLE_S, 0.35))
+        else:
+            return True
+        baseline_acks = screenmod.session_model_ack_count(
+            self.driver.snapshot(), target
+        )
+        self.driver.send_key("s")
+        await asyncio.sleep(self.SETTLE_S)
+        # Ink can retain the old footer after the picker closes. Keep pyte's
+        # cells intact for differential updates and ignore that footer until
+        # the next explicit /model open.
+        # The session action applies immediately but leaves the picker open;
+        # Escape closes it without changing the just-selected scope. Success
+        # requires Claude's authoritative session-only acknowledgement.
+        self.driver.send_key("escape")
+        for _ in range(5):
+            await asyncio.sleep(min(self.SETTLE_S, 0.35))
+            if screenmod.session_model_ack_count(
+                self.driver.snapshot(), target
+            ) > baseline_acks:
+                self._model_scope_dismissed = True
+                return True
+        return False
+
+    async def _move_menu_index(self, menu: screenmod.Menu, idx: int) -> None:
         delta = idx - menu.selected
         key = "down" if delta > 0 else "up"
         for _ in range(abs(delta)):
             self.driver.send_key(key)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.2)
+
+    async def _choose_menu_index(self, menu: screenmod.Menu, idx: int) -> None:
+        await self._move_menu_index(menu, idx)
         self.driver.send_key("enter")
         await asyncio.sleep(self.SETTLE_S)
 

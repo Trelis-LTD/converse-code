@@ -5,3 +5,5 @@ __pycache__/
 .venv/
 uv.lock
 dist/
+test-results/
+playwright-report/

@@ -18,7 +18,9 @@ from dataclasses import dataclass
 CURSOR = "❯"
 
 # "❯ 1. Yes" / "  2. No, and tell Claude what to do differently (esc)"
-NUMBERED_RE = re.compile(r"^\s*(?P<cursor>❯)?\s*(?P<num>\d+)\.\s+(?P<label>\S.*?)\s*$")
+NUMBERED_RE = re.compile(
+    r"^\s*(?P<cursor>❯)?\s*[✻✽✶●·*]?\s*(?P<num>\d+)\.\s+(?P<label>\S.*?)\s*$"
+)
 RULE_RE = re.compile(r"^\s*[─━═╭╰╮╯]+\s*$")
 SET_MODEL_RE = re.compile(
     r"\bSet model to (?P<model>Default|Opus|Fable|Sonnet|Haiku)\b", re.IGNORECASE,
@@ -27,6 +29,19 @@ STATUS_MODEL_RE = re.compile(
     r"\b(?P<model>Default|Opus|Fable|Sonnet|Haiku)(?:\s+\d+(?:\.\d+)?)?\s+with\s+"
     r"(?:low|medium|high|max)\s+effort\b",
     re.IGNORECASE,
+)
+HEADER_MODEL_RE = re.compile(
+    r"^\s*(?P<model>Default|Opus|Fable|Sonnet|Haiku)(?:\s+\d+(?:\.\d+)?)?"
+    r"\s+·\s+Claude(?:\s|$)",
+    re.IGNORECASE,
+)
+SESSION_MODEL_RE = re.compile(
+    r"\bSet model to (?P<model>Default|Opus|Fable|Sonnet|Haiku)\b.*"
+    r"\bfor this session(?: only)?\b",
+    re.IGNORECASE,
+)
+KEPT_MODEL_RE = re.compile(
+    r"\bKept model as (?P<model>Default|Opus|Fable|Sonnet|Haiku)\b", re.IGNORECASE,
 )
 
 
@@ -94,23 +109,80 @@ def detect_menu(lines: list[str]) -> Menu | None:
     return None
 
 
+def is_model_scope_prompt(lines: list[str]) -> bool:
+    """Whether Claude is asking if a selected model applies by default or this session."""
+    # Search the complete rendered screen: on short terminals the explanatory
+    # footer may wrap far enough away from the cursor to fall outside a small
+    # tail window. Requiring every key hint keeps this specific to the
+    # single-key model-scope prompt rather than generic prose about models.
+    visible = " ".join(_clean(line).lower() for line in lines)
+    complete_prompt = all(
+        phrase in visible
+        for phrase in (
+            "enter to set as default",
+            "s to use this session only",
+            "esc to cancel",
+        )
+    )
+    # Claude's live status redraw can temporarily overwrite characters in the
+    # footer (observed as "sessio  only · Esc to cancel" in 2.1.227). The
+    # surviving suffix is still distinctive and, critically, still blocking.
+    redraw_fragment = (
+        "sessio" in visible
+        and "only" in visible
+        and "cancel" in visible
+    )
+    return complete_prompt or redraw_fragment
+
+
 def detect_model(lines: list[str]) -> str | None:
     """Read Claude's visible model status without treating arbitrary prose as state."""
     for line in reversed(lines):
         cleaned = _clean(line)
-        match = SET_MODEL_RE.search(cleaned) or STATUS_MODEL_RE.search(cleaned)
+        match = (
+            SET_MODEL_RE.search(cleaned)
+            or KEPT_MODEL_RE.search(cleaned)
+            or STATUS_MODEL_RE.search(cleaned)
+            or HEADER_MODEL_RE.search(cleaned)
+        )
         if match:
             return match.group("model").lower()
     return None
 
 
-def is_idle(lines: list[str]) -> bool:
-    """Whether Claude's empty composer is visibly ready for a new prompt."""
+def has_empty_composer(lines: list[str]) -> bool:
+    """Whether the structural empty composer is visible, ignoring overlays."""
     cleaned = [_clean(line) for line in lines]
     return any(
         line.strip() == CURSOR and _neighbor_is_rule(cleaned, i)
         for i, line in enumerate(cleaned)
     )
+
+
+def is_idle(lines: list[str]) -> bool:
+    """Whether Claude's empty composer is ready and no scope picker blocks it."""
+    return not is_model_scope_prompt(lines) and has_empty_composer(lines)
+
+
+def session_model_ack_count(lines: list[str], target: str | None = None) -> int:
+    """Count visible session-only model acknowledgements, optionally by model."""
+    matches = (
+        match
+        for line in lines
+        if (match := SESSION_MODEL_RE.search(_clean(line)))
+    )
+    return sum(
+        1 for match in matches
+        if target is None or match.group("model").lower() == target
+    )
+
+
+def detect_session_model(lines: list[str]) -> str | None:
+    """Return the latest authoritative session-only model acknowledgement."""
+    for line in reversed(lines):
+        if match := SESSION_MODEL_RE.search(_clean(line)):
+            return match.group("model").lower()
+    return None
 
 
 def _neighbor_is_rule(lines: list[str], idx: int) -> bool:
@@ -141,8 +213,34 @@ def match_option(menu: Menu, wanted: str) -> int | None:
         for i, o in enumerate(lowered):
             if pred(o):
                 return i
+    if wanted_l in {"default", "opus", "fable", "sonnet", "haiku"}:
+        for i, option in enumerate(menu.options):
+            label = re.split(r"\s{2,}", option.strip(), maxsplit=1)[0]
+            compact = re.sub(r"\s+", "", label.lower().replace("✔", ""))
+            if _within_one_edit(compact, wanted_l):
+                return i
     if wanted_l.isdigit():  # "option 2" spoken as a number
         n = int(wanted_l)
         if 1 <= n <= len(menu.options):
             return n - 1
     return None
+
+
+def _within_one_edit(value: str, target: str) -> bool:
+    """True for one insertion, deletion, or substitution (small labels only)."""
+    if abs(len(value) - len(target)) > 1:
+        return False
+    if len(value) == len(target):
+        return sum(a != b for a, b in zip(value, target)) <= 1
+    shorter, longer = (value, target) if len(value) < len(target) else (target, value)
+    i = j = differences = 0
+    while i < len(shorter) and j < len(longer):
+        if shorter[i] == longer[j]:
+            i += 1
+            j += 1
+        else:
+            differences += 1
+            j += 1
+            if differences > 1:
+                return False
+    return True
