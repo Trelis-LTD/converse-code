@@ -6,6 +6,7 @@ structure from the screen, and prose from the transcript.
 """
 
 import asyncio
+import hashlib
 import logging
 from collections import deque
 from dataclasses import dataclass
@@ -24,6 +25,15 @@ log = logging.getLogger(__name__)
 class ModelObservation:
     name: str
     source: Literal["visible_ui", "verified"]
+
+
+@dataclass(frozen=True)
+class DecisionState:
+    kind: str
+    title: str
+    options: tuple[str, ...]
+    selected: str
+    revision: str
 
 
 @dataclass(frozen=True)
@@ -70,17 +80,20 @@ OBSERVE_DESCRIPTION = (
     "result; never call long_task merely to inspect or restate Claude Code's current state."
 )
 
-SET_MODEL_DESCRIPTION = (
-    "Change Claude Code's model as one verified operation. Pass the requested model name. This "
-    "uses Claude Code's documented /model command, verifies the rendered result, and reports "
-    "whether Claude applied it to this session or saved it as the default. "
-    "Use this both to change a model and to ensure a requested model is already selected."
+CHANGE_MODEL_DESCRIPTION = (
+    "Change Claude Code's current-session model with its documented /model command and verify "
+    "the result from the current rendered UI. Use only for an explicit model-change request. "
+    "Choose one documented alias exactly; never pass a provider model ID."
 )
 
-SELECT_DESCRIPTION = (
-    "Answer a genuine blocking choice currently shown by Claude Code, such as a permission or "
-    "clarification prompt. Pass the option's text or number. Use only after the user has chosen; "
-    "never use it to browse Claude Code's interface or answer on the user's behalf."
+RESOLVE_DECISION_DESCRIPTION = (
+    "Resolve the exact blocking decision currently shown by Claude Code. Copy the revision and "
+    "option label exactly from observe_claude or a decision notification. Use only when the user "
+    "has chosen that option, or when it is a deterministic confirmation of the active instruction "
+    "the user already authorized. Never approve permissions, destructive actions, persistent "
+    "changes, or genuine preferences without the user's explicit choice. If the option was not "
+    "already highlighted, the first call only focuses it safely; immediately call this tool again "
+    "with the new revision returned by that result and the same option to submit it."
 )
 
 END_SESSION_DESCRIPTION = (
@@ -116,12 +129,17 @@ def manifest() -> list[dict]:
              {"request": {"type": "string", "description": "Guidance for the active task."}},
              ["request"], timeout=15),
         tool("observe_claude", OBSERVE_DESCRIPTION, timeout=15),
-        tool("set_model", SET_MODEL_DESCRIPTION,
-             {"model": {"type": "string", "description": "Requested model name."}},
-             ["model"], timeout=30),
-        tool("select_option", SELECT_DESCRIPTION,
-             {"option": {"type": "string", "description": "Option text or number."}},
-             ["option"], timeout=15),
+        tool("change_model", CHANGE_MODEL_DESCRIPTION, {
+            "model": {
+                "type": "string",
+                "enum": ["default", "opus", "fable", "sonnet", "haiku"],
+                "description": "Documented Claude Code model alias.",
+            },
+        }, ["model"], timeout=30),
+        tool("resolve_decision", RESOLVE_DECISION_DESCRIPTION, {
+            "revision": {"type": "string", "description": "Exact current decision revision."},
+            "option": {"type": "string", "description": "Exact visible option label."},
+        }, ["revision", "option"], timeout=15),
         tool("end_session", END_SESSION_DESCRIPTION, timeout=15),
     ]
 
@@ -174,6 +192,8 @@ class ToolRouter:
         self._canceling_prompt_ids: set[str] | None = None
         self._known_model: ModelObservation | None = None
         self._model_scope_dismissed = False
+        self._decision_signature: tuple | None = None
+        self._decision_generation = 0
         self._needs_ready_gate = False
         self._cancel_watch_task: asyncio.Task | None = None
         self.on_status = None  # async callback(dict) → browser tab
@@ -413,13 +433,18 @@ class ToolRouter:
         # a decision the user can actually make.
         if menu is None:
             return
+        decision = self._decision_state()
+        if decision is None:
+            return
         tool_name = payload.get("tool_name")
         detail = f" for {tool_name}" if isinstance(tool_name, str) and tool_name else ""
         options = f" Options: {', '.join(menu.options)}." if menu.options else ""
         trace("inject_context", reason="permission_request", tool=tool_name, options=menu.options)
         await self.sender.send_context(
             f"Claude Code is waiting for permission{detail}.{options} "
-            "Tell the user briefly and ask which option they want; do not choose for them.",
+            f"Decision revision: {decision.revision}. Tell the user briefly and "
+            "ask which option they want; do not choose for them. Then use resolve_decision with "
+            "that exact revision and option label.",
             role="context",
             reply=True,
         )
@@ -445,8 +470,8 @@ class ToolRouter:
             "long_task": self._long_task,
             "steer_task": self._steer_task,
             "observe_claude": self._observe_claude,
-            "set_model": self._set_model,
-            "select_option": self._select_option,
+            "change_model": self._change_model,
+            "resolve_decision": self._resolve_decision,
             "end_session": self._end_session,
         }
         handler = handlers.get(name)
@@ -597,6 +622,57 @@ class ToolRouter:
     def menu(self) -> screenmod.Menu | None:
         return screenmod.detect_menu(self.driver.snapshot())
 
+    def _decision_revision(
+        self, kind: str, title: str, options: tuple[str, ...],
+    ) -> str:
+        # Highlight movement does not create a new semantic decision, but any new host paint
+        # invalidates an approval token. The latter catches an identical modal that was closed
+        # and reopened without an intervening observe_claude call.
+        signature = (kind, title, options)
+        if signature != self._decision_signature:
+            self._decision_generation += 1
+            self._decision_signature = signature
+        screen_revision = getattr(self.driver, "screen_revision", 0)
+        payload = "\x1f".join(
+            (str(self._decision_generation), str(screen_revision), kind, title, *options)
+        ).encode()
+        return hashlib.sha256(payload).hexdigest()[:16]
+
+    @staticmethod
+    def _same_decision(left: DecisionState, right: DecisionState) -> bool:
+        return (
+            left.kind == right.kind
+            and left.title == right.title
+            and left.options == right.options
+        )
+
+    def _decision_state(self, lines: list[str] | None = None) -> DecisionState | None:
+        lines = self.driver.snapshot() if lines is None else lines
+        menu = screenmod.detect_menu(lines)
+        if menu:
+            selected = menu.options[menu.selected]
+            kind = "model_picker" if self._is_model_menu(menu) else "menu"
+            return DecisionState(
+                kind=kind,
+                title=menu.title,
+                options=tuple(menu.options),
+                selected=selected,
+                revision=self._decision_revision(kind, menu.title, tuple(menu.options)),
+            )
+        if self._model_scope_visible(lines):
+            kind = "model_scope_prompt"
+            title = "Apply selected model"
+            options = ("Set as default", "Use this session only", "Cancel")
+            return DecisionState(
+                kind=kind,
+                title=title,
+                options=options,
+                selected="",
+                revision=self._decision_revision(kind, title, options),
+            )
+        self._decision_signature = None
+        return None
+
     def _model_scope_visible(self, lines: list[str] | None = None) -> bool:
         lines = self.driver.snapshot() if lines is None else lines
         visible = screenmod.is_model_scope_prompt(lines)
@@ -607,27 +683,21 @@ class ToolRouter:
     def semantic_state(self) -> dict:
         lines = self.driver.snapshot()
         menu = screenmod.detect_menu(lines)
-        model_scope = self._model_scope_visible(lines)
+        decision = self._decision_state(lines)
         if self._canceling_prompt_ids is not None:
             phase = "canceling"
-        elif menu or model_scope:
+        elif decision:
             phase = "awaiting_input"
         else:
             phase = "working" if self.working else "idle"
         ui = {"kind": "none"}
-        if menu:
+        if decision:
             ui = {
-                "kind": "model_picker" if self._is_model_menu(menu) else "menu",
-                "title": menu.title,
-                "options": list(menu.options),
-                "selected": menu.options[menu.selected] if menu.options else "",
-            }
-        elif model_scope:
-            ui = {
-                "kind": "model_scope_prompt",
-                "title": "Apply selected model",
-                "options": ["Set as default", "Use this session only", "Cancel"],
-                "selected": "",
+                "kind": decision.kind,
+                "title": decision.title,
+                "options": list(decision.options),
+                "selected": decision.selected,
+                "revision": decision.revision,
             }
         visible_model = None
         if menu and self._is_model_menu(menu) and menu.options:
@@ -690,18 +760,15 @@ class ToolRouter:
             )
         if request.startswith("/"):
             return self._result(
-                "Direct slash commands are not exposed to Converse. Use set_model for a model "
-                "change, or phrase the intended result as a normal instruction to Claude Code."
+                "Direct slash commands are not exposed to Converse. Phrase the intended result "
+                "as a normal instruction to Claude Code."
             )
-        if self._model_scope_visible():
+        decision = self._decision_state()
+        if decision:
             return self._result(
-                "Claude Code needs its model scope answered before starting another task."
-            )
-        menu = self.menu()
-        if menu:
-            return self._result(
-                f"Claude Code is showing a menu and needs an answer first: "
-                f"{menu.title or 'a menu'} — options: {', '.join(menu.options)}."
+                f"Claude Code needs the current decision answered first: "
+                f"{decision.title or 'a decision'} — options: "
+                f"{', '.join(decision.options)}; revision: {decision.revision}."
             )
 
         if self.working:
@@ -786,15 +853,12 @@ class ToolRouter:
                 "Direct slash commands are not exposed to Converse. Phrase the intended result "
                 "as normal guidance to Claude Code."
             )
-        if self._model_scope_visible():
+        decision = self._decision_state()
+        if decision:
             return self._result(
-                "Claude Code needs its model scope answered before it can be steered."
-            )
-        menu = self.menu()
-        if menu:
-            return self._result(
-                f"Claude Code needs the open menu answered before it can be steered: "
-                f"{menu.title or 'a menu'} — options: {', '.join(menu.options)}."
+                f"Claude Code needs the open decision answered before it can be steered: "
+                f"{decision.title or 'a decision'} — options: "
+                f"{', '.join(decision.options)}; revision: {decision.revision}."
             )
         if not self.working:
             return self._result("Claude Code is idle. Use long_task to start new work.")
@@ -830,21 +894,12 @@ class ToolRouter:
     async def _observe_claude(self, _call_id: str, _args: dict) -> dict:
         snapshot = self.semantic_state()
         phase, ui = snapshot["phase"], snapshot["ui"]
-        if ui["kind"] == "model_picker":
+        if ui["kind"] != "none":
             speak = (
-                f"Claude Code is showing the model picker. Currently selected: "
-                f"{ui['selected'] or 'unknown'}. No model changes should be claimed from "
-                "this observation alone."
-            )
-        elif ui["kind"] == "menu":
-            speak = (
-                f"Claude Code is awaiting input in {ui['title'] or 'a menu'}. "
-                f"Currently selected: {ui['selected'] or 'unknown'}."
-            )
-        elif ui["kind"] == "model_scope_prompt":
-            speak = (
-                "Claude Code is asking whether the selected model should be the default or apply "
-                "only to this session."
+                f"Claude Code is awaiting a blocking decision in "
+                f"{ui['title'] or 'the current menu'}. Options: {', '.join(ui['options'])}. "
+                f"Currently selected: {ui['selected'] or 'none'}. Decision revision: "
+                f"{ui['revision']}."
             )
         elif phase == "working":
             speak = f"Claude Code is working on: {snapshot['active_task'] or 'the active task'}."
@@ -861,316 +916,127 @@ class ToolRouter:
             speak = f"Claude Code is idle with no menu open.{suffix}"
         return self._result(speak)
 
-    async def _set_model(self, _call_id: str, args: dict) -> dict:
-        wanted = (args.get("model") or "").strip()
-        if not wanted:
-            return self._result("No model was requested.")
-        if self.working:
-            return self._result("Claude Code is working. Wait until it is idle before changing model.")
-
-        if not await self._wait_until_ready():
-            return self._result("Claude Code input is not ready for a model change.")
-
-        menu = self.menu()
-        if (
-            self._model_scope_visible()
-            and not self._is_model_menu(menu)
-        ):
-            return self._result(
-                "Claude Code needs the existing model scope answered before changing model again."
-            )
-        if menu and not self._is_model_menu(menu):
-            return self._result(
-                f"Claude Code needs the current menu answered first: {menu.title or 'options'}."
-            )
-        if menu is None:
-            return await self._set_model_direct(wanted)
-        if not self._is_model_menu(menu):
-            self._last_action = {
-                "action": "set_model", "status": "failed",
-                "effect": "picker_not_found", "completed": False,
-            }
-            return self._result("Couldn't open and verify Claude Code's model picker.")
-
-        before = self._model_name(menu.options[menu.selected])
-        idx = screenmod.match_option(menu, wanted)
-        if idx is None:
-            self._last_action = {
-                "action": "set_model", "status": "failed",
-                "effect": "model_not_found", "completed": False,
-            }
-            return self._result(
-                f"Couldn't find a model matching '{wanted}'. Options: {', '.join(menu.options)}."
-            )
-        await asyncio.sleep(min(self.SETTLE_S, 0.8))
-        refreshed_menu = self.menu()
-        if self._is_model_menu(refreshed_menu):
-            refreshed_idx = screenmod.match_option(refreshed_menu, wanted)
-            if refreshed_idx is not None:
-                menu, idx = refreshed_menu, refreshed_idx
-                before = self._model_name(menu.options[menu.selected])
-        target = self._model_name(menu.options[idx])
-        if target not in {"default", "opus", "fable", "sonnet", "haiku"}:
-            requested_name = self._model_name(wanted)
-            if requested_name in {"default", "opus", "fable", "sonnet", "haiku"}:
-                target = requested_name
-        baseline_model_acks = screenmod.session_model_ack_count(
-            self.driver.snapshot(), target,
-        )
-        scope_actions = screenmod.is_model_scope_prompt(self.driver.snapshot())
-        if before == target:
-            if scope_actions:
-                # Claude 2.1.227 exposes scope as picker actions: `s` selects
-                # the current row for this session; Enter changes the default.
-                scope_closed = await self._choose_session_model_scope(target)
-            else:
-                self.driver.send_key("escape")
-                await asyncio.sleep(self.SETTLE_S)
-                scope_closed = True
-            if not scope_closed:
-                self._last_action = {
-                    "action": "set_model", "status": "failed",
-                    "effect": "scope_prompt_not_closed", "completed": False,
-                    "from": before, "requested": target,
-                }
-                return self._result("The model scope prompt stayed open, so I canceled it.")
-            self._known_model = ModelObservation(target, "verified")
-            self._last_action = {
-                "action": "set_model", "status": "verified", "effect": "already_selected",
-                "completed": True, "from": before, "to": target,
-                "postcondition_verified": True,
-                "evidence": {"kind": "visible_model", "model": target},
-            }
-            return self._result(f"Verified that {menu.options[idx]} is already selected.")
-
-        if scope_actions:
-            if not await self._move_menu_index(menu, idx):
-                self._last_action = {
-                    "action": "set_model", "status": "failed",
-                    "effect": "menu_changed", "completed": False,
-                }
-                return self._result("The model picker changed while selecting; nothing was submitted.")
-            if not await self._choose_session_model_scope(target):
-                self._last_action = {
-                    "action": "set_model", "status": "failed",
-                    "effect": "scope_prompt_not_closed", "completed": False,
-                    "from": before, "requested": target,
-                }
-                return self._result(
-                    "Claude Code's model scope picker did not close; I canceled it."
-                )
-        else:
-            if not await self._choose_menu_index(menu, idx):
-                self._last_action = {
-                    "action": "set_model", "status": "failed",
-                    "effect": "menu_changed", "completed": False,
-                }
-                return self._result("The model picker changed while selecting; nothing was submitted.")
-        after = None if scope_actions else self.menu()
-        if self._is_matching_model_confirmation(after, menu.options[idx]):
-            yes_idx = next(
-                i for i, option in enumerate(after.options)
-                if option.lower().lstrip("0123456789. ").startswith("yes")
-            )
-            if not await self._choose_menu_index(after, yes_idx):
-                self._last_action = {
-                    "action": "set_model", "status": "failed",
-                    "effect": "confirmation_changed", "completed": False,
-                }
-                return self._result("The model confirmation changed; I did not submit an answer.")
-        elif after:
-            self._last_action = {
-                "action": "set_model", "status": "failed",
-                "effect": "unexpected_confirmation", "completed": False,
-            }
-            return self._result(
-                f"Couldn't verify the model change because another menu is open: "
-                f"{after.title or 'options'}."
-            )
-
-        if not scope_actions and not await self._choose_session_model_scope(target):
-            self._last_action = {
-                "action": "set_model", "status": "failed",
-                "effect": "scope_prompt_not_closed", "completed": False,
-                "from": before, "requested": target,
-            }
-            return self._result(
-                "Claude Code's model scope prompt did not close; I canceled it and did not "
-                "send another command."
-            )
-
-        # Claude prints an explicit result after the picker closes. This is a
-        # stronger and less disruptive postcondition than opening the picker a
-        # second time; retain the picker round-trip below as a compatibility
-        # fallback when that acknowledgement is absent or changes format.
-        confirmation_snapshot = self.driver.snapshot()
-        current_model = screenmod.detect_current_model(confirmation_snapshot)
-        fresh_ack = (
-            screenmod.session_model_ack_count(confirmation_snapshot, target)
-            > baseline_model_acks
-        )
-        if current_model == target or fresh_ack:
-            confirmed = target
-            self._last_action = {
-                "action": "set_model", "status": "verified", "effect": "model_changed",
-                "completed": True, "from": before, "to": confirmed,
-                "postcondition_verified": True,
-                "evidence": {
-                    "kind": "current_model_header" if current_model == target
-                    else "fresh_session_model_ack",
-                    "model": confirmed,
-                },
-            }
-            self._known_model = ModelObservation(confirmed, "verified")
-            return self._result(f"Verified that Claude Code changed from {before} to {confirmed}.")
-
-        # A scope prompt can render late after the picker closes. Check again
-        # immediately before the compatibility fallback so a command can never
-        # be typed into that modal.
-        if not await self._choose_session_model_scope(target):
-            self._last_action = {
-                "action": "set_model", "status": "failed",
-                "effect": "scope_prompt_not_closed", "completed": False,
-                "from": before, "requested": target,
-            }
-            return self._result(
-                "Claude Code's model scope prompt did not close; I canceled it and did not "
-                "send another command."
-            )
-
-        self._model_scope_dismissed = False
-        self.driver.inject_command("/model", submit_delay_s=self.COMMAND_SUBMIT_DELAY_S)
-        await asyncio.sleep(self.SETTLE_S)
-        verified_menu = self.menu()
-        actual = (
-            self._model_name(verified_menu.options[verified_menu.selected])
-            if self._is_model_menu(verified_menu) and verified_menu.options else None
-        )
-        if verified_menu:
-            self.driver.send_key("escape")
-            await asyncio.sleep(self.SETTLE_S)
-        if actual != target:
-            self._last_action = {
-                "action": "set_model", "status": "failed",
-                "effect": "selection_unverified", "completed": False,
-                "from": before, "requested": target, "observed": actual,
-            }
-            return self._result(
-                f"Couldn't verify the model change. Requested {target}, but the picker shows "
-                f"{actual or 'an unknown selection'}."
-            )
-        self._last_action = {
-            "action": "set_model", "status": "verified", "effect": "model_changed",
-            "completed": True, "from": before, "to": actual,
-            "postcondition_verified": True,
-            "evidence": {"kind": "visible_model", "model": actual},
-        }
-        self._known_model = ModelObservation(actual, "verified")
-        return self._result(f"Verified that Claude Code changed from {before} to {actual}.")
-
-    async def _set_model_direct(self, wanted: str) -> dict:
-        """Use Claude Code's semantic `/model <alias>` command and verify its result."""
-        target = self._model_name(wanted)
-        allowed = {"default", "opus", "fable", "sonnet", "haiku"}
+    async def _change_model(self, _call_id: str, args: dict) -> dict | ToolReply:
+        target = str(args.get("model") or "").strip().lower()
+        allowed = ("default", "opus", "fable", "sonnet", "haiku")
         if target not in allowed:
             self._last_action = {
-                "action": "set_model", "status": "failed",
-                "effect": "model_not_found", "completed": False,
+                "action": "change_model", "status": "failed",
+                "effect": "model_not_supported", "completed": False,
+                "requested": target,
             }
-            return self._result(
-                f"Unsupported model '{wanted}'. Choose one of: {', '.join(sorted(allowed))}."
+            return self._reply(
+                f"Unsupported model alias. Choose one of: {', '.join(allowed)}.",
+                outcome="failed", verified=False,
+            )
+        if self.working:
+            self._last_action = {
+                "action": "change_model", "status": "failed",
+                "effect": "claude_working", "completed": False,
+            }
+            return self._reply(
+                "Claude Code is working. Wait until it is idle before changing model.",
+                outcome="failed", verified=False,
+            )
+        existing = self._decision_state()
+        if existing:
+            self._last_action = {
+                "action": "change_model", "status": "failed",
+                "effect": "decision_already_open", "completed": False,
+            }
+            return self._reply(
+                "Claude Code already has a blocking decision open; resolve it first.",
+                outcome="failed", verified=False,
+            )
+        if not await self._wait_until_ready():
+            self._last_action = {
+                "action": "change_model", "status": "failed",
+                "effect": "input_not_ready", "completed": False,
+            }
+            return self._reply(
+                "Claude Code input is not stably ready for a model change.",
+                outcome="failed", verified=False,
             )
 
-        snapshot = self.driver.snapshot()
-        before = screenmod.detect_current_model(snapshot)
-        baseline_acks = len(screenmod.model_acknowledgements(snapshot, target))
+        before = screenmod.detect_header_model(self.driver.snapshot())
         if before == target:
             self._known_model = ModelObservation(target, "verified")
             self._last_action = {
-                "action": "set_model", "status": "verified", "effect": "already_selected",
-                "completed": True, "from": before, "to": target,
-                "postcondition_verified": True,
+                "action": "change_model", "status": "verified",
+                "effect": "already_selected", "completed": True,
+                "from": before, "to": target, "postcondition_verified": True,
                 "evidence": {"kind": "current_model_header", "model": target},
             }
-            return self._result(f"Verified that {target} is already selected.")
-
-        command = f"/model {target}"
-        self._model_scope_dismissed = False
-        self.driver.inject_command(command, submit_delay_s=self.COMMAND_SUBMIT_DELAY_S)
-        await asyncio.sleep(self.SETTLE_S)
-
-        confirmation = self.menu()
-        if self._is_matching_model_confirmation(confirmation, target):
-            yes_idx = next(
-                i for i, option in enumerate(confirmation.options)
-                if option.lower().lstrip("0123456789. ").startswith("yes")
+            return self._reply(
+                f"Verified that Claude Code is already using {target}.",
+                outcome="succeeded", verified=True,
             )
-            if not await self._choose_menu_index(confirmation, yes_idx):
+
+        self.driver.inject_command(
+            f"/model {target}", submit_delay_s=self.COMMAND_SUBMIT_DELAY_S,
+        )
+        await asyncio.sleep(self.SETTLE_S)
+        self._needs_ready_gate = True
+
+        decision = self._decision_state()
+        menu = self.menu()
+        if decision and menu and self._is_matching_model_confirmation(
+            menu, target, screenmod.menu_context(self.driver.snapshot(), menu),
+        ):
+            yes_index = next(
+                index for index, option in enumerate(menu.options)
+                if option.casefold().lstrip("0123456789. ").startswith("yes")
+            )
+            if menu.selected == yes_index and self._submit_menu_index(
+                menu, yes_index, decision,
+            ):
+                await asyncio.sleep(self.SETTLE_S)
+            else:
                 self._last_action = {
-                    "action": "set_model", "status": "failed",
-                    "effect": "confirmation_changed", "completed": False,
+                    "action": "change_model", "status": "pending",
+                    "effect": "confirmation_required", "completed": False,
+                    "requested": target,
                 }
-                return self._result("The model confirmation changed; I did not submit an answer.")
-        elif confirmation:
-            self.driver.send_key("escape")
+                return self._reply(
+                    "Claude Code needs the visible model-change confirmation resolved.",
+                    outcome="succeeded", verified=False,
+                )
+        elif decision:
             self._last_action = {
-                "action": "set_model", "status": "failed",
-                "effect": "unexpected_confirmation", "completed": False,
-                "from": before, "requested": target,
+                "action": "change_model", "status": "pending",
+                "effect": "decision_required", "completed": False,
+                "requested": target,
             }
-            return self._result(
-                f"Claude Code opened an unexpected menu after {command}; I canceled it."
+            return self._reply(
+                "Claude Code opened a decision for this model change. Resolve the exact visible "
+                "option before continuing.",
+                outcome="succeeded", verified=False,
             )
 
         for _ in range(8):
-            snapshot = self.driver.snapshot()
-            if self.menu() is None and not self._model_scope_visible(snapshot):
-                current = screenmod.detect_current_model(snapshot)
-                acknowledgements = screenmod.model_acknowledgements(snapshot, target)
-                fresh_ack = (
-                    acknowledgements[-1]
-                    if len(acknowledgements) > baseline_acks
-                    else None
+            current = screenmod.detect_header_model(self.driver.snapshot())
+            if current == target:
+                self._known_model = ModelObservation(target, "verified")
+                self._last_action = {
+                    "action": "change_model", "status": "verified",
+                    "effect": "model_changed", "completed": True,
+                    "from": before, "to": target, "postcondition_verified": True,
+                    "evidence": {"kind": "current_model_header", "model": target},
+                }
+                return self._reply(
+                    f"Verified that Claude Code changed from {before or 'unknown'} to {target}.",
+                    outcome="succeeded", verified=True,
                 )
-                if current == target or fresh_ack:
-                    evidence = {"kind": "current_model_header", "model": target}
-                    if fresh_ack and (
-                        current != target or fresh_ack.scope == "default_for_new_sessions"
-                    ):
-                        evidence = {
-                            "kind": "fresh_model_ack", "model": target,
-                            "scope": fresh_ack.scope,
-                        }
-                    self._known_model = ModelObservation(target, "verified")
-                    self._last_action = {
-                        "action": "set_model", "status": "verified",
-                        "effect": "model_changed", "completed": True,
-                        "from": before, "to": target,
-                        "postcondition_verified": True,
-                        "evidence": evidence,
-                    }
-                    if fresh_ack and fresh_ack.scope == "default_for_new_sessions":
-                        return self._result(
-                            f"Verified that Claude Code changed from {before or 'unknown'} to "
-                            f"{target} and saved it as the default for new sessions."
-                        )
-                    if fresh_ack and fresh_ack.scope == "current_session":
-                        return self._result(
-                            f"Verified that Claude Code changed from {before or 'unknown'} "
-                            f"to {target} for this session."
-                        )
-                    return self._result(
-                        f"Verified that Claude Code changed from {before or 'unknown'} to {target}."
-                    )
             await asyncio.sleep(min(self.SETTLE_S, 0.35))
 
         self._last_action = {
-            "action": "set_model", "status": "failed",
+            "action": "change_model", "status": "failed",
             "effect": "selection_unverified", "completed": False,
             "from": before, "requested": target,
         }
-        return self._result(
-            f"Sent {command}, but Claude Code did not expose a verified {target} selection."
+        return self._reply(
+            f"Sent /model {target}, but the current UI did not verify that model.",
+            outcome="failed", verified=False,
         )
 
     async def _inject_and_confirm(self, text: str) -> bool:
@@ -1231,19 +1097,21 @@ class ToolRouter:
                     )
                 return self._turn_result(start_offset, start_path)
 
-            menu = self.menu()
-            if menu:
+            decision = self._decision_state()
+            if decision:
                 # A blocking menu is the one interjection that must never be
                 # starved: it draws on the full budget while edits/tests keep
                 # MENU_RESERVE partials free for it below.
-                key = (menu.title, tuple(menu.options))
+                key = decision.revision
                 if key != announced_menu and sent_partials < self.MAX_PARTIALS:
                     announced_menu = key
                     sent_partials += 1
                     await self._send_partial(
                         call_id,
-                        f"Claude Code needs input: {menu.title or 'a menu is open'} — "
-                        f"options: {', '.join(menu.options)}. Ask the user, then use select_option.",
+                        f"Claude Code needs input: {decision.title or 'a decision is open'} — "
+                        f"options: {', '.join(decision.options)}. Decision revision: "
+                        f"{decision.revision}. Ask the user when approval or preference is needed, "
+                        "then use resolve_decision with that exact revision and option label.",
                         reply=True,
                     )
             else:
@@ -1298,164 +1166,125 @@ class ToolRouter:
             extra["files"] = summary.files[:10]
         return self._reply(speak, outcome="succeeded", verified=False, **extra)
 
-    async def _select_option(self, _call_id: str, args: dict) -> dict:
+    async def _resolve_decision(self, _call_id: str, args: dict) -> dict:
+        revision = (args.get("revision") or "").strip()
         wanted = (args.get("option") or "").strip()
-        if self._model_scope_visible():
-            lowered = wanted.lower()
-            if "session" in lowered:
-                key, label = "s", "Use this session only"
-            elif "default" in lowered:
-                key, label = "enter", "Set as default"
-            elif "cancel" in lowered:
-                key, label = "escape", "Cancel"
-            else:
-                return self._result(
-                    "Choose Set as default, Use this session only, or Cancel."
-                )
-            self.driver.send_key(key)
-            await asyncio.sleep(self.SETTLE_S)
-            if self._model_scope_visible():
-                self._last_action = {
-                    "action": "select_option", "status": "failed",
-                    "effect": "selection_unverified", "completed": False,
-                }
-                return self._result(
-                    f"Sent the {label} choice, but the same prompt is still visible."
-                )
-            self._record_option_selection(label, "model_scope_prompt", "closed")
-            return self._result(f"Chose {label}.")
-        menu = self.menu()
-        if not menu:
-            return self._result("There is no menu open right now.")
-        idx = screenmod.match_option(menu, wanted)
-        if idx is None:
-            return self._result(
-                f"Couldn't find an option matching '{wanted}'. Options: {', '.join(menu.options)}."
-            )
-        if not await self._choose_menu_index(menu, idx):
+        decision = self._decision_state()
+        if not decision:
             self._last_action = {
-                "action": "select_option", "status": "failed",
-                "effect": "menu_changed", "completed": False,
+                "action": "resolve_decision", "status": "failed",
+                "effect": "no_decision", "completed": False,
             }
-            return self._result("The menu changed before I could submit that choice.")
-        after = self.menu()
-        if self._is_model_menu(menu) and self._is_matching_model_confirmation(
-            after, menu.options[idx]
-        ):
-            yes_idx = next(
-                i for i, option in enumerate(after.options)
-                if option.lower().lstrip("0123456789. ").startswith("yes")
-            )
-            if not await self._choose_menu_index(after, yes_idx):
-                self._last_action = {
-                    "action": "select_option", "status": "failed",
-                    "effect": "confirmation_changed", "completed": False,
-                }
-                return self._result("The confirmation changed before I could submit that choice.")
-            if not await self._choose_session_model_scope(self._model_name(menu.options[idx])):
-                return self._result(
-                    "The model scope prompt stayed open, so I canceled it."
-                )
-            final_menu = self.menu()
-            if final_menu:
-                return self._result(
-                    f"Confirmed {menu.options[idx]}, but Claude Code opened another menu: "
-                    f"{final_menu.title or 'options'} — {', '.join(final_menu.options)}."
-                )
-            self._record_option_selection(menu.options[idx], menu.title or "menu", "closed")
-            return self._result(f"Chose and confirmed {menu.options[idx]}.")
-        if self._is_model_menu(menu) and screenmod.is_model_scope_prompt(
-            self.driver.snapshot()
-        ):
-            if not await self._choose_session_model_scope(self._model_name(menu.options[idx])):
-                return self._result("The model scope prompt stayed open, so I canceled it.")
-            self._record_option_selection(menu.options[idx], menu.title or "menu", "closed")
-            return self._result(f"Chose {menu.options[idx]} for this session.")
-        if after:
-            # A changed highlight is not proof that Enter was accepted. The original menu must
-            # close or be replaced by a structurally different blocking step.
-            before_signature = (menu.title, tuple(menu.options))
-            after_signature = (after.title, tuple(after.options))
-            if after_signature == before_signature:
-                self._last_action = {
-                    "action": "select_option", "status": "failed",
-                    "effect": "selection_unverified", "completed": False,
-                }
-                return self._result(
-                    f"Sent the {menu.options[idx]} choice, but the same menu is still visible."
-                )
-            self._record_option_selection(
-                menu.options[idx], menu.title or "menu", after.title or "another_menu",
-            )
+            return self._result("There is no blocking decision open right now.")
+        if not revision or revision != decision.revision:
+            self._last_action = {
+                "action": "resolve_decision", "status": "failed",
+                "effect": "stale_decision", "completed": False,
+                "requested_revision": revision, "observed_revision": decision.revision,
+            }
             return self._result(
-                f"Chose {menu.options[idx]}; another menu opened: {after.title or 'options'} — "
-                f"{', '.join(after.options)}."
+                "That decision is stale or changed. Observe Claude Code again before choosing."
             )
-        self._record_option_selection(menu.options[idx], menu.title or "menu", "closed")
-        return self._result(f"Chose {menu.options[idx]}.")
+        matches = [
+            index for index, option in enumerate(decision.options)
+            if option.casefold() == wanted.casefold()
+        ]
+        if len(matches) != 1:
+            self._last_action = {
+                "action": "resolve_decision", "status": "failed",
+                "effect": "option_not_found", "completed": False,
+                "requested_option": wanted,
+            }
+            return self._result(
+                f"Choose one exact visible option: {', '.join(decision.options)}."
+            )
 
-    def _record_option_selection(self, option: str, source: str, destination: str) -> None:
-        """Record only an observed transition caused by the current selection."""
+        if decision.kind == "model_scope_prompt":
+            keys = {
+                "Set as default": "enter",
+                "Use this session only": "s",
+                "Cancel": "escape",
+            }
+            # This is an adapter from Claude Code's rendered single-key control into the same
+            # revisioned decision protocol used by ordinary menus; it is not exposed as raw TUI.
+            self.driver.send_key(keys[decision.options[matches[0]]])
+            await asyncio.sleep(self.SETTLE_S)
+        else:
+            menu = self.menu()
+            target_index = matches[0]
+            if menu is not None and menu.selected != target_index:
+                if not await self._move_menu_index(menu, target_index):
+                    self._last_action = {
+                        "action": "resolve_decision", "status": "failed",
+                        "effect": "decision_changed", "completed": False,
+                    }
+                    return self._result(
+                        "The decision changed while I was focusing that option."
+                    )
+                focused = self._decision_state()
+                focused_menu = self.menu()
+                if (
+                    focused is None
+                    or focused_menu is None
+                    or not self._same_decision(focused, decision)
+                    or focused_menu.selected != target_index
+                ):
+                    self._last_action = {
+                        "action": "resolve_decision", "status": "failed",
+                        "effect": "decision_changed", "completed": False,
+                    }
+                    return self._result(
+                        "The decision changed while I was focusing that option."
+                    )
+                self._last_action = {
+                    "action": "resolve_decision", "status": "pending",
+                    "effect": "option_focused", "completed": False,
+                    "option": decision.options[target_index],
+                    "revision": focused.revision,
+                }
+                return self._reply(
+                    f"Focused {decision.options[target_index]} without submitting it. "
+                    f"Resolve the decision again with revision {focused.revision} and the same "
+                    "exact option to confirm it.",
+                    outcome="succeeded", verified=False,
+                )
+            if menu is None or not self._submit_menu_index(
+                menu, target_index, decision,
+            ):
+                self._last_action = {
+                    "action": "resolve_decision", "status": "failed",
+                    "effect": "decision_changed", "completed": False,
+                }
+                return self._result(
+                    "The decision changed before I could submit that option."
+                )
+            await asyncio.sleep(self.SETTLE_S)
+
+        after = self._decision_state()
+        if after and self._same_decision(after, decision):
+            self._last_action = {
+                "action": "resolve_decision", "status": "failed",
+                "effect": "selection_unverified", "completed": False,
+            }
+            return self._result(
+                f"Sent {decision.options[matches[0]]}, but the same decision is still visible."
+            )
+        destination = f"decision:{after.revision}" if after else "closed"
         self._last_action = {
-            "action": "select_option", "status": "verified",
+            "action": "resolve_decision", "status": "verified",
             "effect": "option_selected", "completed": True,
-            "option": option, "postcondition_verified": True,
+            "option": decision.options[matches[0]], "postcondition_verified": True,
             "evidence": {
-                "kind": "ui_transition", "from": source, "to": destination,
+                "kind": "ui_transition", "from_revision": decision.revision,
+                "to": destination,
             },
         }
-
-    async def _choose_session_model_scope(self, target: str) -> bool:
-        for attempt in range(10):
-            if self._model_scope_visible():
-                break
-            if attempt < 9:
-                await asyncio.sleep(min(self.SETTLE_S, 0.35))
-        else:
-            return True
-        baseline_acks = screenmod.session_model_ack_count(
-            self.driver.snapshot(), target
-        )
-        self.driver.send_key("s")
-        await asyncio.sleep(self.SETTLE_S)
-        # With cached history, current Claude builds can ask for a second,
-        # target-specific confirmation after the session-only key. Accept only
-        # that exact confirmation; never send a blind Enter into an unknown UI.
-        confirmation = self.menu()
-        if self._is_matching_model_confirmation(confirmation, target):
-            yes_idx = next(
-                i for i, option in enumerate(confirmation.options)
-                if option.lower().lstrip("0123456789. ").startswith("yes")
+        if after:
+            return self._result(
+                f"Chose {decision.options[matches[0]]}; another decision is now visible: "
+                f"{after.title or 'options'} — {', '.join(after.options)}."
             )
-            if not await self._choose_menu_index(confirmation, yes_idx):
-                self.driver.send_key("escape")
-                return False
-        elif confirmation and not self._is_model_menu(confirmation):
-            self.driver.send_key("escape")
-            return False
-
-        # Require the fresh session-only acknowledgement before cleanup. Ink
-        # may retain the picker footer afterward; Escape is safe only once the
-        # requested scope is already authoritative.
-        for _ in range(6):
-            if screenmod.session_model_ack_count(
-                self.driver.snapshot(), target
-            ) > baseline_acks:
-                if self._model_scope_visible():
-                    self.driver.send_key("escape")
-                    await asyncio.sleep(min(self.SETTLE_S, 0.35))
-                self._model_scope_dismissed = True
-                return True
-            await asyncio.sleep(min(self.SETTLE_S, 0.35))
-        self.driver.send_key("escape")
-        for _ in range(5):
-            await asyncio.sleep(min(self.SETTLE_S, 0.35))
-            if screenmod.session_model_ack_count(
-                self.driver.snapshot(), target
-            ) > baseline_acks:
-                self._model_scope_dismissed = True
-                return True
-        return False
+        return self._result(f"Chose {decision.options[matches[0]]}.")
 
     async def _wait_until_ready(self) -> bool:
         """Require several consecutive empty-composer frames before typing."""
@@ -1506,19 +1335,24 @@ class ToolRouter:
             and current.selected == idx
         )
 
-    async def _choose_menu_index(self, menu: screenmod.Menu, idx: int) -> bool:
-        if not await self._move_menu_index(menu, idx):
-            return False
-        # Re-read immediately before Enter. Never submit into a composer or a replacement modal.
+    def _submit_menu_index(
+        self, menu: screenmod.Menu, idx: int, authorized: DecisionState,
+    ) -> bool:
+        # Submission is only allowed when the authorized row is already highlighted. Navigation
+        # is a separate revision-producing call because waiting for its repaint would otherwise
+        # let an identical replacement modal inherit stale authorization.
         current = self.menu()
+        current_decision = self._decision_state()
         if (
             current is None
             or self._menu_signature(current) != self._menu_signature(menu)
             or current.selected != idx
+            or current_decision is None
+            or not self._same_decision(current_decision, authorized)
+            or current_decision.revision != authorized.revision
         ):
             return False
         self.driver.send_key("enter")
-        await asyncio.sleep(self.SETTLE_S)
         return True
 
     @staticmethod
@@ -1541,23 +1375,22 @@ class ToolRouter:
 
     @staticmethod
     def _is_matching_model_confirmation(
-        menu: screenmod.Menu | None, selected_option: str
+        menu: screenmod.Menu | None, target: str, lines: list[str],
     ) -> bool:
         if not menu:
             return False
+        context = " ".join(line.casefold() for line in lines)
         yes_options = [
-            option.lower() for option in menu.options
-            if option.lower().lstrip("0123456789. ").startswith("yes")
+            option.casefold() for option in menu.options
+            if option.casefold().lstrip("0123456789. ").startswith("yes")
         ]
-        has_go_back = any("go back" in option.lower() for option in menu.options)
-        if not yes_options or not has_go_back:
-            return False
-        selected = selected_option.lower()
-        model = next(
-            (name for name in ("default", "opus", "fable", "sonnet", "haiku") if name in selected),
-            None,
+        return (
+            "switch model" in context
+            and "conversation is cached" in context
+            and "full history" in context
+            and any("go back" in option.casefold() for option in menu.options)
+            and any(target in option for option in yes_options)
         )
-        return model is not None and any(model in option for option in yes_options)
 
     async def _end_session(self, _call_id: str, _args: dict) -> dict:
         if self.on_status:

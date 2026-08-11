@@ -46,7 +46,8 @@ SCENARIOS = [
      "expect_spoken_any": ["default", "opus", "fable", "sonnet", "haiku"], "timeout": 60},
     {"id": "change-model",
      "say": "Change Claude Code's model to Sonnet and verify that it actually changed.",
-     "expect_tools": ["set_model"], "timeout": 90},
+     "expect_tools": ["change_model"], "expect_tool_arg_contains": "sonnet",
+     "expect_model": "sonnet", "timeout": 90},
     {"id": "challenge-model",
      "say": "I don't believe the model changed. Inspect the actual Claude Code state again.",
      "expect_tools": ["observe_claude"],
@@ -91,6 +92,9 @@ class Recorder:
 
     def tool_calls(self, since: int) -> list[str]:
         return [ev["name"] for ev in self.events[since:] if ev["kind"] == "tool_call"]
+
+    def tool_call_events(self, since: int) -> list[dict]:
+        return [ev for ev in self.events[since:] if ev["kind"] == "tool_call"]
 
 
 async def run_turn(client, rec: Recorder, pending: set, sc: dict) -> tuple[int, bool]:
@@ -229,8 +233,12 @@ async def main() -> int:
         await asyncio.sleep(6)  # let the TUI boot
         menu = router.menu()
         if menu:  # fresh directory trust dialog
-            await router.handle_tool_call({"id": "trust", "name": "select_option",
-                                           "args": {"option": "yes"}})
+            decision = router.semantic_state()["ui"]
+            yes = next(option for option in decision["options"] if option.lower().startswith("yes"))
+            await router.handle_tool_call({
+                "id": "trust", "name": "resolve_decision",
+                "args": {"revision": decision["revision"], "option": yes},
+            })
             await asyncio.sleep(3)
         print(f"claude ready in {project_dir} (state: {router.semantic_state()['phase']})")
 
@@ -262,6 +270,15 @@ async def main() -> int:
                 checks["spoken_state"] = any(
                     token in spoken.lower() for token in sc["expect_spoken_any"]
                 )
+            if sc.get("expect_tool_arg_contains"):
+                expected_arg = sc["expect_tool_arg_contains"].lower()
+                checks["tool_argument"] = any(
+                    expected_arg in json.dumps(event.get("args") or {}).lower()
+                    for event in rec.tool_call_events(start)
+                )
+            if sc.get("expect_model"):
+                observed_model = (router.semantic_state().get("model") or {}).get("name")
+                checks["observed_model"] = observed_model == sc["expect_model"]
             flags = [f for f in VOICE_RED_FLAGS if f in spoken]
             checks["voice_clean"] = not flags
             ok = all(checks.values())

@@ -7,12 +7,14 @@ Converse Code is a semantic bridge to Claude Code, not a general-purpose termina
 - Send ordinary user work to Claude Code as a natural-language `long_task`, or as `steer_task`
   guidance while that same episode is active.
 - Keep direct TUI manipulation out of the public Converse tool manifest. The allowed narrow
-  exceptions are managed cancellation, answering a currently visible blocking user-choice UI,
-  and a semantic model change implemented with Claude Code's documented `/model <alias>` command.
+  exceptions are managed cancellation, resolving one currently visible, revision-matched
+  blocking decision by its exact option label, and the semantic `change_model` operation using
+  Claude Code's documented session-only `/model <alias>` command.
 - Never use raw shell mode or bypass Claude Code's permission system.
-- A menu may remain open only when it represents a real decision that requires the user. Surface
-  its structured options and wait. Resolve deterministic internal confirmations inside the
-  semantic operation that opened them, and fail closed on any unrecognized UI.
+- A menu may remain open only when it represents a real decision. Surface its structured options
+  and revision. Resolve it only after the user chooses or when it is a deterministic confirmation
+  of the active instruction the user already authorized, and fail closed on stale or unrecognized
+  UI.
 - Never type into Claude Code while an unrecognized blocking UI is visible.
 
 ## Evidence-backed outcomes

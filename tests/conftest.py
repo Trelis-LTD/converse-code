@@ -8,7 +8,8 @@ class FakeDriver:
     """Stands in for ClaudeHost: records injections/keys, screen is settable."""
 
     def __init__(self):
-        self.lines = ["────", "❯", "────"]
+        self._lines = ["────", "❯", "────"]
+        self.screen_revision = 0
         self.injected = []
         self.keys = []
         self.router = None
@@ -16,7 +17,16 @@ class FakeDriver:
         self._prompt_id = 0
 
     def snapshot(self):
-        return list(self.lines)
+        return list(self._lines)
+
+    @property
+    def lines(self):
+        return self._lines
+
+    @lines.setter
+    def lines(self, value):
+        self._lines = value
+        self.screen_revision += 1
 
     def inject(self, text, submit_delay_s=None):
         self.injected.append(text)
@@ -53,6 +63,7 @@ class FakeDriver:
         self.lines[old_row] = self.lines[old_row].replace("❯", " ", 1)
         stripped = self.lines[new_row].lstrip()
         self.lines[new_row] = " ❯ " + stripped
+        self.screen_revision += 1
 
 
 class FakeSender:

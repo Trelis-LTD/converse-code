@@ -119,9 +119,12 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security b
   needs a menu decision, but never approves on the user's behalf.
 - Permission and clarification menus are detected from the rendered terminal structure and remain
   open only for a genuine user decision. Prompt-history cursors are excluded so a closed menu
-  cannot be mistaken for an open one. Model changes use `/model <alias>`, verify a fresh rendered
-  result, and report whether Claude applied the change to the current session or also saved it as
-  the default. Managed cancellation interrupts only the matching turn.
+  cannot be mistaken for an open one. Each decision carries a rendered-state revision and is
+  resolved by exact option label only after that revision is revalidated. If navigation is needed,
+  focusing the option and submitting it are separate revision-matched transitions. Ordinary work
+  is sent to Claude as natural-language tasks. Model changes use the documented session-only
+  `/model <alias>` command through a narrow semantic operation with an alias allowlist. Managed
+  cancellation interrupts only the matching turn.
 - New work and steering are explicit: `long_task` starts an idle Claude turn, while `steer_task`
   adds requirements to work already in progress. A second task is never silently reinterpreted as
   guidance or claimed to be queued.

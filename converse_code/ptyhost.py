@@ -142,6 +142,7 @@ class ClaudeHost:
         self._stdin_was_blocking: bool | None = None
         self._screen = _Screen(120, 40)
         self._stream = pyte.ByteStream(self._screen)
+        self.screen_revision = 0
         self._screen_filter = _ScreenByteFilter()
         self.exited = asyncio.Event()
         self.returncode: int | None = None
@@ -221,6 +222,10 @@ class ClaudeHost:
         screen_data = self._screen_filter.feed(data)
         if screen_data:
             self._stream.feed(screen_data)
+            # A revision is an observation boundary, not a hash of visible text. Claude can
+            # close and reopen an identical modal between polls; callers must not be able to
+            # replay approval from the earlier instance just because both renders look alike.
+            self.screen_revision += 1
         if self.attach_terminal:
             self._pending_output.extend(data)
             self._flush_terminal_output()

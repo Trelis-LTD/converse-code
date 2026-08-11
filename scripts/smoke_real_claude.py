@@ -154,7 +154,12 @@ async def main() -> None:
         menu = router.menu()
         if menu:
             print(f"startup menu: {menu.title!r} options={menu.options}")
-            await router.handle_tool_call({"id": "m", "name": "select_option", "args": {"option": "yes"}})
+            decision = router.semantic_state()["ui"]
+            yes = next(option for option in decision["options"] if option.lower().startswith("yes"))
+            await router.handle_tool_call({
+                "id": "m", "name": "resolve_decision",
+                "args": {"revision": decision["revision"], "option": yes},
+            })
             print("answered menu:", sender.results[-1]["speak"])
             await asyncio.sleep(3)
 
@@ -171,30 +176,24 @@ async def main() -> None:
             print("\n".join(l for l in host.snapshot() if l.strip()))
 
         if model_only:
-            # Verify the semantic direct model path and its rendered evidence.
             selected = "Sonnet"
             await router.handle_tool_call({
-                "id": "model-set", "name": "set_model", "args": {"model": selected},
+                "id": "model-change", "name": "change_model",
+                "args": {"model": selected.lower()},
             })
             changed = sender.results[-1]
             changed_metadata = sender.result_metadata[-1]
-            print("initial model result:", changed["speak"], changed["data"]["last_action"])
+            print("semantic model result:", changed["speak"], changed["data"]["last_action"])
 
             await router.handle_tool_call({
                 "id": "model-observe", "name": "observe_claude", "args": {},
             })
             model_ok = (
-                changed["data"]["last_action"]["status"] == "verified"
-                and changed["data"]["last_action"]["completed"] is True
-                and changed["data"]["last_action"]["effect"] in {"already_selected", "model_changed"}
-                and changed["data"]["last_action"].get("postcondition_verified") is True
-                and changed["data"]["last_action"].get("evidence", {}).get("model")
-                    == selected.lower()
-                and changed_metadata == {"outcome": "succeeded", "verified": True}
-                and screenmod.detect_current_model(host.snapshot()) == selected.lower()
+                screenmod.detect_current_model(host.snapshot()) == selected.lower()
                 and changed["data"]["phase"] == "idle"
                 and changed["data"]["ui"]["kind"] == "none"
-                and sender.results[-1]["data"]["last_action"] == changed["data"]["last_action"]
+                and sender.results[-1]["data"]["model"]["name"] == selected.lower()
+                and changed_metadata == {"outcome": "succeeded", "verified": True}
             )
             print("model selection:", changed["speak"])
             if not model_ok:

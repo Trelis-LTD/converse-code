@@ -1,7 +1,7 @@
 from converse_code.screen import (
-    Menu, ModelAcknowledgement, detect_current_model, detect_menu, detect_model,
-    has_empty_composer, is_idle, is_model_scope_prompt, match_option,
-    model_acknowledgements,
+    Menu, detect_current_model, detect_header_model, detect_menu, detect_model, has_empty_composer,
+    is_idle, is_model_scope_prompt, match_option,
+    menu_context,
 )
 
 PERMISSION_PROMPT = [
@@ -164,6 +164,11 @@ def test_empty_composer_accepts_new_footer_without_plain_neighbor_rule():
         "❯", "────────────────", "✢ Brewed for 1s",
         "? for shortcuts ·",
     ])
+    assert has_empty_composer([
+        "❯\xa0", "────────────────",
+        "  ⏸ manual mode on · ? for shortcuts · ────────────────",
+        "──⏸─manual mod──on    ─    ─   ─    ─   ─  ─     ─       Esc─again to─clear──",
+    ])
 
 
 def test_model_scope_prompt_can_be_far_from_bottom_of_screen():
@@ -218,16 +223,24 @@ def test_current_model_detected_from_visible_claude_state():
     assert detect_current_model(WELCOME_WITH_MODEL) == "sonnet"
     assert detect_current_model(REAL_IDLE_WITH_PROMPT_HISTORY) is None
     assert detect_current_model(MODEL_PICKER) == "sonnet"
+    assert detect_header_model(WELCOME_WITH_MODEL) == "sonnet"
+    assert detect_header_model(MODEL_PICKER) is None
 
 
-def test_model_acknowledgements_preserve_observed_scope():
-    assert model_acknowledgements([
-        "  ⎿  Set model to Opus 5 and saved as your default for new sessions",
-        "  ⎿  Set model to Sonnet 5 for this session",
-    ]) == (
-        ModelAcknowledgement("opus", "default_for_new_sessions"),
-        ModelAcknowledgement("sonnet", "current_session"),
-    )
+def test_menu_context_excludes_stale_block_above_rule():
+    lines = [
+        " Switch model?", " This conversation is cached for the current model.",
+        " Switching means the full history gets re-read.", "────────",
+        " Save this as your default model?",
+        " ❯ 1. Yes, save Sonnet", "   2. No, go back", "",
+    ]
+    menu = detect_menu(lines)
+
+    assert menu is not None
+    assert menu_context(lines, menu) == [
+        " Save this as your default model?",
+        " ❯ 1. Yes, save Sonnet", "   2. No, go back", "",
+    ]
 
 
 def test_numbered_prose_is_not_a_menu():
