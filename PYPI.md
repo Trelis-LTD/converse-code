@@ -1,14 +1,14 @@
 # Converse Code
 
-Talk or type to Claude Code, or control it through a headless JSONL interface — a reference
-implementation of a client for the [Converse](https://converse.trelis.com) WebSocket tool
-protocol.
-
-> **Alpha — invite only.** Trelis Converse is in alpha for individual developers and
-> enterprise. Reach out to [voice@trelis.com](mailto:voice@trelis.com) to get on the waitlist.
+A minimal reference implementation of Converse background tools and the Browser SDK, using Pi
+with a ChatGPT Plus/Pro Codex subscription.
 
 ```bash
+npm install -g @earendil-works/pi-coding-agent
 uvx converse-code
 ```
 
-Documentation, source, and issues: https://github.com/Trelis-LTD/converse-code
+It demonstrates deferred execution, progress, partial results, `reply: true`, steering,
+cancellation, and terminal results without terminal scraping.
+
+Documentation: https://github.com/Trelis-LTD/converse-code

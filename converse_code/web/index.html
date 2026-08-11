@@ -2,821 +2,96 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Converse Code</title>
 <style>
-  :root{
-    color-scheme:dark;
-    --bg:#10110f; --panel:#181a17; --panel-2:#20231f; --text:#eee9df;
-    --muted:#92988d; --quiet:#666c63; --border:#2b2f29; --border-strong:#3a4038;
-    --accent:#ed765f; --accent-deep:#bc5542; --accent-fg:#160d0a;
-    --sage:#9abb9e; --sage-deep:#57735b; --amber:#d3a45b; --violet:#ac93d5;
-    --dot-connecting:#d3a45b; --dot-open:#8fc79a; --dot-closed:#77635f;
-    --chip-idle:#9abb9e; --chip-working:#d3a45b; --chip-menu:#ac93d5;
-  }
-  *{box-sizing:border-box;}
-  html,body{height:100%;}
-  body{
-    margin:0; background:var(--bg); color:var(--text);
-    font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    display:flex; flex-direction:column;
-    letter-spacing:-.01em;
-  }
-  header{
-    display:flex; align-items:center; gap:.7rem; width:100%; max-width:920px;
-    padding:1.15rem 1.5rem .9rem; margin:0 auto; flex:0 0 auto;
-  }
-  .brand-mark{
-    width:2rem; height:2rem; display:flex; align-items:center; justify-content:center; gap:2px;
-    border:1px solid var(--border-strong); background:var(--panel); border-radius:.55rem;
-  }
-  .brand-mark i{display:block; width:2px; border-radius:2px; background:var(--accent);}
-  .brand-mark i:nth-child(1),.brand-mark i:nth-child(5){height:6px; opacity:.55;}
-  .brand-mark i:nth-child(2),.brand-mark i:nth-child(4){height:12px; opacity:.8;}
-  .brand-mark i:nth-child(3){height:18px;}
-  .brand-copy{display:flex; flex-direction:column; gap:.05rem;}
-  header h1{font-size:.96rem; margin:0; font-weight:650; letter-spacing:.01em;}
-  .eyebrow{font:600 .6rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--quiet); letter-spacing:.12em; text-transform:uppercase;}
-  .connection{display:flex; align-items:center; gap:.45rem; color:var(--muted); font-size:.7rem; margin-right:.25rem;}
-  .dot{width:.42rem; height:.42rem; border-radius:50%; flex:0 0 auto; background:var(--dot-closed); transition:background .2s,box-shadow .2s;}
-  .dot.connecting{background:var(--dot-connecting);}
-  .dot.open{background:var(--dot-open); box-shadow:0 0 0 3px rgba(143,199,154,.1);}
-  .dot.closed{background:var(--dot-closed);}
-  .spacer{flex:1;}
-  .chip{
-    font:650 .63rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; padding:.38rem .58rem;
-    border-radius:.35rem; color:var(--chip-idle); border:1px solid currentColor;
-    background:transparent; text-transform:uppercase; letter-spacing:.08em;
-  }
-  .chip.working{color:var(--chip-working);}
-  .chip.menu{color:var(--chip-menu);}
-  .chip.idle{color:var(--chip-idle);}
-  main{
-    flex:1 1 auto; min-height:0; overflow:hidden; display:flex; flex-direction:column;
-    max-width:920px; width:100%; margin:0 auto; padding:0 1.5rem; position:relative;
-  }
-  #log{
-    flex:1 1 auto; overflow-y:auto; padding:1.8rem 0 2rem; display:flex; flex-direction:column; gap:.85rem;
-    scrollbar-width:thin; scrollbar-color:var(--border-strong) transparent;
-  }
-  #emptyState{
-    position:absolute; inset:0 1.5rem; display:flex; flex-direction:column; align-items:center;
-    justify-content:center; text-align:center; pointer-events:none; transform:translateY(-2%);
-  }
-  #emptyState.hidden{display:none;}
-  .signal-orbit{
-    width:7.5rem; height:7.5rem; border:1px solid var(--border); border-radius:50%;
-    display:grid; place-items:center; margin-bottom:1.5rem; position:relative;
-  }
-  .signal-orbit:before,.signal-orbit:after{content:""; position:absolute; border:1px solid var(--border); border-radius:50%;}
-  .signal-orbit:before{inset:.7rem;}
-  .signal-orbit:after{inset:1.45rem; border-color:var(--border-strong);}
-  .signal-core{width:2.3rem; height:2.3rem; border-radius:50%; background:var(--accent); box-shadow:0 0 32px rgba(237,118,95,.2);}
-  #emptyState h2{font-size:1.2rem; font-weight:580; margin:0 0 .45rem; letter-spacing:-.025em;}
-  #emptyState p{font-size:.78rem; color:var(--muted); max-width:22rem; line-height:1.55; margin:0;}
-  .entry{
-    max-width:82%; padding:.72rem .88rem; border-radius:.72rem; line-height:1.48;
-    font-size:.9rem; word-wrap:break-word; animation:entry-in .18s ease-out;
-  }
-  @keyframes entry-in{from{opacity:0; transform:translateY(4px);}to{opacity:1; transform:none;}}
-  .entry.you{align-self:flex-end; background:#292d28; border:1px solid var(--border-strong); color:var(--text); border-bottom-right-radius:.2rem;}
-  .entry.assistant{align-self:flex-start; background:var(--panel); border:1px solid var(--border); color:var(--text); border-bottom-left-radius:.2rem;}
-  .entry.inject{
-    align-self:stretch; max-width:100%; background:rgba(211,164,91,.055); border:1px solid rgba(211,164,91,.22);
-    color:#d9b678; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.76rem;
-    border-radius:.4rem;
-  }
-  .entry.banner{align-self:center; background:transparent; color:var(--muted); font-size:.74rem; text-align:center;}
-  .entry .label{display:block; font:650 .58rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--quiet); margin-bottom:.42rem; text-transform:uppercase; letter-spacing:.11em;}
-  .entry.you .label{color:#aeb4aa;}
-  #textForm{
-    flex:0 0 auto; max-width:872px; width:calc(100% - 3rem); margin:0 auto .65rem;
-    display:flex; gap:.55rem;
-  }
-  #textInput{
-    flex:1 1 auto; min-width:0; height:2.75rem; padding:0 .85rem; border-radius:.7rem;
-    border:1px solid var(--border); background:var(--panel); color:var(--text); font:inherit;
-  }
-  #textInput::placeholder{color:var(--quiet);}
-  #textInput:focus{outline:2px solid var(--sage-deep); outline-offset:1px;}
-  #textSendBtn{
-    flex:0 0 auto; min-width:4.5rem; border:1px solid var(--sage-deep); border-radius:.7rem;
-    background:var(--panel-2); color:var(--sage); font-weight:650; cursor:pointer;
-  }
-  #textSendBtn:hover:not(:disabled){border-color:var(--sage); color:var(--text);}
-  #textSendBtn:disabled,#textInput:disabled{opacity:.55; cursor:default;}
-  footer{
-    flex:0 0 auto; padding:.85rem; border:1px solid var(--border); background:var(--panel);
-    display:flex; align-items:center; gap:.95rem; max-width:872px; width:calc(100% - 3rem);
-    margin:0 auto 1.25rem; border-radius:1rem; box-shadow:0 14px 40px rgba(0,0,0,.22);
-  }
-  #micBtn{
-    flex:0 0 auto; width:3.65rem; height:3.65rem; border-radius:.8rem; border:1px solid #f28a75; cursor:pointer;
-    background:var(--accent); color:var(--accent-fg); display:flex; align-items:center; justify-content:center;
-    transition:transform .12s,background .2s,border-radius .2s; box-shadow:inset 0 -2px 0 rgba(80,20,10,.16);
-  }
-  #micBtn svg{width:1.25rem; height:1.25rem; fill:currentColor;}
-  #micBtn:hover{background:#f08069;}
-  #micBtn:active{transform:scale(.94);}
-  #micBtn:focus-visible{outline:2px solid var(--text); outline-offset:3px;}
-  #micBtn.live{background:var(--accent-deep); border-radius:50%;}
-  #muteBtn{
-    flex:0 0 auto; min-width:4.5rem; height:2.35rem; padding:0 .75rem; border-radius:.55rem;
-    border:1px solid var(--border-strong); background:var(--panel-2); color:var(--muted);
-    font:650 .63rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; cursor:pointer;
-    text-transform:uppercase; letter-spacing:.06em;
-  }
-  #muteBtn:hover:not(:disabled){color:var(--text); border-color:var(--muted);}
-  #muteBtn:disabled{opacity:.62; cursor:default;}
-  #muteBtn.muted{color:var(--amber); border-color:var(--amber);}
-  #muteBtn:focus-visible{outline:2px solid var(--text); outline-offset:3px;}
-  .mic-copy{flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:.22rem;}
-  #micLabel{font-size:.82rem; font-weight:620; color:var(--text);}
-  #micHint{font-size:.69rem; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-  .levels{height:1.4rem; display:flex; align-items:center; gap:3px; padding:0 .25rem; opacity:.35;}
-  .levels i{display:block; width:2px; height:5px; border-radius:2px; background:var(--sage);}
-  .levels i:nth-child(2),.levels i:nth-child(6){height:9px;}
-  .levels i:nth-child(3),.levels i:nth-child(5){height:14px;}
-  .levels i:nth-child(4){height:19px;}
-  footer.live .levels{opacity:1;}
-  footer.live .levels i{animation:level .8s ease-in-out infinite alternate;}
-  footer.live .levels i:nth-child(2){animation-delay:-.25s;} footer.live .levels i:nth-child(3){animation-delay:-.5s;}
-  footer.live .levels i:nth-child(4){animation-delay:-.15s;} footer.live .levels i:nth-child(5){animation-delay:-.4s;}
-  @keyframes level{to{transform:scaleY(.35); opacity:.55;}}
-  .kbd{font:600 .58rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--quiet); text-transform:uppercase; letter-spacing:.08em;}
-  @media(max-width:600px){
-    header{padding:1rem;} main{padding:0 1rem;} #emptyState{inset:0 1rem;}
-    .connection span:last-child,.kbd{display:none;} footer,#textForm{width:calc(100% - 2rem);}
-    footer{margin-bottom:1rem;}
-    .entry{max-width:92%;}
-  }
-  @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important; transition:none!important;}}
+:root{color-scheme:dark;--bg:#11120f;--panel:#1b1d19;--text:#eee9df;--muted:#979d92;--line:#343832;--accent:#ed765f;--ok:#9abb9e}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif;min-height:100vh;display:grid;grid-template-rows:auto 1fr auto}
+header,main,footer{width:min(760px,calc(100% - 2rem));margin:auto}header{display:flex;align-items:center;padding:1rem 0;border-bottom:1px solid var(--line)}
+h1{font-size:1rem;margin:0}.badge{margin-left:auto;color:var(--ok);font:12px ui-monospace,monospace}main{padding:1rem 0;overflow:auto}.empty{color:var(--muted);text-align:center;margin-top:20vh}
+.entry{max-width:85%;padding:.7rem .85rem;margin:.6rem 0;border:1px solid var(--line);border-radius:.7rem;background:var(--panel)}.user{margin-left:auto}.assistant{margin-right:auto}.notice{max-width:100%;color:var(--muted);background:transparent;text-align:center;border:0}
+footer{display:grid;grid-template-columns:1fr auto auto;gap:.5rem;padding:1rem 0}input,button{font:inherit;border:1px solid var(--line);border-radius:.55rem;padding:.7rem;background:var(--panel);color:var(--text)}button{cursor:pointer}button.primary{background:var(--accent);color:#1a0c08;border-color:var(--accent);font-weight:700}button:disabled,input:disabled{opacity:.55}
 </style>
 </head>
 <body>
-<header>
-  <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-  <div class="brand-copy"><span class="eyebrow">Trelis</span><h1>Converse Code</h1></div>
-  <div class="spacer"></div>
-  <span class="connection"><span class="dot closed" id="wsDot"></span><span>terminal link</span></span>
-  <span class="chip idle" id="statusChip" role="status" aria-live="polite">idle</span>
-</header>
-<main>
-  <section id="emptyState" aria-label="Converse session ready">
-    <div class="signal-orbit" aria-hidden="true"><span class="signal-core"></span></div>
-    <h2>Claude Code link ready</h2>
-    <p>Speak or type to work with Claude Code. Your instructions and its replies will appear here.</p>
-  </section>
-  <div id="log" role="log" aria-live="polite" aria-relevant="additions text"></div>
-</main>
-<form id="textForm" aria-busy="false">
-  <input id="textInput" type="text" maxlength="2000" autocomplete="off"
-         aria-label="Type an instruction" placeholder="Type an instruction for Claude Code…">
-  <button id="textSendBtn" type="submit">Send</button>
-</form>
+<header><h1>Converse Code</h1><span id="status" class="badge">connecting</span></header>
+<main id="log"><p id="empty" class="empty">A minimal background-tool reference powered by Pi and Codex.</p></main>
 <footer>
-  <button id="micBtn" type="button" aria-label="Start voice input" aria-pressed="false">
-    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 0 0 3.5-3.5V6a3.5 3.5 0 1 0-7 0v6a3.5 3.5 0 0 0 3.5 3.5Zm-2-9.5a2 2 0 1 1 4 0v6a2 2 0 1 1-4 0V6Zm8 6a6 6 0 0 1-12 0H4.5a7.5 7.5 0 0 0 6.75 7.46V22h1.5v-2.54A7.5 7.5 0 0 0 19.5 12H18Z"/></svg>
-  </button>
-  <div class="mic-copy"><span id="micLabel">Start voice</span><span id="micHint">Speak naturally — coding requests are handed to Claude Code</span></div>
-  <span class="levels" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
-  <button id="muteBtn" type="button" aria-label="Mute microphone" aria-pressed="false" disabled>Mute mic</button>
-  <span class="kbd">Classic voice</span>
+  <input id="text" aria-label="Message" placeholder="Ask Codex to work on this project">
+  <button id="send">Send</button>
+  <button id="voice" class="primary" aria-pressed="false">Start voice</button>
 </footer>
-<script src="/assistant-transcript.js"></script>
-<script src="/typed-turn.js"></script>
-<script>
-(function(){
-  "use strict";
+<script type="module">
+const token=new URLSearchParams(location.search).get("t")||"";
+const log=document.querySelector("#log"),empty=document.querySelector("#empty");
+const input=document.querySelector("#text"),send=document.querySelector("#send");
+const voice=document.querySelector("#voice"),status=document.querySelector("#status");
+let client=null,opening=null,mic=false,ready=false,seqs=new Map(),assistantRow=null;
 
-  var BUILD = "2026-08-11-direct-sdk-0.12.3";
-  var RESUME_STORAGE_KEY = "converse-code-resume-v1";
+function row(kind,text){empty?.remove();const el=document.createElement("div");el.className=`entry ${kind}`;el.textContent=text;log.append(el);log.scrollTop=log.scrollHeight;return el}
+function wireSend(frame){if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(frame))}
+const ws=new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(token)}`);
+ws.onopen=()=>{status.textContent="idle"};
+ws.onmessage=event=>{const frame=JSON.parse(event.data);if(frame.event==="bridge_control"){seqs.set(frame.seq,frame);flush()}};
 
-  // ---------- WebSocket connection with auto-reconnect ----------
-  var ws = null;
-  var wsDot = document.getElementById("wsDot");
-  var statusChip = document.getElementById("statusChip");
-  var reconnectDelay = 2000;
-  var reconnectTimer = null;
-  var localOutbox = [];
+async function openClient(){
+  if(client)return client;if(opening)return opening;
+  opening=(async()=>{
+    const sdk=await import("./vendor/converse/index.js");
+    const sessionId=sdk.createSessionId();
+    const response=await fetch(`/session-credential?t=${encodeURIComponent(token)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:sessionId})});
+    if(!response.ok)throw new Error(`credential request failed: ${response.status}`);
+    const credential=await response.json();
+    const instance=new sdk.ConverseClient({url:credential.ws_url,apiKey:credential.api_key,sessionId:credential.session_id,mode:{kind:"converse",voice:"classic",web_search:false,tools:credential.tools||[]}});
+    instance.addEventListener("event",event=>render(event.detail||{}));
+    await instance.unlockAudio();await instance.connect({noGreeting:true});
+    client=instance;ready=true;wireSend({type:"local",event:"bridge_ready"});await flush();return instance;
+  })();
+  try{return await opening}finally{opening=null}
+}
 
-  function wsUrl(){
-    var proto = location.protocol === "https:" ? "wss:" : "ws:";
-    // The run's token arrives in this page's own URL; the server requires it
-    // on the socket too, so other pages can't open one.
-    var token = new URLSearchParams(location.search).get("t") || "";
-    return proto + "//" + location.host + "/ws?t=" + encodeURIComponent(token);
+function render(event){
+  if(event.type==="asr"&&event.final)row("user",event.text||"");
+  if(event.type==="turn")assistantRow=row("assistant","");
+  if(event.type==="text_delta"){
+    assistantRow=assistantRow||row("assistant","");
+    assistantRow.textContent+=(event.delta||"");
   }
-
-  function setDot(state){
-    wsDot.className = "dot " + state;
-    wsDot.parentElement.title = "Terminal link: " + state;
+  if(event.type==="utterance"){
+    assistantRow=assistantRow||row("assistant","");
+    assistantRow.textContent=event.text||event.utterance||"";
   }
+  if(event.type==="done"||event.type==="interrupted")assistantRow=null;
+  if(event.type==="tool_call")wireSend({type:"local",event:"tool_call",call:event});
+  if(event.type==="tool_cancel")wireSend({type:"local",event:"tool_cancel",call:event});
+  if(event.type==="reconnecting")ready=false;
+  if(event.type==="reconnected"){ready=true;wireSend({type:"local",event:"bridge_ready"});flush()}
+}
 
-  function connect(){
-    setDot("connecting");
-    try{
-      ws = new WebSocket(wsUrl());
-    }catch(e){
-      scheduleReconnect();
-      return;
-    }
-    ws.onopen = function(){
-      setDot("open");
-      while(localOutbox.length && ws.readyState === WebSocket.OPEN){
-        ws.send(JSON.stringify(localOutbox.shift()));
-      }
-      if(converseReady) sendJson({type: "local", event: "bridge_ready"});
-    };
-    ws.onclose = function(){
-      setDot("closed");
-      scheduleReconnect();
-    };
-    ws.onerror = function(){
-      try{ ws.close(); }catch(e){}
-    };
-    ws.onmessage = function(ev){
-      if(typeof ev.data === "string") handleJson(ev.data);
-    };
+async function flush(){
+  if(!ready||!client)return;
+  for(const [seq,frame]of [...seqs]){
+    let accepted=true;
+    if(frame.action==="tool_deferred")accepted=client.sendToolDeferred(frame.id,{handle:frame.handle,statusLabel:frame.status_label});
+    else if(frame.action==="tool_progress")accepted=client.sendToolProgress(frame.id,frame.note);
+    else if(frame.action==="tool_partial_result")accepted=client.sendToolPartialResult(frame.id,frame.content,{reply:!!frame.reply});
+    else if(frame.action==="tool_result")accepted=client.sendToolResult(frame.id,frame.content,{outcome:frame.outcome,verified:!!frame.verified});
+    else if(frame.action==="tool_cancel")accepted=client.sendToolCancel(frame.id);
+    else{seqs.delete(seq);continue}
+    if(accepted!==true){ready=false;break}
+    if(frame.action==="tool_deferred")status.textContent="working";
+    if(frame.action==="tool_result")status.textContent="idle";
+    seqs.delete(seq);wireSend({type:"local",event:"bridge_ack",seq});
   }
+}
 
-  function scheduleReconnect(){
-    if(reconnectTimer) return;
-    reconnectTimer = setTimeout(function(){
-      reconnectTimer = null;
-      connect();
-    }, reconnectDelay);
-  }
-
-  function sendJson(obj, durable){
-    if(ws && ws.readyState === WebSocket.OPEN){
-      ws.send(JSON.stringify(obj));
-    } else if(durable){
-      localOutbox.push(obj);
-    }
-  }
-
-  // ---------- Conversation log ----------
-  var logEl = document.getElementById("log");
-  var emptyState = document.getElementById("emptyState");
-  var userScrolledUp = false;
-
-  logEl.addEventListener("scroll", function(){
-    var atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 24;
-    userScrolledUp = !atBottom;
-  });
-
-  function autoScroll(){
-    if(!userScrolledUp){
-      logEl.scrollTop = logEl.scrollHeight;
-    }
-  }
-
-  var userTurns = new UserTurnRenderer({
-    create: function(){ return makeEntry("you", "You"); },
-    setText: setBody
-  });
-
-  function makeEntry(kind, labelText){
-    emptyState.classList.add("hidden");
-    var div = document.createElement("div");
-    div.className = "entry " + kind;
-    if(labelText){
-      var label = document.createElement("span");
-      label.className = "label";
-      label.textContent = labelText;
-      div.appendChild(label);
-    }
-    var body = document.createElement("span");
-    body.className = "body";
-    div.appendChild(body);
-    logEl.appendChild(div);
-    autoScroll();
-    return div;
-  }
-
-  function setBody(entryEl, text){
-    var body = entryEl.querySelector(".body");
-    body.textContent = text;
-    autoScroll();
-  }
-
-  function addAcceptedPrompt(text){
-    var el = makeEntry("inject", "→ accepted by Claude Code");
-    setBody(el, text);
-  }
-
-  function addBanner(text){
-    makeEntry("banner", null).querySelector(".body").textContent = text;
-    autoScroll();
-  }
-
-  // ---------- Local status + tool bridge ----------
-  function pickText(msg){
-    if(typeof msg.text === "string") return msg.text;
-    if(typeof msg.transcript === "string") return msg.transcript;
-    if(typeof msg.partial === "string") return msg.partial;
-    if(typeof msg.utterance === "string") return msg.utterance;
-    if(typeof msg.content === "string") return msg.content;
-    return "";
-  }
-
-  function isFinal(msg){
-    var f = msg.final !== undefined ? msg.final : msg.is_final;
-    if(f === undefined) return false;
-    return !!f;
-  }
-
-  var assistantTranscript = new AssistantTranscript({
-    create: function(){ return makeEntry("assistant", "Assistant"); },
-    setText: setBody,
-    pickText: pickText
-  });
-
-  // Converse audio and events travel directly between this page and Converse.
-  // The localhost socket carries only Claude state and tool controls.
-  function handleJson(raw){
-    var msg;
-    try{
-      msg = JSON.parse(raw);
-    }catch(e){
-      console.debug("bad json frame", raw);
-      return;
-    }
-    if(msg.type !== "local"){
-      console.debug("unexpected message on the status channel", msg);
-      return;
-    }
-    if(msg.event === "status"){
-      updateStatusChip(msg.phase);
-    } else if(msg.event === "prompt_accepted"){
-      addAcceptedPrompt(msg.text || "");
-    } else if(msg.event === "end_session"){
-      endAfterReply = true;
-    } else if(msg.event === "bridge_control"){
-      queueBridgeControl(msg);
-    }
-  }
-
-  function updateStatusChip(state){
-    state = state || "idle";
-    statusChip.className = "chip " + state;
-    statusChip.textContent = state;
-  }
-
-  // ---------- Session + audio: the SDK's own ConverseClient ----------
-  // This is the same client the Converse playground runs. It owns microphone
-  // capture, echo cancellation (including WebKit's WASM canceller, which the
-  // browser cannot do for us on Safari/iOS), streaming playback, barge handling
-  // and reconnects.
-  //
-  // Python mints a short-lived session credential; the persistent account key
-  // never enters browser JavaScript.
-  var micBtn = document.getElementById("micBtn");
-  var muteBtn = document.getElementById("muteBtn");
-  var micLabel = document.getElementById("micLabel");
-  var micDock = document.querySelector("footer");
-  var textForm = document.getElementById("textForm");
-  var textInput = document.getElementById("textInput");
-  var textSendBtn = document.getElementById("textSendBtn");
-
-  var client = null;
-  var sessionStartPromise = null;
-  var micActive = false;
-  var micMuted = false;
-  var sessionStarting = false;
-  var micStartGeneration = 0;
-  var sessionGeneration = 0;
-  var endAfterReply = false;
-  var converseReady = false;
-  var pendingBridgeControls = new Map();
-  var bridgeFlushing = false;
-  var bridgeFlushRequested = false;
-  var admissionRetryDelays = globalThis.__converseCodeAdmissionRetryDelays ||
-    [500, 1000, 2000, 4000, 8000, 8000];
-  globalThis.__converseCodeAdmissionRetryDelays = admissionRetryDelays;
-  var typedTurns = new TypedTurnController({
-    send: async function(text, messageId){
-      var activeClient = await startSession({noGreeting: true});
-      return activeClient.sendText(text, {messageId: messageId});
-    },
-    setBusy: function(busy){
-      textInput.disabled = busy;
-      textSendBtn.disabled = busy;
-      textForm.setAttribute("aria-busy", String(busy));
-      if(!busy) textInput.focus();
-    },
-    clearInput: function(){ textInput.value = ""; },
-    showError: addBanner
-  });
-
-  function credentialUrl(){
-    var token = new URLSearchParams(location.search).get("t") || "";
-    return "/session-credential?t=" + encodeURIComponent(token);
-  }
-
-  function loadResumeRecord(){
-    try{
-      var record = JSON.parse(sessionStorage.getItem(RESUME_STORAGE_KEY) || "null");
-      if(record && typeof record.sessionId === "string" && record.state){
-        return record;
-      }
-    }catch(e){}
-    sessionStorage.removeItem(RESUME_STORAGE_KEY);
-    return null;
-  }
-
-  function saveResumeRecord(sessionId, state){
-    if(state){
-      sessionStorage.setItem(RESUME_STORAGE_KEY, JSON.stringify({sessionId: sessionId, state: state}));
-    } else {
-      sessionStorage.removeItem(RESUME_STORAGE_KEY);
-    }
-  }
-
-  function queueBridgeControl(frame){
-    if(!pendingBridgeControls.has(frame.seq)) pendingBridgeControls.set(frame.seq, frame);
-    flushBridgeControls();
-  }
-
-  async function flushBridgeControls(){
-    if(bridgeFlushing){ bridgeFlushRequested = true; return; }
-    if(!client || !converseReady) return;
-    bridgeFlushing = true;
-    try{
-      for(const [seq, frame] of pendingBridgeControls){
-        try{
-          var sent = true;
-          switch(frame.action){
-            case "tool_result":
-              sent = client.sendToolResult(frame.id, frame.content, {
-                outcome: frame.outcome, verified: !!frame.verified
-              }); break;
-            case "tool_progress":
-              sent = client.sendToolProgress(frame.id, frame.note); break;
-            case "tool_deferred":
-              sent = client.sendToolDeferred(frame.id, {
-                handle: frame.handle, statusLabel: frame.status_label
-              }); break;
-            case "tool_partial_result":
-              sent = client.sendToolPartialResult(
-                frame.id, frame.content, {reply: !!frame.reply}
-              ); break;
-            case "tool_cancel":
-              sent = client.sendToolCancel(frame.id); break;
-            case "inject_context": {
-              var acknowledgement = await client.injectContext(frame.text, {
-                role: frame.role, reply: !!frame.reply,
-                messageId: client.sessionId + "-bridge-" + seq
-              });
-              if(!acknowledgement || acknowledgement.accepted !== true){
-                pendingBridgeControls.delete(seq);
-                sendJson({
-                  type: "local", event: "bridge_reject", seq: seq,
-                  reason: acknowledgement && acknowledgement.reason
-                }, true);
-                continue;
-              }
-              break;
-            }
-            default:
-              console.debug("unknown bridge action", frame.action);
-              pendingBridgeControls.delete(seq);
-              continue;
-          }
-          if(sent !== true){
-            // The SDK saw no live transport. Retain the durable control and wait for its
-            // authoritative reconnected event instead of acknowledging a dropped frame.
-            converseReady = false;
-            throw new Error("Converse transport did not accept bridge control");
-          }
-          pendingBridgeControls.delete(seq);
-          sendJson({type: "local", event: "bridge_ack", seq: seq}, true);
-        }catch(err){
-          // Retain the control for the next bridge-ready/reconnect cycle. The
-          // stable message ID makes an acknowledgement replay correlatable.
-          console.debug("could not deliver bridge control", err);
-          break;
-        }
-      }
-    }finally{
-      bridgeFlushing = false;
-      if(bridgeFlushRequested){
-        bridgeFlushRequested = false;
-        if(client && converseReady) queueMicrotask(flushBridgeControls);
-      }
-    }
-  }
-
-  function renderEvent(ev){
-    switch(ev.type){
-      case "asr": {
-        var userText = pickText(ev);
-        if(isFinal(ev)) typedTurns.handleAsr(ev, userText);
-        userTurns.handle(ev, userText, isFinal(ev));
-        break;
-      }
-      case "turn": {
-        userTurns.freezeFallback();
-        assistantTranscript.handle(ev);
-        break;
-      }
-      case "text_delta":
-      case "utterance": {
-        assistantTranscript.handle(ev);
-        break;
-      }
-      case "interrupted": {
-        assistantTranscript.handle(ev);
-        finishEndSession();
-        break;
-      }
-      case "done": {
-        assistantTranscript.handle(ev);
-        userTurns.freezeFallback();
-        finishEndSession();
-        break;
-      }
-      case "bye": {
-        addBanner("Session ended" + (ev.reason ? (": " + ev.reason) : "") + " — use voice or text to start again.");
-        resetSession();
-        break;
-      }
-      case "session_end": {
-        addBanner("Converse session ended — use voice or text to start again.");
-        resetSession();
-        break;
-      }
-      case "tool_call":
-        sendJson({type: "local", event: "tool_call", call: ev}, true);
-        break;
-      case "tool_cancel":
-        sendJson({type: "local", event: "tool_cancel", call: ev}, true);
-        break;
-      case "reconnecting":
-        converseReady = false;
-        micLabel.textContent = "Reconnecting…";
-        break;
-      case "reconnected":
-        converseReady = true;
-        micLabel.textContent = micMuted ? "Muted" : "Listening";
-        flushBridgeControls();
-        sendJson({type: "local", event: "bridge_ready"});
-        break;
-      case "resume_failed":
-        addBanner("The previous Converse session expired — use voice or text to start a fresh one.");
-        resetSession();
-        break;
-      case "error": {
-        console.debug("client error", ev);
-        var detail = ev.detail || (ev.error && ev.error.message) || "unknown error";
-        // The SDK dispatches the broker error before its initial connect promise rejects.
-        // Capacity errors are handled by openSession's bounded retry loop; resetting here would
-        // cancel that loop and turn a transient busy period into a misleading manual-retry banner.
-        if(!converseReady && sessionStartPromise && isAdmissionCapacityError(ev)) break;
-        if(ev.retryable){
-          if(typedTurns.pending){
-            addBanner("Typed turn delivery is unknown because the Converse session disconnected.");
-          }
-          addBanner("Converse error: " + detail + ". Use voice or text to reconnect.");
-          resetSession();
-        } else {
-          addBanner("Converse error: " + detail);
-        }
-        break;
-      }
-      default: break;   // audio frames and everything else: the client handles it
-    }
-  }
-
-  function isAdmissionCapacityError(value){
-    return value && (value.code === "too_many_sessions" || value.code === "server_busy" ||
-      value.code === "server_restarting");
-  }
-
-  function admissionError(value){
-    var error = new Error(
-      value && value.code === "too_many_sessions"
-        ? "This account is already using all of its concurrent Converse sessions. " +
-          "Automatic retries did not find a free slot."
-        : ((value && value.message) || "Converse is temporarily at capacity")
-    );
-    error.code = value && value.code;
-    error.retryable = true;
-    return error;
-  }
-
-  async function connectWithAdmissionRetry(openingClient, options, generation){
-    var attempt = 0;
-    while(true){
-      if(generation !== sessionGeneration || client !== openingClient){
-        throw {sessionCanceled: true};
-      }
-      try{
-        await openingClient.connect({noGreeting: !!options.noGreeting});
-        return;
-      }catch(err){
-        if(generation !== sessionGeneration || client !== openingClient){
-          throw {sessionCanceled: true};
-        }
-        if(!isAdmissionCapacityError(err) || attempt >= admissionRetryDelays.length){
-          throw isAdmissionCapacityError(err) ? admissionError(err) : err;
-        }
-        if(attempt === 0){
-          addBanner(err.code === "too_many_sessions"
-            ? "This account is at its concurrent-session limit — retrying automatically…"
-            : "Converse is temporarily busy — retrying automatically…");
-        }
-        if(sessionStarting) micLabel.textContent = "Waiting for capacity…";
-        var delay = admissionRetryDelays[attempt++];
-        await new Promise(function(resolve){ setTimeout(resolve, delay); });
-      }
-    }
-  }
-
-  function finishEndSession(){
-    if(!endAfterReply) return;
-    endAfterReply = false;
-    addBanner("Converse session ended — use voice or text to start a new one.");
-    resetSession();
-  }
-
-  // Without this, a session that ends (bye, or a broker-side error) leaves the
-  // old client cached, so startSession() hands the dead one back and clicking the
-  // mic does nothing until the page is manually reloaded.
-  function resetSession(){
-    micStartGeneration += 1;
-    sessionGeneration += 1;
-    var closingClient = client;
-    client = null;
-    converseReady = false;
-    sessionStorage.removeItem(RESUME_STORAGE_KEY);
-    try{ if(closingClient) closingClient.close(); }catch(e){}
-    assistantTranscript.reset();
-    userTurns.reset();
-    sessionStartPromise = null;
-    typedTurns.reset();
-    micActive = false;
-    micMuted = false;
-    sessionStarting = false;
-    endAfterReply = false;
-    micBtn.classList.remove("live");
-    micDock.classList.remove("live");
-    micBtn.setAttribute("aria-pressed", "false");
-    micBtn.setAttribute("aria-label", "Start voice input");
-    micLabel.textContent = "Start voice";
-    muteBtn.disabled = true;
-    muteBtn.classList.remove("muted");
-    muteBtn.setAttribute("aria-pressed", "false");
-    muteBtn.textContent = "Mute mic";
-  }
-
-  function startSession(options){
-    options = options || {};
-    if(sessionStartPromise) return sessionStartPromise;
-    if(client){
-      return client.connect({noGreeting: !!options.noGreeting}).then(function(){ return client; });
-    }
-
-    var opening = openSession(options);
-    sessionStartPromise = opening;
-    opening.then(
-      function(){ if(sessionStartPromise === opening) sessionStartPromise = null; },
-      function(){ if(sessionStartPromise === opening) sessionStartPromise = null; }
-    );
-    return opening;
-  }
-
-  async function openSession(options){
-    var generation = ++sessionGeneration;
-    var mod = await import("./vendor/converse/index.js");
-    var resume = loadResumeRecord();
-    var sessionId = resume ? resume.sessionId : mod.createSessionId();
-    var response = await fetch(credentialUrl(), {
-      method: "POST",
-      credentials: "same-origin",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({session_id: sessionId})
-    });
-    if(!response.ok) throw new Error("Converse credential failed: " + response.status);
-    var credential = await response.json();
-    if(generation !== sessionGeneration) throw {sessionCanceled: true};
-    var openingClient = new mod.ConverseClient({
-      url: credential.ws_url || "wss://converse.trelis.com/ws",
-      apiKey: credential.api_key,
-      sessionId: credential.session_id,
-      mode: {
-        kind: "converse", voice: "classic", web_search: false,
-        tools: credential.tools || []
-      }
-    });
-    if(resume) openingClient.importResumeState(resume.state);
-    client = openingClient;
-    openingClient.addEventListener("resume_state", function(e){
-      if(client === openingClient){
-        saveResumeRecord(openingClient.sessionId,
-          e.detail.state ? openingClient.exportResumeState() : null);
-      }
-    });
-    openingClient.addEventListener("event", function(e){
-      if(client === openingClient) renderEvent(e.detail || {});
-    });
-    await openingClient.unlockAudio();
-    await connectWithAdmissionRetry(openingClient, options, generation);
-    if(generation !== sessionGeneration || client !== openingClient){
-      openingClient.close();
-      throw {sessionCanceled: true};
-    }
-    converseReady = true;
-    flushBridgeControls();
-    sendJson({type: "local", event: "bridge_ready"});
-    return openingClient;
-  }
-
-  function startMic(){
-    if(micActive || sessionStarting) return;
-    var requestGeneration = ++micStartGeneration;
-    sessionStarting = true;
-    micLabel.textContent = "Connecting…";
-    startVoiceCapture(
-      function(){ return startSession(); },
-      function(){ return requestGeneration === micStartGeneration; },
-      {workletUrl: "./vendor/converse/mic-worklet.js"}
-    ).then(function(result){
-      if(result.canceled) throw {sessionCanceled: true};
-      sessionStarting = false;
-      micActive = true;
-      micMuted = false;
-      micBtn.classList.add("live");
-      micDock.classList.add("live");
-      micBtn.setAttribute("aria-pressed", "true");
-      micBtn.setAttribute("aria-label", "Stop voice input");
-      micLabel.textContent = "Listening";
-      muteBtn.disabled = false;
-    }).catch(function(err){
-      if(requestGeneration !== micStartGeneration) return;
-      sessionStarting = false;
-      if(err && err.sessionCanceled) return;
-      console.debug("mic error", err);
-      resetSession();
-      micLabel.textContent = "Start voice";
-      addBanner(isAdmissionCapacityError(err)
-        ? (err.message || "Converse is temporarily at capacity")
-        : "Microphone unavailable: " + (err && err.message ? err.message : err));
-    });
-  }
-
-  function stopVoiceInput(){
-    if(!micActive && !sessionStarting) return;
-    if(sessionStarting && !converseReady && !typedTurns.pending){
-      resetSession();
-      addBanner("Voice connection canceled.");
-      return;
-    }
-    micStartGeneration += 1;
-    sessionStarting = false;
-    micActive = false;
-    micMuted = false;
-    try{ if(client) client.stopMic(); }catch(e){}
-    micBtn.classList.remove("live");
-    micDock.classList.remove("live");
-    micBtn.setAttribute("aria-pressed", "false");
-    micBtn.setAttribute("aria-label", "Start voice input");
-    micLabel.textContent = "Start voice";
-    muteBtn.disabled = true;
-    muteBtn.classList.remove("muted");
-    muteBtn.setAttribute("aria-pressed", "false");
-    muteBtn.textContent = "Mute mic";
-    addBanner("Voice input stopped — the Converse session remains available for text.");
-  }
-
-  function toggleMute(){
-    if(!client || !micActive) return;
-    micMuted = !micMuted;
-    client.setMicEnabled(!micMuted);
-    muteBtn.classList.toggle("muted", micMuted);
-    muteBtn.setAttribute("aria-pressed", String(micMuted));
-    muteBtn.textContent = micMuted ? "Unmute mic" : "Mute mic";
-    micLabel.textContent = micMuted ? "Muted" : "Listening";
-    micDock.classList.toggle("live", !micMuted);
-  }
-
-  textForm.addEventListener("submit", function(event){
-    event.preventDefault();
-    typedTurns.submit(textInput.value);
-  });
-
-  micBtn.addEventListener("click", function(){
-    if(micActive || sessionStarting){ stopVoiceInput(); } else { startMic(); }
-  });
-  muteBtn.addEventListener("click", toggleMute);
-
-  // ---------- Boot ----------
-  // Printed so it is always possible to tell which page a browser has loaded —
-  // a cached page previously looked identical to a fixed one.
-  console.info("converse-code session | @trelis/converse SDK 0.12.3 | build " + BUILD);
-  connect();
-})();
+async function submit(){
+  const text=input.value.trim();if(!text)return;input.disabled=send.disabled=true;
+  try{const active=await openClient();const id=crypto.randomUUID();const ack=await active.sendText(text,{messageId:id});if(!ack?.accepted)throw new Error(ack?.reason||"message rejected");input.value=""}
+  catch(error){row("notice",`Could not send: ${error.message||error}`)}finally{input.disabled=send.disabled=false;input.focus()}
+}
+send.onclick=submit;input.onkeydown=event=>{if(event.key==="Enter")submit()};
+voice.onclick=async()=>{const active=await openClient();if(mic){active.stopMic();mic=false;voice.textContent="Start voice"}else{await active.startMic({workletUrl:"./vendor/converse/mic-worklet.js"});mic=true;voice.textContent="Stop voice"}voice.setAttribute("aria-pressed",String(mic))};
 </script>
 </body>
 </html>

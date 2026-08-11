@@ -1,4 +1,4 @@
-"""Acknowledged tool/control bridge between the Browser SDK and Claude Code."""
+"""Acknowledged controls between the Converse Browser SDK and a local tool host."""
 
 import asyncio
 from collections import OrderedDict
@@ -32,7 +32,7 @@ class BrowserBridge:
                 self._ready = True
                 self._sent.clear()
             await self._flush()
-        elif event in {"bridge_ack", "bridge_reject"}:
+        elif event == "bridge_ack":
             seq = message.get("seq")
             if isinstance(seq, int):
                 async with self._lock:
@@ -94,10 +94,3 @@ class BrowserBridge:
         self, call_id: str, content: dict, reply: bool = False,
     ) -> None:
         await self._control("tool_partial_result", id=call_id, content=content, reply=reply)
-
-    async def send_context(
-        self, text: str, role: str = "context", reply: bool = False,
-    ) -> None:
-        await self._control(
-            "inject_context", text=text[:2000], role=role, reply=reply,
-        )

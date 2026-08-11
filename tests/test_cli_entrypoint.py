@@ -8,6 +8,11 @@ there takes down every invocation before anything useful happens.
 import subprocess
 import sys
 
+import pytest
+
+from converse_code.cli import _pi_argv, _require_pi_model
+from converse_code.pi_rpc import PiRPCError
+
 ENTRY = [sys.executable, "-m", "converse_code.cli"]
 
 
@@ -21,11 +26,25 @@ def run(args, env_extra=None, timeout=30):
 def test_help_works():
     proc = run(["--help"])
     assert proc.returncode == 0
-    assert "Talk or type to Claude Code" in proc.stdout
+    assert "background-tool reference using Pi and Codex" in proc.stdout
+    assert "--pi" in proc.stdout
     assert "--api-url" in proc.stdout
 
 
-def test_startup_checks_credentials_before_launching_claude():
+def test_pi_command_always_loads_the_structured_approval_gate():
+    argv = _pi_argv("pi --mode rpc --provider openai-codex")
+    assert argv[:4] == ["pi", "--mode", "rpc", "--provider"]
+    assert argv[-2] == "-e"
+    assert argv[-1].endswith("pi_approval.ts")
+
+
+def test_pi_startup_fails_fast_when_codex_login_is_missing():
+    with pytest.raises(PiRPCError, match="/login"):
+        _require_pi_model({"data": {"model": {"id": "unknown"}}})
+    _require_pi_model({"data": {"model": {"id": "gpt-5.6-codex"}}})
+
+
+def test_startup_checks_credentials_before_launching_pi():
     """Exercises the whole startup path: logging setup, key load, credential
     check. The browser's direct socket is opened later, so an unreachable broker
     must still fail fast here with a clear
@@ -33,7 +52,7 @@ def test_startup_checks_credentials_before_launching_claude():
     proc = run(["--no-browser", "--port", "0", "--broker-url", "ws://127.0.0.1:1"])
     assert proc.returncode == 1
     assert "Could not reach Converse" in proc.stderr
-    assert "Claude Code was not started" in proc.stderr
+    assert "Pi was not started" in proc.stderr
     assert "Traceback" not in proc.stderr
 
 

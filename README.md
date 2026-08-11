@@ -1,175 +1,80 @@
 # Converse Code
 
-Talk or type to Claude Code. `converse-code` wraps the real `claude` CLI in your own
-terminal and connects it to [Converse](https://converse.trelis.com) over the public
-WebSocket tool protocol — speak or type in a browser tab, watch instructions arrive in
-Claude's terminal, and hear or read what happened.
+A deliberately small reference implementation for [Converse](https://converse.trelis.com)
+background tools and the Converse Browser SDK. It runs one Pi coding-agent session with the
+user's ChatGPT Plus/Pro Codex subscription.
 
-> **Alpha — invite only.** Trelis Converse is in alpha for individual developers and
-> enterprise. Reach out to [voice@trelis.com](mailto:voice@trelis.com) to get on the waitlist.
+The example demonstrates the complete deferred-tool lifecycle:
 
-This repository is also the **reference implementation** for building a client against the
-[Converse WebSocket tool contract](https://converse.trelis.com/docs/api/websocket/#tools).
-It exercises the full surface — audio streaming, tool calls and resolutions, proactive
-wake-ups, and pending-job cancellation — against a real interactive CLI, so it doubles as
-a working example for wiring Converse to any terminal program or agent of your own.
+1. `coding_task` accepts work and immediately backgrounds it.
+2. Pi tool events become progress and partial results.
+3. Routine edits use silent partials; meaningful milestones and questions use `reply: true`.
+4. `continue_task` steers the running task or answers a structured question.
+5. Pi's `agent_settled` event resolves the deferred tool exactly once.
+6. Converse cancellation maps directly to Pi's `abort` command.
+
+There is no terminal emulation, screen scraping, model picker, shell bypass, or compatibility
+layer for a proprietary terminal harness. A bundled Pi extension asks for structured approval of
+`bash`, `edit`, and `write`, offering allow-once, allow-for-session, and block choices. Those
+questions travel through the same `reply: true` path.
 
 ## Install
 
+Install Pi, sign into the Codex provider, and install Converse Code:
+
 ```bash
+npm install -g @earendil-works/pi-coding-agent
+pi
+# In Pi: /login → ChatGPT Plus/Pro (Codex)
+
 uvx converse-code
 ```
 
-`uvx` fetches the package into a throwaway environment and runs its CLI, so there's nothing
-to install or clean up. To put `converse-code` on your PATH permanently:
+Converse Code starts Pi as:
 
 ```bash
-uv tool install converse-code
+pi --mode rpc --provider openai-codex
 ```
 
-To run from a checkout instead (for development or to try unreleased changes):
+Override that command when testing another Pi configuration:
 
 ```bash
-git clone https://github.com/Trelis-LTD/converse-code && cd converse-code
-uv tool install .                    # or: uvx --from /path/to/converse-code converse-code
+converse-code --pi "pi --mode rpc --provider openai-codex --model gpt-5.6-codex"
 ```
 
-## Use
+Run `converse-code login` to store a Converse API key. The persistent key remains in Python; the
+browser receives only a short-lived session credential.
 
-```bash
-cd my-project && converse-code
+## Reference architecture
+
+```text
+Converse voice/text model
+        │ tool call / cancellation
+        ▼
+Browser SDK reference page
+        │ acknowledged localhost controls
+        ▼
+AgentToolRouter ── JSONL RPC ── Pi ── Codex
+        │
+        └─ deferred / progress / partial(reply) / terminal result
 ```
 
-First run asks for a Converse API key from the Converse dashboard, validates it, and stores it in
-`~/.config/converse-code/config.json` with mode `0600`. Run `converse-code login` to replace the
-saved key, or set `CONVERSE_API_KEY` to supply one without writing it to disk. Every run: Claude
-Code opens in your terminal as normal, plus a
-`http://127.0.0.1:<port>/?t=<token>` tab with voice controls, typed input, and a live transcript — open the
-URL it prints, since the token is what keeps other pages out. Close the terminal, everything
-stops.
+The model-facing surface is intentionally limited to `coding_task`, `continue_task`, and
+`end_session`. See [docs/DESIGN.md](docs/DESIGN.md) for the event mapping and evidence rules.
 
-Claude starts in auto permission mode by default. Override the wrapped command when needed:
-
-```bash
-converse-code --claude "claude --permission-mode default"
-```
-
-The browser uses Converse's Classic voice. The mic button starts or stops voice input while
-preserving the multimodal Converse session; the separate Mute button temporarily gates microphone
-audio. Claude Code remains fully interactive in the terminal. Asking to end the Converse session
-closes it after the final spoken reply and leaves Claude running.
-
-Typed turns use Converse's canonical user-turn path: `sendText()` returns the broker's
-correlated accepted/rejected acknowledgement, then the broker echoes accepted input as a final
-`asr` event with the same message ID, `input_source: "text"`, and a stable turn ID. Starting
-with text suppresses the voice greeting and does not turn on the microphone.
-
-## Headless control
-
-`--headless` replaces the terminal and Converse connection with a JSONL control channel on
-stdin/stdout. It does not require a Converse API key. Each request and event is one JSON object:
-
-```bash
-converse-code --headless
-```
-
-```json
-{"type":"tool_call","id":"task-1","name":"long_task","args":{"request":"Fix the failing tests"}}
-{"type":"screen_snapshot","id":"state-1"}
-{"type":"tool_cancel","id":"task-1"}
-{"type":"shutdown","id":"done"}
-```
-
-The first event is `ready` with protocol `converse-code-headless-v1`. Headless exposes the same
-semantic tools as voice mode except `end_session`; use the JSONL `shutdown` request for headless
-lifecycle. Tool calls emit `tool_deferred`, `tool_progress`, `tool_partial_result`, and
-`tool_result` events. A screen snapshot returns Claude's rendered terminal rows, semantic state,
-last full response, and transcript path. stdout is reserved for protocol events; diagnostics go
-to stderr.
-
-See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security boundaries.
-
-## How it works
-
-```
-   Dev's terminal                        Dev's browser tab (localhost)
-   `claude` TUI, fully interactive      mic + typed turns + transcript
-        ^                                       |
-        | pty                           audio + tool protocol
-        |                                       v
-   converse-code <--- acknowledged ---> Browser SDK
-        |              local controls           |
-        +-- scoped credential + Claude hooks    v
-                                      Converse broker
-         brain, ASR, TTS, turn-taking, barge-in
-```
-
-- Nothing about voice reaches Claude Code directly; nothing about Claude Code's raw
-  output reaches the user directly. `converse-code` translates in both directions.
-- Voice and typed input reach the machine only as natural-language instructions to Claude Code —
-  never as raw shell commands. The TUI's `!` bash-mode prefix is refused on the voice path,
-  so Claude Code's permission system remains the single safety chokepoint.
-- Prompt text and Enter are sent as separate PTY writes. A native `UserPromptSubmit` HTTP hook
-  confirms that Claude accepted the prompt; the UI labels this **accepted**, not completed.
-  Swallowed submissions get two bounded Enter retries instead of an open tool call that silently
-  waits for minutes.
-- Claude Code's `Stop` hook resolves voice-started work and proactively wakes Converse when work
-  typed directly in the terminal finishes. `StopFailure` resolves errors immediately rather than
-  waiting for the long tool deadline. A `PermissionRequest` hook wakes voice when terminal work
-  needs a menu decision, but never approves on the user's behalf.
-- Permission and clarification menus are detected from the rendered terminal structure and remain
-  open only for a genuine user decision. Prompt-history cursors are excluded so a closed menu
-  cannot be mistaken for an open one. Each decision carries a rendered-state revision and is
-  resolved by exact option label only after that revision is revalidated. If navigation is needed,
-  focusing the option and submitting it are separate revision-matched transitions. Ordinary work
-  is sent to Claude as natural-language tasks. Model changes use the documented session-only
-  `/model <alias>` command through a narrow semantic operation with an alias allowlist. Managed
-  cancellation interrupts only the matching turn.
-- New work and steering are explicit: `long_task` starts an idle Claude turn, while `steer_task`
-  adds requirements to work already in progress. A second task is never silently reinterpreted as
-  guidance or claimed to be queued.
-- Voice responses receive an authoritative semantic snapshot of Claude's UI. `observe_claude`
-  reports idle/working/canceling/awaiting_input phase, structured UI, and current-call evidence.
-  Ordinary Claude completion is returned as succeeded but unverified; only an observed,
-  target-specific postcondition permits `verified: true`.
-- Claude hook `prompt_id` values bind each voice episode to its actual completion. Cancellation
-  remains `canceling` until the matching Stop arrives or the terminal is stably idle. Late
-  completion from an older prompt cannot be attributed to newer work.
-- The browser SDK connects directly to Converse with a short-lived, session-bound credential.
-  Its supported resume-state API preserves a live conversation across page reloads; only tool
-  calls and Claude status cross the authenticated localhost link.
-- Built entirely against the public Converse tool contract
-  (`converse.trelis.com/docs/api/websocket/#tools`).
-
-## Development
+## Test
 
 ```bash
 uv sync
+uv run pytest -q
 uv run playwright install chromium
-uv run scripts/evals.py --profile quick    # deterministic suite
-uv run scripts/evals.py --profile pr       # quick + real Chromium
-uv run scripts/evals.py --profile release  # adds the real Converse Code PTY lifecycle
-uv run scripts/evals.py --profile extended # adds hosted, SDK-compatibility, and host-audio probes
+uv run scripts/browser_e2e.py
 ```
 
-Profiles deduplicate stages before running them. The release profile validates Converse Code's
-deterministic, browser, and real-PTY boundaries. The extended profile additionally runs the hosted
-Converse tool loop, an upstream Agent SDK compatibility workflow (isolated file operations,
-programmatic model control, game/review/browser behavior), and a generic host audio-output probe.
-Those extended stages test distinct external boundaries and consume Claude/Converse usage.
-
-The browser suite drives the shipped page in Chromium against a deterministic fake SDK, including
-real microphone permissions and WAV input; it does not replace live SDK/broker evaluation. Failed
-scenarios retain screenshots and traces. See
-[docs/BROWSER_TESTING.md](docs/BROWSER_TESTING.md) for setup and the opt-in Linux virtual-output
-loopback used for deeper audio diagnostics.
+The deterministic suite uses a fake Pi JSONL process. The browser suite drives the shipped page
+in real Chromium and checks backgrounding, silent and spoken partials, completion, cancellation,
+and reconnect replay.
 
 ## License
 
-Converse Code is licensed under the [Apache License 2.0](LICENSE). The bundled browser SDK is
-Apache-licensed Trelis source with its required third-party terms retained under
-[`converse_code/web/vendor/converse`](converse_code/web/vendor/converse).
-
-These licenses cover the open Converse Code client and bundled SDK code. They do **not** license
-the hosted Converse service, its models, Trelis trademarks, or server-side software. See
-[NOTICE](NOTICE) for the complete boundary and attributions.
+Apache-2.0. The vendored Converse Browser SDK retains its own notices and third-party licenses.

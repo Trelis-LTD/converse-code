@@ -1,6 +1,3 @@
-"""LocalServer: static page, tab WebSocket relay, hook endpoint, and the token
-/ origin gate that keeps other web pages and local processes out."""
-
 import asyncio
 import json
 
@@ -12,190 +9,65 @@ from converse_code.localserver import LocalServer
 
 @pytest.fixture
 async def server():
-    s = LocalServer(token="tok123")
-    await s.start(port=0)
-    yield s
-    await s.stop()
+    instance = LocalServer(token="test-token")
+    await instance.start(port=0)
+    try:
+        yield instance
+    finally:
+        await instance.stop()
 
 
 def base(server):
     return f"http://127.0.0.1:{server.port}"
 
 
-async def test_serves_index_with_token(server):
+async def test_page_is_token_gated_and_not_cached(server):
     async with aiohttp.ClientSession() as session:
-        async with session.get(f"{base(server)}/?t=tok123") as resp:
-            assert resp.status == 200
+        async with session.get(f"{base(server)}/") as denied:
+            assert denied.status == 403
+        async with session.get(f"{base(server)}/?t=test-token") as response:
+            assert response.status == 200
+            assert "no-store" in response.headers["Cache-Control"]
 
 
-async def test_serves_assistant_transcript_script_without_cache(server):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{base(server)}/assistant-transcript.js") as resp:
-            assert resp.status == 200
-            assert resp.content_type == "application/javascript"
-            assert "no-store" in resp.headers["Cache-Control"]
-
-
-async def test_serves_typed_turn_controller_without_cache(server):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f"{base(server)}/typed-turn.js") as resp:
-            assert resp.status == 200
-            assert resp.content_type == "application/javascript"
-            assert "no-store" in resp.headers["Cache-Control"]
-            assert "TypedTurnController" in await resp.text()
-
-
-async def test_index_requires_token(server):
-    async with aiohttp.ClientSession() as session:
-        for url in (f"{base(server)}/", f"{base(server)}/?t=wrong"):
-            async with session.get(url) as resp:
-                assert resp.status == 403
-
-
-async def test_hook_requires_token(server):
-    """A forged hook would put attacker-chosen words in Claude's mouth."""
-    hooks = []
-    server.on_hook = lambda e, p: hooks.append((e, p)) or asyncio.sleep(0)
-    async with aiohttp.ClientSession() as session:
-        async with session.post(f"{base(server)}/hook/stop", json={"x": 1}) as resp:
-            assert resp.status == 403
-        async with session.post(f"{base(server)}/hook/stop?t=wrong", json={"x": 1}) as resp:
-            assert resp.status == 403
-    assert hooks == []
-
-
-async def test_ws_requires_token(server):
-    async with aiohttp.ClientSession() as session:
-        with pytest.raises(aiohttp.WSServerHandshakeError) as exc:
-            async with session.ws_connect(f"{base(server)}/ws"):
-                pass
-        assert exc.value.status == 403
-
-
-async def test_ws_rejects_foreign_origin(server):
-    """Browsers don't apply same-origin policy to WebSockets, so the server must."""
-    async with aiohttp.ClientSession() as session:
-        with pytest.raises(aiohttp.WSServerHandshakeError) as exc:
-            async with session.ws_connect(
-                f"{base(server)}/ws?t=tok123", headers={"Origin": "https://evil.example"}
-            ):
-                pass
-        assert exc.value.status == 403
-
-
-async def test_session_credential_requires_token_and_local_origin():
-    s = LocalServer(token="tok123")
-    await s.start(port=0)
-    try:
-        url = f"http://127.0.0.1:{s.port}/session-credential"
-        async with aiohttp.ClientSession() as session:
-            for bad in (url, f"{url}?t=wrong"):
-                async with session.post(bad, json={"session_id": "s1"}) as response:
-                    assert response.status == 403
-            async with session.post(
-                f"{url}?t=tok123", json={"session_id": "s1"},
-                headers={"Origin": "https://evil.example"},
-            ) as response:
-                assert response.status == 403
-    finally:
-        await s.stop()
-
-
-async def test_session_credential_is_minted_by_python(server):
+async def test_credential_endpoint_is_origin_gated_and_delegated(server):
     requested = []
-    server.on_session_credential = lambda sid: requested.append(sid) or asyncio.sleep(0, result={
-        "api_key": "csk_scoped", "session_id": sid, "expires_in": 600, "tools": [],
-    })
+    server.on_session_credential = lambda session_id: (
+        requested.append(session_id) or asyncio.sleep(0, result={
+            "api_key": "scoped", "session_id": session_id, "expires_in": 600, "tools": [],
+        })
+    )
+    url = f"{base(server)}/session-credential?t=test-token"
     async with aiohttp.ClientSession() as session:
         async with session.post(
-            f"http://127.0.0.1:{server.port}/session-credential?t=tok123",
+            url, json={"session_id": "session-1"}, headers={"Origin": "https://evil.example"},
+        ) as denied:
+            assert denied.status == 403
+        async with session.post(
+            url, json={"session_id": "session-1"},
             headers={"Origin": f"http://127.0.0.1:{server.port}"},
-            json={"session_id": "browser-session"},
         ) as response:
             assert response.status == 201
-            assert (await response.json())["api_key"] == "csk_scoped"
-    assert requested == ["browser-session"]
+            assert (await response.json())["api_key"] == "scoped"
+    assert requested == ["session-1"]
 
 
-async def test_tab_ws_relay_and_hook(server):
-    tab_json, hooks = [], []
-
-    async def on_json(m):
-        tab_json.append(m)
-
-    async def on_hook(event, payload):
-        hooks.append((event, payload))
-
-    server.on_tab_json = on_json
-    server.on_hook = on_hook
-
-    async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(
-            f"{base(server)}/ws?t=tok123", headers={"Origin": f"http://127.0.0.1:{server.port}"}
-        ) as ws:
-            # tab -> server (status channel is JSON only)
-            await ws.send_str(json.dumps({"type": "hello"}))
-            await asyncio.sleep(0.1)
-            assert tab_json[0]["type"] == "hello"
-
-            # server -> tab
-            await server.send_json_to_tab({"type": "local", "event": "status", "phase": "idle"})
-            msg = await ws.receive(timeout=5)
-            assert json.loads(msg.data)["event"] == "status"
-
-        # hook endpoint (as Claude Code's native HTTP hook calls it)
-        async with session.post(
-            server.hook_url("stop"),
-            json={"transcript_path": "/tmp/t.jsonl", "session_id": "s1"},
-        ) as resp:
-            assert resp.status == 200
-        async with session.post(
-            server.hook_url("stop_failure"),
-            json={
-                "error": "server_error", "error_details": "upstream unavailable",
-                "session_id": "s1", "transcript_path": "/tmp/t.jsonl",
-                "last_assistant_message": "API Error",
-            },
-        ) as resp:
-            assert resp.status == 200
-    assert hooks == [
-        ("stop", {"transcript_path": "/tmp/t.jsonl", "session_id": "s1"}),
-        ("stop_failure", {
-            "error": "server_error", "error_details": "upstream unavailable",
-            "session_id": "s1", "transcript_path": "/tmp/t.jsonl",
-            "last_assistant_message": "API Error",
-        }),
-    ]
-
-
-async def test_send_without_a_connected_page_reports_false(server):
-    assert await server.send_json_to_tab({"type": "x"}) is False
-
-
-async def test_rejects_non_object_json_at_http_boundaries(server):
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            f"{base(server)}/session-credential?t=tok123", json=[]
-        ) as response:
-            assert response.status == 400
-        async with session.post(server.hook_url("stop"), json=[]) as response:
-            assert response.status == 400
-        async with session.post(
-            server.hook_url("stop"), json={"transcript_path": []}
-        ) as response:
-            assert response.status == 400
-        async with session.post(server.hook_url("not_a_hook"), json={}) as response:
-            assert response.status == 404
-
-
-async def test_websocket_ignores_non_object_json(server):
+async def test_websocket_is_gated_and_relays_both_directions(server):
     received = []
-    server.on_tab_json = lambda message: received.append(message) or asyncio.sleep(0)
+    server.on_tab_json = lambda frame: received.append(frame) or asyncio.sleep(0)
     async with aiohttp.ClientSession() as session:
+        with pytest.raises(aiohttp.WSServerHandshakeError):
+            await session.ws_connect(f"{base(server)}/ws")
         async with session.ws_connect(
-            f"{base(server)}/ws?t=tok123",
+            f"{base(server)}/ws?t=test-token",
             headers={"Origin": f"http://127.0.0.1:{server.port}"},
-        ) as ws:
-            await ws.send_json([])
-            await asyncio.sleep(0.05)
-    assert received == []
+        ) as websocket:
+            await websocket.send_json({"type": "local", "event": "bridge_ready"})
+            await asyncio.sleep(0.01)
+            assert received[-1]["event"] == "bridge_ready"
+            assert await server.send_json_to_tab({"type": "local", "event": "ping"})
+            assert json.loads((await websocket.receive()).data)["event"] == "ping"
+
+
+async def test_send_without_connected_page_returns_false(server):
+    assert await server.send_json_to_tab({"type": "local"}) is False

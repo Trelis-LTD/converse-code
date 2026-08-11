@@ -19,7 +19,7 @@ async def test_controls_wait_for_ready_and_remain_until_browser_ack():
     tab = FakeTab()
     bridge = BrowserBridge(tab.send)
 
-    await bridge.send_tool_deferred("c1", "cc-c1", status_label="Claude Code task")
+    await bridge.send_tool_deferred("c1", "code-c1", status_label="Coding task")
     await bridge.send_tool_progress("c1", "running tests")
     assert tab.frames == []
 
@@ -63,40 +63,17 @@ async def test_tool_result_maps_router_verification_to_sdk_outcome():
     assert tab.frames[-1]["verified"] is False
 
 
-async def test_rejected_context_control_is_not_replayed():
-    tab = FakeTab()
-    tab.connected = True
-    bridge = BrowserBridge(tab.send)
-    await bridge.handle_browser_message({"type": "local", "event": "bridge_ready"})
-    await bridge.send_context("context", reply=True)
-    seq = tab.frames[-1]["seq"]
-
-    await bridge.handle_browser_message({
-        "type": "local", "event": "bridge_reject", "seq": seq,
-        "reason": "rejected",
-    })
-    before = len(tab.frames)
-    await bridge.on_browser_disconnected()
-    await bridge.handle_browser_message({"type": "local", "event": "bridge_ready"})
-    assert len(tab.frames) == before
-
-
-async def test_context_and_partial_result_map_to_public_browser_sdk_actions():
+async def test_partial_result_maps_reply_to_public_browser_sdk_action():
     tab = FakeTab()
     tab.connected = True
     bridge = BrowserBridge(tab.send)
     await bridge.handle_browser_message({"type": "local", "event": "bridge_ready"})
 
-    await bridge.send_context("Claude finished.", role="context", reply=True)
     await bridge.send_tool_partial_result(
         "c1", {"speak": "Tests pass"}, reply=True,
     )
 
-    context, partial = tab.frames
-    assert context["action"] == "inject_context"
-    assert context["text"] == "Claude finished."
-    assert context["role"] == "context"
-    assert context["reply"] is True
+    partial = tab.frames[0]
     assert partial["action"] == "tool_partial_result"
     assert partial["reply"] is True
 
@@ -109,11 +86,11 @@ async def test_browser_tool_calls_and_cancellation_reach_python_handlers():
 
     await bridge.handle_browser_message({
         "type": "local", "event": "tool_call",
-        "call": {"id": "c1", "name": "long_task", "args": {"request": "fix it"}},
+        "call": {"id": "c1", "name": "coding_task", "args": {"request": "fix it"}},
     })
     await bridge.handle_browser_message({
         "type": "local", "event": "tool_cancel", "call": {"id": "c1"},
     })
 
-    assert calls[0]["name"] == "long_task"
+    assert calls[0]["name"] == "coding_task"
     assert cancels == [{"id": "c1"}]
