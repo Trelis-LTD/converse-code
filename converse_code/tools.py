@@ -8,6 +8,9 @@ transcript).
 
 import asyncio
 import logging
+from collections import deque
+from dataclasses import dataclass
+from typing import Literal
 from pathlib import Path
 
 from . import screen as screenmod
@@ -16,6 +19,12 @@ from .ptyhost import KEYMAP, sanitize
 from .tracelog import trace
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ModelObservation:
+    name: str
+    source: Literal["visible_ui", "verified"]
 
 # long_task is a deferred tool: `timeout` is only the acknowledgement deadline
 # (we defer within seconds of a confirmed injection); once deferred, the job
@@ -48,7 +57,7 @@ STEER_TASK_DESCRIPTION = (
 OBSERVE_DESCRIPTION = (
     "Inspect Claude Code's authoritative current UI state without changing it. Use this when the "
     "user asks what is happening, challenges a claimed result, or when prior actions may have "
-    "been interrupted. Returns idle/working/canceling/menu state, the active task, open menu, "
+    "been interrupted. Returns idle/working/canceling/awaiting_input phase, the active task, open UI, "
     "selected option, and the last verified action."
 )
 
@@ -139,8 +148,7 @@ class ToolRouter:
     CANCEL_ESCAPE_RETRIES = 3
     CANCEL_IDLE_SAMPLES = 3 # avoid accepting a transient repaint as settled
 
-    def __init__(self, driver, sender, handle: str, project_dir: str | Path | None = None,
-                 verify_submissions: bool = False):
+    def __init__(self, driver, sender, handle: str, project_dir: str | Path | None = None):
         """driver: ClaudeHost-like (inject/send_key/snapshot).
         sender: BrowserBridge-like (tool results/progress and context injection)."""
         self.driver = driver
@@ -148,7 +156,6 @@ class ToolRouter:
         self.handle = handle
         self.project_dir = Path(project_dir) if project_dir else Path.cwd()
         self.working = False
-        self.queue: list[str] = []
         self.transcript_path: Path | None = None
         self.session_id: str | None = None
         self.last_assistant_text = ""
@@ -157,9 +164,7 @@ class ToolRouter:
         self._interrupted = False
         self._active_call_id: str | None = None
         self._server_canceled: set[str] = set()
-        self._suppress_next_stop_notification = False
         self._voice_owed = False  # a resolved voice call still owes its outcome out loud
-        self._verify_submissions = verify_submissions
         self._submit_lock = asyncio.Lock()
         self._prompt_submitted = asyncio.Event()
         self._expected_prompt: str | None = None
@@ -167,10 +172,9 @@ class ToolRouter:
         self._active_request: str | None = None
         self._last_action: dict | None = None
         self._episode_prompt_ids: set[str] = set()
-        self._canceled_prompt_ids: set[str] = set()
-        self._canceling_prompt_ids: set[str] = set()
-        self._known_model: str | None = None
-        self._known_model_source: str | None = None
+        self._canceled_prompt_ids: deque[str] = deque(maxlen=128)
+        self._canceling_prompt_ids: set[str] | None = None
+        self._known_model: ModelObservation | None = None
         self._cancel_watch_task: asyncio.Task | None = None
         self.on_status = None  # async callback(dict) → browser tab
 
@@ -209,11 +213,29 @@ class ToolRouter:
         if event != "stop":
             return
         prompt_id = payload.get("prompt_id")
+        if (
+            self._canceling_prompt_ids is not None
+            and (not self._canceling_prompt_ids or not isinstance(prompt_id, str) or not prompt_id)
+        ):
+            self._canceling_prompt_ids = None
+            self._active_request = None
+            self._last_action = {
+                "action": "cancel_task", "status": "verified",
+                "effect": "stopped", "completed": True,
+            }
+            trace("unidentified_canceled_stop_ignored")
+            await self._push_status()
+            return
         if isinstance(prompt_id, str) and prompt_id in self._canceled_prompt_ids:
-            was_canceling = prompt_id in self._canceling_prompt_ids
-            self._canceling_prompt_ids.discard(prompt_id)
+            was_canceling = (
+                self._canceling_prompt_ids is not None
+                and prompt_id in self._canceling_prompt_ids
+            )
+            if was_canceling:
+                self._canceling_prompt_ids.discard(prompt_id)
             if was_canceling:
                 if not self._canceling_prompt_ids:
+                    self._canceling_prompt_ids = None
                     self._active_request = None
                 self._last_action = {
                     "action": "cancel_task", "status": "verified",
@@ -233,8 +255,6 @@ class ToolRouter:
             return
         voice_call_was_waiting = self._active_call_id is not None
         work_was_active = self.working
-        suppress_notification = self._suppress_next_stop_notification
-        self._suppress_next_stop_notification = False
         # The hook tells us authoritatively which session/file is ours; that
         # replaces the mtime guess _ensure_transcript had to make beforehand.
         session_id = payload.get("session_id")
@@ -269,7 +289,7 @@ class ToolRouter:
             }
         self._turn_done.set()
         await self._push_status()
-        if not voice_call_was_waiting and not suppress_notification:
+        if not voice_call_was_waiting:
             await self._wake_voice_for_terminal_turn(hook_text, announce=voice_owed)
 
     async def _on_stop_failure(self, payload: dict) -> None:
@@ -277,7 +297,8 @@ class ToolRouter:
         detail = payload.get("error_details") or payload.get("error") or "unknown Claude error"
         self._turn_failure = str(detail)
         self.working = False
-        self.queue.clear()
+        self._active_request = None
+        self._episode_prompt_ids.clear()
         self._voice_owed = False  # the error itself is the announcement
         self._turn_done.set()
         await self._push_status()
@@ -347,7 +368,18 @@ class ToolRouter:
     # -- dispatch --------------------------------------------------------------
 
     async def handle_tool_call(self, call: dict) -> None:
-        name, call_id, args = call.get("name"), call.get("id"), call.get("args") or {}
+        call_id = call.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            log.warning("ignored tool call without a string id")
+            return
+        name = call.get("name")
+        args = call.get("args", {})
+        if not isinstance(name, str) or not isinstance(args, dict):
+            log.warning("rejected malformed tool call %s", call_id)
+            await self.sender.send_tool_result(
+                call_id, self._result("The tool call was malformed and was not run.")
+            )
+            return
         trace("tool_call", id=call_id, name=name, args=args)
         handlers = {
             "long_task": self._long_task,
@@ -361,7 +393,7 @@ class ToolRouter:
         }
         handler = handlers.get(name)
         try:
-            if self._canceling_prompt_ids and name not in {"observe_claude", "end_session"}:
+            if self._canceling_prompt_ids is not None and name not in {"observe_claude", "end_session"}:
                 content = self._result(
                     "Claude Code is still stopping the interrupted task. Wait for it to reach "
                     "idle before starting another action."
@@ -372,6 +404,14 @@ class ToolRouter:
                 content = await handler(call_id, args)
         except Exception:
             log.exception("tool %s failed", name)
+            if self._active_call_id == call_id:
+                self.working = False
+                self._active_request = None
+                self._episode_prompt_ids.clear()
+                self._last_action = {
+                    "action": str(name or "unknown"), "status": "failed",
+                    "effect": "driver_error", "completed": False,
+                }
             content = self._result("Something went wrong driving Claude Code; the session itself is still alive.")
         # The host work is complete before its result crosses the network. Stop
         # treating it as cancellable now, so a late cancel cannot press Escape
@@ -391,22 +431,23 @@ class ToolRouter:
         """Honor Converse's managed cancellation for the matching pending job."""
         call_id = call.get("id")
         trace("tool_cancel", id=call_id, active=self._active_call_id)
-        if not call_id or call_id != self._active_call_id:
+        if not isinstance(call_id, str) or not call_id or call_id != self._active_call_id:
             return
         self._server_canceled.add(call_id)
         self._interrupted = True
         if self._episode_prompt_ids:
-            self._canceled_prompt_ids.update(self._episode_prompt_ids)
-            self._canceling_prompt_ids.update(self._episode_prompt_ids)
+            self._canceled_prompt_ids.extend(self._episode_prompt_ids)
+            self._canceling_prompt_ids = set(self._episode_prompt_ids)
             if self._cancel_watch_task is None or self._cancel_watch_task.done():
                 self._cancel_watch_task = asyncio.create_task(
-                    self._watch_cancellation(set(self._episode_prompt_ids))
+                    self._watch_cancellation()
                 )
         else:
-            self._suppress_next_stop_notification = True
+            self._canceling_prompt_ids = set()
+            if self._cancel_watch_task is None or self._cancel_watch_task.done():
+                self._cancel_watch_task = asyncio.create_task(self._watch_cancellation())
         self.driver.send_key("escape")
         self.working = False
-        self.queue.clear()
         self._voice_owed = False  # canceled work owes no completion
         self._last_action = {
             "action": "cancel_task", "status": "pending",
@@ -415,24 +456,24 @@ class ToolRouter:
         self._turn_done.set()
         await self._push_status()
 
-    async def _watch_cancellation(self, prompt_ids: set[str]) -> None:
+    async def _watch_cancellation(self) -> None:
         """Settle an interruption from visible idle state when Claude emits no Stop hook."""
         await asyncio.sleep(self.CANCEL_GRACE_S)
         idle_samples = 0
         escape_retries = 0
         last_escape = 0.0
-        while prompt_ids & self._canceling_prompt_ids:
+        while self._canceling_prompt_ids is not None:
             if screenmod.is_idle(self.driver.snapshot()):
                 idle_samples += 1
                 if idle_samples >= self.CANCEL_IDLE_SAMPLES:
-                    self._canceling_prompt_ids.difference_update(prompt_ids)
-                    if not self._canceling_prompt_ids:
-                        self._active_request = None
+                    settled_prompt_ids = self._canceling_prompt_ids
+                    self._canceling_prompt_ids = None
+                    self._active_request = None
                     self._last_action = {
                         "action": "cancel_task", "status": "verified",
                         "effect": "idle_ui_observed", "completed": True,
                     }
-                    trace("canceled_idle_observed", prompt_ids=sorted(prompt_ids))
+                    trace("canceled_idle_observed", prompt_ids=sorted(settled_prompt_ids))
                     await self._push_status()
                     return
             else:
@@ -446,7 +487,7 @@ class ToolRouter:
                     escape_retries += 1
                     last_escape = now
                     trace(
-                        "cancel_escape_retried", prompt_ids=sorted(prompt_ids),
+                        "cancel_escape_retried", prompt_ids=sorted(self._canceling_prompt_ids),
                         attempt=escape_retries,
                     )
             await asyncio.sleep(self.CANCEL_POLL_S)
@@ -457,16 +498,21 @@ class ToolRouter:
         return screenmod.detect_menu(self.driver.snapshot())
 
     def state(self) -> str:
-        if self._canceling_prompt_ids:
+        if self._canceling_prompt_ids is not None:
             return "canceling"
         if self.menu():
             return "menu"
         return "working" if self.working else "idle"
 
     def semantic_state(self) -> dict:
-        menu = self.menu()
-        state = self.state()
-        phase = "awaiting_input" if state == "menu" else state
+        lines = self.driver.snapshot()
+        menu = screenmod.detect_menu(lines)
+        if self._canceling_prompt_ids is not None:
+            phase = "canceling"
+        elif menu:
+            phase = "awaiting_input"
+        else:
+            phase = "working" if self.working else "idle"
         ui = {"kind": "none"}
         if menu:
             ui = {
@@ -479,16 +525,19 @@ class ToolRouter:
         if menu and self._is_model_menu(menu) and menu.options:
             visible_model = self._model_name(menu.options[menu.selected])
         else:
-            visible_model = screenmod.detect_model(self.driver.snapshot())
+            visible_model = screenmod.detect_model(lines)
         if visible_model:
-            if visible_model != self._known_model or self._known_model_source != "verified":
-                self._known_model_source = "visible_ui"
-            self._known_model = visible_model
+            if (
+                self._known_model is None
+                or visible_model != self._known_model.name
+                or self._known_model.source != "verified"
+            ):
+                self._known_model = ModelObservation(visible_model, "visible_ui")
         model = None
         if self._known_model:
             model = {
-                "name": self._known_model,
-                "source": self._known_model_source or "remembered",
+                "name": self._known_model.name,
+                "source": self._known_model.source,
             }
         return {
             "phase": phase,
@@ -499,16 +548,7 @@ class ToolRouter:
         }
 
     def _status_data(self, **extra) -> dict:
-        data = {
-            "state": self.state(), "queue": list(self.queue),
-            **self.semantic_state(), **extra,
-        }
-        menu = self.menu()
-        if menu:
-            data["menu_title"] = menu.title
-            data["options"] = menu.options
-            data["selected"] = menu.options[menu.selected] if menu.options else ""
-        return data
+        return {**self.semantic_state(), **extra}
 
     def _result(self, speak: str, **extra) -> dict:
         return {"speak": speak, "data": self._status_data(**extra), "handle": self.handle}
@@ -693,8 +733,7 @@ class ToolRouter:
         if before == target:
             self.driver.send_key("escape")
             await asyncio.sleep(self.SETTLE_S)
-            self._known_model = target
-            self._known_model_source = "verified"
+            self._known_model = ModelObservation(target, "verified")
             self._last_action = {
                 "action": "set_model", "status": "verified", "effect": "already_selected",
                 "completed": True, "from": before, "to": target,
@@ -729,8 +768,7 @@ class ToolRouter:
                 "action": "set_model", "status": "verified", "effect": "model_changed",
                 "completed": True, "from": before, "to": confirmed,
             }
-            self._known_model = confirmed
-            self._known_model_source = "verified"
+            self._known_model = ModelObservation(confirmed, "verified")
             return self._result(f"Verified that Claude Code changed from {before} to {confirmed}.")
 
         self.driver.inject("/model")
@@ -759,8 +797,7 @@ class ToolRouter:
             "action": "set_model", "status": "verified", "effect": "model_changed",
             "completed": True, "from": before, "to": actual,
         }
-        self._known_model = actual
-        self._known_model_source = "verified"
+        self._known_model = ModelObservation(actual, "verified")
         return self._result(f"Verified that Claude Code changed from {before} to {actual}.")
 
     async def _inject_and_confirm(self, text: str) -> bool:
@@ -776,8 +813,6 @@ class ToolRouter:
             self._prompt_submitted.clear()
             try:
                 self.driver.inject(text)
-                if not self._verify_submissions:
-                    return True
                 for attempt in range(self.SUBMIT_ATTEMPTS):
                     try:
                         await asyncio.wait_for(

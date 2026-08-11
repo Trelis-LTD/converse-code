@@ -38,7 +38,6 @@ def test_sanitize_keeps_ordinary_and_unicode_text():
     assert sanitize("fix auth.py --flag 'x' → done") == "fix auth.py --flag 'x' → done"
 
 
-
 def test_screen_filter_drops_claude_terminal_queries_across_chunks():
     filter_ = _ScreenByteFilter()
     chunks = [
@@ -94,6 +93,24 @@ async def test_concurrent_injections_are_serialized():
 
     await asyncio.sleep(INJECT_SUBMIT_DELAY_S * 5)
     assert writes == [b"first", b"\r", b"second", b"\r"]
+
+
+async def test_concurrent_injections_arrive_as_complete_prompts():
+    host = ClaudeHost([sys.executable, FAKE_TUI], attach_terminal=False)
+    await host.start()
+    try:
+        host.inject("first")
+        host.inject("second")
+        deadline = asyncio.get_running_loop().time() + 5
+        while "echo: second" not in "\n".join(host.snapshot()):
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.05)
+        screen = "\n".join(host.snapshot())
+        assert "echo: first" in screen
+        assert "echo: second" in screen
+    finally:
+        host.inject("exit")
+        await asyncio.wait_for(host.exited.wait(), 5)
 
 
 async def test_inject_writes_sanitized_bytes(tmp_path):

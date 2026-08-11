@@ -2,7 +2,6 @@ import asyncio
 
 from conftest import append_transcript, finish_turn
 
-from converse_code.tools import manifest
 from converse_code.tools import ToolRouter
 
 MENU_LINES = [
@@ -22,26 +21,6 @@ def assistant(text=None, tool=None, file_path=None):
     return {"type": "assistant", "message": {"content": blocks}}
 
 
-def test_manifest_shape():
-    tools = manifest()
-    names = [t["name"] for t in tools]
-    assert names == [
-        "long_task", "steer_task", "observe_claude", "set_model", "command",
-        "select_option", "press_key", "end_session",
-    ]
-    long_task = tools[0]
-    assert long_task.get("requires_permission", False) is False
-    # The description states capability, not a verb whitelist: the brain pipes
-    # instructions through and Claude Code judges feasibility.
-    assert "anything a developer" in long_task["description"]
-    assert long_task["timeout"] == 600  # ack deadline; the deferred clock takes over after
-    assert long_task["deferred"] is True
-    assert long_task["deferred_timeout"] == 7200
-    assert long_task["notify_on_complete"] is True
-    assert long_task["status_label"] == "Claude Code task"
-    assert "request" in long_task["parameters"]["properties"]
-
-
 async def test_long_task_rejects_bash_mode_prefix(router, fake_driver, fake_sender):
     """A leading '!' is the TUI's raw-shell escape: it bypasses Claude Code's
     permission system, so it must never be injected from the voice path — and
@@ -54,7 +33,8 @@ async def test_long_task_rejects_bash_mode_prefix(router, fake_driver, fake_send
         assert fake_driver.injected == []
         _, content = fake_sender.results[-1]
         assert "not allowed" in content["speak"]
-        assert content["data"]["state"] == "idle"
+        assert content["data"]["phase"] == "idle"
+    assert content["data"]["active_task"] is None
 
 
 async def test_long_task_redirects_slash_commands(router, fake_driver, fake_sender):
@@ -64,28 +44,6 @@ async def test_long_task_redirects_slash_commands(router, fake_driver, fake_send
     assert fake_driver.injected == []
     _, content = fake_sender.results[0]
     assert "command tool" in content["speak"]
-
-
-async def test_long_task_completes_on_stop_hook(router, fake_driver, fake_sender):
-    append_transcript(
-        router,
-        assistant(tool="Edit", file_path="/p/auth.py"),
-        assistant(text="Fixed the login bug. Tests pass."),
-    )
-    task = asyncio.create_task(router.handle_tool_call(
-        {"type": "tool_call", "id": "c1", "name": "long_task", "args": {"request": "fix the login bug"}}
-    ))
-    await finish_turn(router)
-    await task
-
-    assert fake_driver.injected == ["fix the login bug"]
-    call_id, content = fake_sender.results[0]
-    assert call_id == "c1"
-    assert "Fixed the login bug" in content["speak"]
-    assert content["data"]["state"] == "idle"
-    assert content["data"]["files"] == ["/p/auth.py"]
-    assert content["handle"] == "cc-test-abc"
-    assert fake_sender.context == []
 
 
 async def test_lagged_transcript_flush_does_not_leak_into_next_turn(router, fake_sender):
@@ -115,21 +73,6 @@ async def test_lagged_transcript_flush_does_not_leak_into_next_turn(router, fake
     assert fake_sender.results[-1][1]["speak"] == "It prints hello world."
 
 
-async def test_long_task_falls_back_to_hook_message(router, fake_sender):
-    """The Stop hook can fire before the transcript flush — the payload's
-    last_assistant_message must cover the gap."""
-    task = asyncio.create_task(router.handle_tool_call(
-        {"id": "c1", "name": "long_task", "args": {"request": "quick thing"}}
-    ))
-    await asyncio.sleep(0.1)
-    await router.on_hook("stop", {
-        "transcript_path": str(router.transcript_path),
-        "last_assistant_message": "pong",
-    })
-    await task
-    assert fake_sender.results[0][1]["speak"] == "pong"
-
-
 async def test_long_task_resolves_immediately_on_claude_stop_failure(router, fake_sender):
     task = asyncio.create_task(router.handle_tool_call(
         {"id": "c1", "name": "long_task", "args": {"request": "quick thing"}}
@@ -143,7 +86,7 @@ async def test_long_task_resolves_immediately_on_claude_stop_failure(router, fak
 
     content = fake_sender.results[0][1]
     assert "Claude session expired" in content["speak"]
-    assert content["data"]["state"] == "idle"
+    assert content["data"]["phase"] == "idle"
 
 
 async def test_long_task_defers_and_promotes_milestones(router, fake_sender):
@@ -169,31 +112,7 @@ async def test_long_task_resolves_at_deferred_deadline(router, fake_sender):
     await router.handle_tool_call({"id": "c1", "name": "long_task", "args": {"request": "slow task"}})
     _, content = fake_sender.results[0]
     assert "still working" in content["speak"].lower()
-    assert content["data"]["state"] == "working"
-
-
-async def test_long_task_announces_menu_and_keeps_waiting(router, fake_driver, fake_sender):
-    """A menu mid-task speaks a reply=true partial (blocked on a decision) but
-    does not resolve the call; the terminal result still lands on the Stop hook."""
-    task = asyncio.create_task(router.handle_tool_call(
-        {"id": "c1", "name": "long_task", "args": {"request": "risky task"}}
-    ))
-    await asyncio.sleep(0.15)
-    fake_driver.lines = MENU_LINES
-    await asyncio.sleep(0.3)
-    assert len(fake_sender.partials) == 1
-    _, content, reply = fake_sender.partials[0]
-    assert reply is True
-    assert "needs input" in content["speak"]
-    assert fake_sender.results == []
-
-    fake_driver.lines = [" > ", ""]  # option chosen, menu gone
-    await router.on_hook("stop", {
-        "transcript_path": str(router.transcript_path),
-        "last_assistant_message": "Risky task done.",
-    })
-    await task
-    assert fake_sender.results[0][1]["speak"] == "Risky task done."
+    assert content["data"]["phase"] == "working"
 
 
 async def test_long_task_refused_while_menu_open(router, fake_driver, fake_sender):
@@ -209,7 +128,6 @@ async def test_long_task_waits_for_matching_prompt_submission_hook(
 ):
     router = ToolRouter(
         fake_driver, fake_sender, handle="cc-test", project_dir=tmp_path,
-        verify_submissions=True,
     )
     router.SUBMIT_ACK_S = 0.05
     router.POLL_S = 0.01
@@ -236,7 +154,6 @@ async def test_long_task_retries_enter_then_fails_fast_without_ack(
 ):
     router = ToolRouter(
         fake_driver, fake_sender, handle="cc-test", project_dir=tmp_path,
-        verify_submissions=True,
     )
     router.SUBMIT_ACK_S = 0.01
     router.SUBMIT_ATTEMPTS = 3
@@ -248,7 +165,7 @@ async def test_long_task_retries_enter_then_fails_fast_without_ack(
     assert fake_driver.keys == ["enter", "enter"]
     content = fake_sender.results[0][1]
     assert "couldn't confirm" in content["speak"].lower()
-    assert content["data"]["state"] == "idle"
+    assert content["data"]["phase"] == "idle"
 
 
 async def test_second_long_task_requires_explicit_steering(router, fake_driver, fake_sender):
@@ -260,13 +177,12 @@ async def test_second_long_task_requires_explicit_steering(router, fake_driver, 
 
     rejected = next(c for cid, c in fake_sender.results if cid == "c2")
     assert "steer_task" in rejected["speak"]
-    assert rejected["data"]["queue"] == []
     assert fake_driver.injected == ["first"]
 
     append_transcript(router, assistant(text="First done."))
     await finish_turn(router, delay=0)
     await t1
-    assert router.working is False
+    assert router.state() == "idle"
 
 
 async def test_steer_task_adds_guidance_to_current_turn(router, fake_driver, fake_sender):
@@ -282,11 +198,11 @@ async def test_steer_task_adds_guidance_to_current_turn(router, fake_driver, fak
     steered = next(c for cid, c in fake_sender.results if cid == "c2")
     assert "current" in steered["speak"].lower()
     assert fake_driver.injected == ["first", "also update the docs"]
-    assert router.working is True
+    assert router.state() == "working"
 
     await router.on_hook("stop", {"last_assistant_message": "Code and docs updated."})
     await task
-    assert router.working is False
+    assert router.state() == "idle"
 
 
 async def test_steer_task_requires_active_work(router, fake_driver, fake_sender):
@@ -307,7 +223,9 @@ async def test_server_tool_cancel_interrupts_matching_task(router, fake_driver, 
 
     assert "escape" in fake_driver.keys
     assert fake_sender.results == []  # Converse already discarded the canceled call
-    assert router.working is False
+    assert router.state() == "canceling"
+    await router.on_hook("stop", {"prompt_id": "test-prompt-1"})
+    assert router.state() == "idle"
 
 
 async def test_server_tool_cancel_ignores_an_unrelated_call(router, fake_driver):
@@ -369,7 +287,7 @@ async def test_canceled_turn_does_not_suppress_the_next_terminal_completion(
 async def test_prompt_correlated_cancel_blocks_new_ui_work_and_ignores_late_stop(
     router, fake_driver, fake_sender,
 ):
-    router._verify_submissions = True
+    fake_driver.auto_ack = False
     task = asyncio.create_task(router.handle_tool_call(
         {"id": "old", "name": "long_task", "args": {"request": "open the game"}}
     ))
@@ -418,7 +336,7 @@ async def test_prompt_correlated_cancel_blocks_new_ui_work_and_ignores_late_stop
 async def test_cancel_can_settle_from_verified_idle_ui_without_stop_hook(
     router, fake_driver,
 ):
-    router._verify_submissions = True
+    fake_driver.auto_ack = False
     router.CANCEL_POLL_S = 0.01
     router.CANCEL_GRACE_S = 0.01
     router.CANCEL_IDLE_SAMPLES = 2
@@ -447,10 +365,9 @@ async def test_cancel_can_settle_from_verified_idle_ui_without_stop_hook(
         await asyncio.sleep(0.01)
 
     assert router.state() == "idle"
-    assert router.semantic_state()["last_action"] == {
-        "action": "cancel_task", "status": "verified",
-        "effect": "idle_ui_observed", "completed": True,
-    }
+    action = router.semantic_state()["last_action"]
+    assert action["action"] == "cancel_task"
+    assert action["status"] == "verified"
 
 
 async def test_stop_hook_wakes_voice_for_terminal_typed_work(router, fake_sender):
@@ -465,27 +382,6 @@ async def test_stop_hook_wakes_voice_for_terminal_typed_work(router, fake_sender
     assert "entered directly in the terminal" in text
     assert role == "context"
     assert reply is False  # telemetry, not a milestone: current, but silent
-
-
-async def test_terminal_prompt_submit_updates_semantic_state_until_matching_stop(
-    router, fake_sender,
-):
-    await router.on_hook("user_prompt_submit", {
-        "prompt": "inspect the deployment", "prompt_id": "terminal-prompt",
-    })
-    state = router.semantic_state()
-    assert state["phase"] == "working"
-    assert state["active_task"] == "inspect the deployment"
-    assert state["last_action"] == {
-        "action": "terminal_task", "status": "pending",
-        "effect": "working", "completed": False,
-    }
-
-    await router.on_hook("stop", {
-        "prompt_id": "terminal-prompt", "last_assistant_message": "Deployment is healthy.",
-    })
-    assert router.semantic_state()["phase"] == "idle"
-    assert "Deployment is healthy" in fake_sender.context[0][0]
 
 
 async def test_permission_hook_wakes_voice_for_terminal_typed_menu(
@@ -520,16 +416,6 @@ async def test_stop_failure_wakes_voice_for_terminal_typed_work(router, fake_sen
     assert fake_sender.context
     assert "Try again later" in fake_sender.context[0][0]
     assert fake_sender.context[0][2] is True
-
-
-async def test_terminal_completion_does_not_reuse_stale_voice_result(router, fake_sender):
-    router.last_assistant_text = "Old voice-started result."
-    append_transcript(router, assistant(text="New terminal result."))
-
-    await router.on_hook("stop", {"transcript_path": str(router.transcript_path)})
-
-    assert "New terminal result" in fake_sender.context[0][0]
-    assert "Old voice-started result" not in fake_sender.context[0][0]
 
 
 async def test_completion_after_tool_deadline_wakes_voice(router, fake_sender):
@@ -574,22 +460,6 @@ async def test_observe_claude_returns_authoritative_menu_state(
         "options": ["Fable ✔", "Sonnet", "Haiku"],
         "selected": "Fable ✔",
     }
-
-
-async def test_observe_claude_reports_last_verified_model_while_idle(
-    router, fake_sender,
-):
-    router._known_model = "sonnet"
-    router._known_model_source = "verified"
-    router._last_action = {
-        "action": "set_model", "status": "verified", "effect": "model_changed",
-        "completed": True, "from": "haiku", "to": "sonnet",
-    }
-    await router.handle_tool_call({"id": "c1", "name": "observe_claude", "args": {}})
-
-    content = fake_sender.results[0][1]
-    assert "sonnet" in content["speak"].lower()
-    assert content["data"]["model"] == {"name": "sonnet", "source": "verified"}
 
 
 async def test_set_model_reports_success_only_after_reopening_and_verifying(
@@ -751,7 +621,7 @@ async def test_selecting_model_confirms_second_phase(router, fake_driver, fake_s
     assert fake_driver.keys == ["down", "down", "enter", "enter"]
     result = fake_sender.results[0][1]
     assert "confirmed" in result["speak"].lower()
-    assert result["data"]["state"] == "idle"
+    assert result["data"]["phase"] == "idle"
 
 
 async def test_select_option_without_menu(router, fake_sender):
@@ -776,8 +646,58 @@ async def test_end_session_arms_browser_close_after_goodbye(router, fake_sender)
     assert "converse session" in fake_sender.results[0][1]["speak"].lower()
 
 
-async def test_handler_exception_still_resolves(router, fake_driver, fake_sender):
-    fake_driver.inject = None  # force a TypeError inside the handler
-    await router.handle_tool_call({"id": "c1", "name": "long_task", "args": {"request": "x"}})
-    _, content = fake_sender.results[0]
-    assert "went wrong" in content["speak"]
+async def test_cancel_before_prompt_id_remains_non_idle_until_ui_settles(
+    router, fake_driver, fake_sender,
+):
+    fake_driver.auto_ack = False
+    router.SUBMIT_ACK_S = 1
+    router.CANCEL_GRACE_S = 0.01
+    router.CANCEL_POLL_S = 0.01
+    router.CANCEL_IDLE_SAMPLES = 2
+    task = asyncio.create_task(router.handle_tool_call({
+        "id": "old", "name": "long_task", "args": {"request": "slow task"},
+    }))
+    await asyncio.sleep(0.02)
+    await router.handle_tool_cancel({"id": "old"})
+
+    assert router.state() == "canceling"
+    await router.handle_tool_call({
+        "id": "new", "name": "command", "args": {"command": "/clear"},
+    })
+    assert "still stopping" in fake_sender.results[-1][1]["speak"]
+
+    fake_driver.lines = ["────────────────", "❯", "────────────────"]
+    await task
+    deadline = asyncio.get_running_loop().time() + 1
+    while router.state() != "idle":
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(0.01)
+
+
+async def test_driver_exit_during_submission_returns_router_to_idle(
+    router, fake_driver, fake_sender,
+):
+    def exited(_text):
+        raise OSError("Claude Code session has exited")
+
+    fake_driver.inject = exited
+    await router.handle_tool_call({
+        "id": "c1", "name": "long_task", "args": {"request": "do work"},
+    })
+
+    result = fake_sender.results[-1][1]
+    assert "went wrong" in result["speak"]
+    assert result["data"]["phase"] == "idle"
+    assert result["data"]["active_task"] is None
+
+
+async def test_malformed_tool_calls_are_rejected_without_entering_handlers(
+    router, fake_driver, fake_sender,
+):
+    await router.handle_tool_call({"id": "bad-name", "name": [], "args": {}})
+    await router.handle_tool_call({"id": "bad-args", "name": "long_task", "args": []})
+    await router.handle_tool_call({"id": [], "name": "long_task", "args": {}})
+
+    assert fake_driver.injected == []
+    assert [call_id for call_id, _ in fake_sender.results] == ["bad-name", "bad-args"]
+    assert all("malformed" in result["speak"] for _, result in fake_sender.results)

@@ -61,7 +61,6 @@ async def main() -> None:
         sender,
         handle="cc-smoke",
         project_dir=project_dir,
-        verify_submissions=True,
     )
     router.POLL_S = 1.0
     submitted_prompt_ids = []

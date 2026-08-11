@@ -27,6 +27,13 @@ from aiohttp import WSMsgType, web
 
 log = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).parent / "web"
+HOOK_EVENTS = frozenset({"stop", "user_prompt_submit", "permission_request", "stop_failure"})
+HOOK_STRING_FIELDS = {
+    "stop": ("prompt_id", "session_id", "transcript_path", "last_assistant_message"),
+    "user_prompt_submit": ("prompt", "prompt_id"),
+    "permission_request": ("tool_name",),
+    "stop_failure": ("error", "error_details"),
+}
 
 
 class LocalServer:
@@ -68,9 +75,8 @@ class LocalServer:
         return f"http://{self._host}:{self.port}/hook/{event}?t={self.token}"
 
     async def stop(self) -> None:
-        for sock in (self._tab,):
-            if sock is not None and not sock.closed:
-                await sock.close()
+        if self._tab is not None and not self._tab.closed:
+            await self._tab.close()
         if self._runner:
             await self._runner.cleanup()
 
@@ -159,9 +165,14 @@ class LocalServer:
         async for msg in ws:
             if msg.type == WSMsgType.TEXT and self.on_tab_json:
                 try:
-                    await self.on_tab_json(json.loads(msg.data))
+                    data = json.loads(msg.data)
                 except json.JSONDecodeError:
                     log.warning("bad JSON from tab: %.100s", msg.data)
+                    continue
+                if not isinstance(data, dict):
+                    log.warning("non-object JSON from tab")
+                    continue
+                await self.on_tab_json(data)
         if self._tab is ws:
             self._tab = None
             if self.on_tab_closed:
@@ -174,7 +185,9 @@ class LocalServer:
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError):
-            body = {}
+            body = None
+        if not isinstance(body, dict):
+            return web.json_response({"error": "invalid JSON object"}, status=400)
         session_id = body.get("session_id")
         if not isinstance(session_id, str) or not re.fullmatch(
             r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}", session_id,
@@ -193,12 +206,24 @@ class LocalServer:
         if not self._authorized(request):
             log.warning("rejected unauthenticated hook POST")
             return web.Response(status=403, text="forbidden")
+        event = request.match_info["event"]
+        if event not in HOOK_EVENTS:
+            return web.json_response({"error": "unknown hook event"}, status=404)
         try:
             payload = await request.json()
         except (json.JSONDecodeError, ValueError):
-            payload = {}
+            payload = None
+        if not isinstance(payload, dict):
+            return web.json_response({"error": "invalid JSON object"}, status=400)
+        if any(
+            field in payload and not isinstance(payload[field], str)
+            for field in HOOK_STRING_FIELDS[event]
+        ):
+            return web.json_response({"error": "invalid hook payload"}, status=400)
+        if event == "user_prompt_submit" and not payload.get("prompt"):
+            return web.json_response({"error": "invalid hook payload"}, status=400)
         if self.on_hook:
-            await self.on_hook(request.match_info["event"], payload)
+            await self.on_hook(event, payload)
         # Native Claude Code HTTP hooks expect a JSON response body. An empty
         # object means "observed, no decision" and lets processing continue.
         return web.json_response({})

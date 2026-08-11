@@ -13,16 +13,20 @@ def get_api_key() -> str | None:
     if key:
         return key
     try:
-        return json.loads(CONFIG_PATH.read_text()).get("api_key")
+        loaded = json.loads(CONFIG_PATH.read_text())
+        data = loaded if isinstance(loaded, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError):
         return None
+    stored = data.get("api_key")
+    return stored if isinstance(stored, str) and stored else None
 
 
 def save_api_key(key: str) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     data = {}
     try:
-        data = json.loads(CONFIG_PATH.read_text())
+        loaded = json.loads(CONFIG_PATH.read_text())
+        data = loaded if isinstance(loaded, dict) else {}
     except (FileNotFoundError, json.JSONDecodeError):
         pass
     data["api_key"] = key

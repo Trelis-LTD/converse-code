@@ -52,7 +52,7 @@ screen snapshots, and shutdown requests on stdin. Screen snapshots include rende
 rows, semantic state, the last full response, and the transcript path. Closing stdin or sending
 `shutdown` ends the wrapped Claude process.
 
-The tool router reports `idle`, `working`, `canceling`, or `menu`. A `long_task` call is acknowledged as
+The tool router reports an `idle`, `working`, `canceling`, or `awaiting_input` phase; structured UI distinguishes ordinary menus from the model picker. A `long_task` call is acknowledged as
 deferred once its prompt is confirmed accepted, so no voice turn is held open while Claude works.
 The unit of work is a **working episode**: one run of Claude Code from accepting input until it
 comes to rest (`Stop`, `StopFailure`, or cancellation). `long_task` starts an episode only while

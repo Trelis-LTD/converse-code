@@ -21,7 +21,7 @@ import wave
 from pathlib import Path
 
 from . import broker as brokermod
-from . import config, tools
+from . import config, converse, tools
 from .record import analyse_pcm16
 
 PROMPT = "Please count slowly from one to five."
@@ -55,7 +55,7 @@ async def run(broker_url: str, out_dir: Path | None = None) -> int:
 
     print("1. checking credentials…", flush=True)
     try:
-        if not await brokermod.validate_key(api_key, url=broker_url):
+        if not await converse.validate_key(api_key, url=broker_url):
             print("   REJECTED — run: converse-code login", file=sys.stderr)
             return 1
     except Exception as exc:

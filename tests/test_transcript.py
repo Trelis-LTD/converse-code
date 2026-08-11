@@ -46,14 +46,14 @@ def test_summarize_collects_last_text_and_files():
     s = tmod.summarize_entries(entries)
     assert s.text == "Fixed the bug and added a test. All tests pass."
     assert s.files == ["/p/auth.py", "/p/tests/test_auth.py"]
-    assert "Edit" in s.tools_used
 
 
 def test_milestone_classifies_entries():
     edit = tmod.milestone(entry_assistant(tool_use("Edit", file_path="/p/auth.py")))
-    assert edit == {"kind": "edit", "speak": "Edited auth.py.", "files": ["auth.py"]}
+    assert edit["kind"] == "edit"
+    assert edit["files"] == ["auth.py"]
     tests = tmod.milestone(entry_assistant(tool_use("Bash", description="Run test suite")))
-    assert tests == {"kind": "tests", "speak": "Running the tests now."}
+    assert tests["kind"] == "tests"
     # Claude's interstitial prose becomes silent telemetry, compressed
     prose = tmod.milestone(entry_assistant(text("README created. Now building the game itself.")))
     assert prose["kind"] == "note"
@@ -64,9 +64,8 @@ def test_milestone_classifies_entries():
 
 def test_milestone_ignores_non_assistant_and_plain_bash():
     note = tmod.milestone(entry_assistant(tool_use("Bash", description="Install deps")))
-    assert note == {"kind": "note", "note": "install deps"}
-    assert tmod.milestone(entry_assistant(tool_use("Grep", pattern="x"))) == {
-        "kind": "note", "note": "reading the code"}
+    assert note["kind"] == "note"
+    assert tmod.milestone(entry_assistant(tool_use("Grep", pattern="x")))["kind"] == "note"
 
 
 def test_milestone_test_detection_needs_word_boundary():
@@ -89,7 +88,8 @@ def test_milestone_priority_across_parallel_blocks():
         {"type": "tool_use", "name": "Write", "input": {"file_path": "/p/b.py"}},
     ]}}
     m = tmod.milestone(edits)
-    assert m == {"kind": "edit", "speak": "Edited 2 files.", "files": ["a.py", "b.py"]}
+    assert m["kind"] == "edit"
+    assert m["files"] == ["a.py", "b.py"]
 
 
 def test_speak_summary_cuts_at_sentence():

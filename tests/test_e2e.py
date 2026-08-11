@@ -33,9 +33,7 @@ async def test_full_local_tool_loop(tmp_path):
     transcript.write_text("")
     server.on_hook = router.on_hook
     server.on_tab_json = bridge.handle_browser_message
-    server.on_tab_closed = lambda: asyncio.sleep(
-        0, result=bridge.on_browser_disconnected(),
-    )
+    server.on_tab_closed = bridge.on_browser_disconnected
 
     tasks = set()
 
@@ -75,13 +73,15 @@ async def test_full_local_tool_loop(tmp_path):
                         "args": {"request": "hello world"},
                     },
                 })
-                deferred = await receive_action(ws, "tool_deferred", "t1")
-                assert deferred["handle"].endswith("-t1")
-
                 deadline = asyncio.get_running_loop().time() + 5
                 while "echo: hello world" not in "\n".join(host.snapshot()):
                     assert asyncio.get_running_loop().time() < deadline, host.snapshot()
                     await asyncio.sleep(0.05)
+                await http.post(server.hook_url("user_prompt_submit"), json={
+                    "prompt": "hello world", "prompt_id": "prompt-t1",
+                })
+                deferred = await receive_action(ws, "tool_deferred", "t1")
+                assert deferred["handle"].endswith("-t1")
 
                 transcript.write_text(json.dumps({
                     "type": "assistant",
@@ -92,11 +92,18 @@ async def test_full_local_tool_loop(tmp_path):
                 )
                 result = await receive_action(ws, "tool_result", "t1")
                 assert result["content"]["speak"] == "Echoed."
-                assert result["content"]["data"]["state"] == "idle"
+                assert result["content"]["data"]["phase"] == "idle"
 
                 await ws.send_json({
                     "type": "local", "event": "tool_call",
                     "call": {"id": "t2", "name": "long_task", "args": {"request": "menu"}},
+                })
+                deadline = asyncio.get_running_loop().time() + 5
+                while router.menu() is None:
+                    assert asyncio.get_running_loop().time() < deadline, host.snapshot()
+                    await asyncio.sleep(0.05)
+                await http.post(server.hook_url("user_prompt_submit"), json={
+                    "prompt": "menu", "prompt_id": "prompt-t2",
                 })
                 await receive_action(ws, "tool_deferred", "t2")
                 partial = await receive_action(ws, "tool_partial_result", "t2")

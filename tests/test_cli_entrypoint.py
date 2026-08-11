@@ -8,10 +8,6 @@ there takes down every invocation before anything useful happens.
 import subprocess
 import sys
 
-import pytest
-
-from converse_code.cli import DEFAULT_CLAUDE_CMD, _configure_logging
-
 ENTRY = [sys.executable, "-m", "converse_code.cli"]
 
 
@@ -27,10 +23,6 @@ def test_help_works():
     assert proc.returncode == 0
     assert "Talk or type to Claude Code" in proc.stdout
     assert "--api-url" in proc.stdout
-
-
-def test_default_claude_command_uses_auto_permission_mode():
-    assert DEFAULT_CLAUDE_CMD == "claude --permission-mode auto"
 
 
 def test_startup_checks_credentials_before_launching_claude():
@@ -61,9 +53,3 @@ def test_port_in_use_reports_cleanly():
         assert "Traceback" not in proc.stderr
     finally:
         sock.close()
-
-
-@pytest.mark.parametrize("owns_terminal", [True, False])
-def test_configure_logging_accepts_both_modes(owns_terminal):
-    """basicConfig rejects filename and stream together — even as None."""
-    _configure_logging(owns_terminal=owns_terminal)

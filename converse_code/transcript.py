@@ -35,7 +35,6 @@ def _content_blocks(entry: dict) -> list[dict]:
 class TurnSummary:
     text: str  # Claude's final prose for the turn (last text block)
     files: list[str]  # files edited/written this turn
-    tools_used: list[str]
 
 
 def read_new(path: str | Path, offset: int) -> tuple[list[dict], int]:
@@ -52,7 +51,6 @@ def read_new(path: str | Path, offset: int) -> tuple[list[dict], int]:
 def summarize_entries(entries: list[dict]) -> TurnSummary:
     text = ""
     files: list[str] = []
-    tools: list[str] = []
     for entry in entries:
         if entry.get("type") != "assistant":
             continue
@@ -61,11 +59,10 @@ def summarize_entries(entries: list[dict]) -> TurnSummary:
                 text = block["text"].strip()
             elif block.get("type") == "tool_use":
                 name = block.get("name", "")
-                tools.append(name)
                 file_path = block.get("input", {}).get("file_path")
                 if name in FILE_TOOLS and file_path and file_path not in files:
                     files.append(file_path)
-    return TurnSummary(text=text, files=files, tools_used=tools)
+    return TurnSummary(text=text, files=files)
 
 
 def milestone(entry: dict) -> dict | None:
