@@ -28,7 +28,8 @@ END_SESSION_DESCRIPTION = (
 )
 APPROVAL_DECISION_DESCRIPTION = (
     "Answer a pending Pi approval only after the user explicitly chooses. Use the exact "
-    "approval_id from the approval request. Never infer approval from the coding task itself."
+    "approval_id from the approval request. Call immediately without a spoken preamble. Never "
+    "infer approval from the coding task itself."
 )
 
 
@@ -349,6 +350,9 @@ class AgentToolRouter:
             if name == "bash":
                 command = " ".join(str(args.get("command") or "").split())[:180]
                 detail = f": {command}" if command else ""
+            elif args.get("path") or args.get("file_path"):
+                path = str(args.get("path") or args.get("file_path"))[:180]
+                detail = f": {path}"
             await self.sender.send_tool_progress(
                 self.active_call_id, f"Pi is preparing to use {name}{detail}.",
             )
