@@ -7,9 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from converse_code.ptyhost import INJECT_SUBMIT_DELAY_S, MAX_INJECT_CHARS, ClaudeHost, sanitize
+from converse_code import ptyhost as ptymod
+from converse_code.ptyhost import (
+    INJECT_SUBMIT_DELAY_S,
+    MAX_INJECT_CHARS,
+    ClaudeHost,
+    _ScreenByteFilter,
+    sanitize,
+)
 
 FAKE_TUI = str(Path(__file__).parent / "fake_tui.py")
+IGNORE_SIGNALS = str(Path(__file__).parent / "ignore_signals.py")
 
 
 def test_sanitize_strips_escape_sequences():
@@ -30,8 +38,36 @@ def test_sanitize_keeps_ordinary_and_unicode_text():
     assert sanitize("fix auth.py --flag 'x' → done") == "fix auth.py --flag 'x' → done"
 
 
+
+def test_screen_filter_drops_claude_terminal_queries_across_chunks():
+    filter_ = _ScreenByteFilter()
+    chunks = [
+        b"before\x1b[<",
+        b"u\x1b[>1u\x1bPtmux;\x1b\x1b]11;?\x07\x1b",
+        b"\\after\x1b[31mred\x1b[0m",
+    ]
+
+    assert b"".join(filter_.feed(chunk) for chunk in chunks) == (
+        b"beforeafter\x1b[31mred\x1b[0m"
+    )
+
 def test_sanitize_caps_length():
     assert len(sanitize("x" * (MAX_INJECT_CHARS + 500))) == MAX_INJECT_CHARS
+
+
+def test_screen_filter_recovers_from_aborted_dcs_and_oversized_csi():
+    filter_ = _ScreenByteFilter()
+    assert filter_.feed(b"before\x1bPunfinished") == b"before"
+    assert filter_.feed(b"\x18after") == b"after"
+
+    filter_ = _ScreenByteFilter()
+    assert filter_.feed(b"\x1b[") == b""
+    recovered = filter_.feed(b"1" * 5000 + b"visible")
+    assert recovered.endswith(b"visible")
+    assert filter_._state == "normal"
+    assert filter_._sequence == b""
+
+
 
 
 async def test_inject_separates_text_from_submit_keystroke():
@@ -90,6 +126,26 @@ async def test_write_after_exit_raises_not_crashes(tmp_path):
     await asyncio.wait_for(host.exited.wait(), 5)
     with pytest.raises(OSError):
         host.inject("too late")
+
+
+async def test_stop_before_start_is_a_noop():
+    host = ClaudeHost(["unused"], attach_terminal=False)
+    await host.stop()
+    assert host._pid is None
+
+
+async def test_stop_escalates_for_child_ignoring_hup_and_term(monkeypatch):
+    monkeypatch.setattr(ptymod, "STOP_SIGNAL_TIMEOUT_S", 0.1)
+    host = ClaudeHost([sys.executable, IGNORE_SIGNALS], attach_terminal=False)
+    await host.start()
+    deadline = asyncio.get_running_loop().time() + 3
+    while "ignoring signals" not in "\n".join(host.snapshot()):
+        assert asyncio.get_running_loop().time() < deadline
+        await asyncio.sleep(0.02)
+
+    await asyncio.wait_for(host.stop(), 2)
+    assert host.exited.is_set()
+    assert host.returncode is not None
 
 
 def test_restore_terminal_restores_stdin_blocking_mode():

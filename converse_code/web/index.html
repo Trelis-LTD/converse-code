@@ -89,6 +89,22 @@
   .entry.banner{align-self:center; background:transparent; color:var(--muted); font-size:.74rem; text-align:center;}
   .entry .label{display:block; font:650 .58rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--quiet); margin-bottom:.42rem; text-transform:uppercase; letter-spacing:.11em;}
   .entry.you .label{color:#aeb4aa;}
+  #textForm{
+    flex:0 0 auto; max-width:872px; width:calc(100% - 3rem); margin:0 auto .65rem;
+    display:flex; gap:.55rem;
+  }
+  #textInput{
+    flex:1 1 auto; min-width:0; height:2.75rem; padding:0 .85rem; border-radius:.7rem;
+    border:1px solid var(--border); background:var(--panel); color:var(--text); font:inherit;
+  }
+  #textInput::placeholder{color:var(--quiet);}
+  #textInput:focus{outline:2px solid var(--sage-deep); outline-offset:1px;}
+  #textSendBtn{
+    flex:0 0 auto; min-width:4.5rem; border:1px solid var(--sage-deep); border-radius:.7rem;
+    background:var(--panel-2); color:var(--sage); font-weight:650; cursor:pointer;
+  }
+  #textSendBtn:hover:not(:disabled){border-color:var(--sage); color:var(--text);}
+  #textSendBtn:disabled,#textInput:disabled{opacity:.55; cursor:default;}
   footer{
     flex:0 0 auto; padding:.85rem; border:1px solid var(--border); background:var(--panel);
     display:flex; align-items:center; gap:.95rem; max-width:872px; width:calc(100% - 3rem);
@@ -130,7 +146,8 @@
   .kbd{font:600 .58rem/1 ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--quiet); text-transform:uppercase; letter-spacing:.08em;}
   @media(max-width:600px){
     header{padding:1rem;} main{padding:0 1rem;} #emptyState{inset:0 1rem;}
-    .connection span:last-child,.kbd{display:none;} footer{width:calc(100% - 2rem); margin-bottom:1rem;}
+    .connection span:last-child,.kbd{display:none;} footer,#textForm{width:calc(100% - 2rem);}
+    footer{margin-bottom:1rem;}
     .entry{max-width:92%;}
   }
   @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important; transition:none!important;}}
@@ -142,18 +159,23 @@
   <div class="brand-copy"><span class="eyebrow">Trelis</span><h1>Converse Code</h1></div>
   <div class="spacer"></div>
   <span class="connection"><span class="dot closed" id="wsDot"></span><span>terminal link</span></span>
-  <span class="chip idle" id="statusChip">idle</span>
+  <span class="chip idle" id="statusChip" role="status" aria-live="polite">idle</span>
 </header>
 <main>
-  <section id="emptyState" aria-label="Voice session ready">
+  <section id="emptyState" aria-label="Converse session ready">
     <div class="signal-orbit" aria-hidden="true"><span class="signal-core"></span></div>
-    <h2>Voice link ready</h2>
-    <p>Start speaking to work with Claude Code. Your instructions and its replies will appear here.</p>
+    <h2>Claude Code link ready</h2>
+    <p>Speak or type to work with Claude Code. Your instructions and its replies will appear here.</p>
   </section>
-  <div id="log"></div>
+  <div id="log" role="log" aria-live="polite" aria-relevant="additions text"></div>
 </main>
+<form id="textForm" aria-busy="false">
+  <input id="textInput" type="text" maxlength="2000" autocomplete="off"
+         aria-label="Type an instruction" placeholder="Type an instruction for Claude Code…">
+  <button id="textSendBtn" type="submit">Send</button>
+</form>
 <footer>
-  <button id="micBtn" type="button" aria-label="Start voice session" aria-pressed="false">
+  <button id="micBtn" type="button" aria-label="Start voice input" aria-pressed="false">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 0 0 3.5-3.5V6a3.5 3.5 0 1 0-7 0v6a3.5 3.5 0 0 0 3.5 3.5Zm-2-9.5a2 2 0 1 1 4 0v6a2 2 0 1 1-4 0V6Zm8 6a6 6 0 0 1-12 0H4.5a7.5 7.5 0 0 0 6.75 7.46V22h1.5v-2.54A7.5 7.5 0 0 0 19.5 12H18Z"/></svg>
   </button>
   <div class="mic-copy"><span id="micLabel">Start voice</span><span id="micHint">Speak naturally — coding requests are handed to Claude Code</span></div>
@@ -162,6 +184,7 @@
   <span class="kbd">Classic voice</span>
 </footer>
 <script src="/assistant-transcript.js"></script>
+<script src="/typed-turn.js"></script>
 <script>
 (function(){
   "use strict";
@@ -249,7 +272,10 @@
     }
   }
 
-  var currentYouEl = null;
+  var userTurns = new UserTurnRenderer({
+    create: function(){ return makeEntry("you", "You"); },
+    setText: setBody
+  });
 
   function makeEntry(kind, labelText){
     emptyState.classList.add("hidden");
@@ -275,9 +301,6 @@
     autoScroll();
   }
 
-  function freezeYou(){
-    currentYouEl = null;
-  }
   function addInjected(text){
     var el = makeEntry("inject", "→ sent to Claude Code");
     setBody(el, text);
@@ -357,15 +380,34 @@
   var muteBtn = document.getElementById("muteBtn");
   var micLabel = document.getElementById("micLabel");
   var micDock = document.querySelector("footer");
+  var textForm = document.getElementById("textForm");
+  var textInput = document.getElementById("textInput");
+  var textSendBtn = document.getElementById("textSendBtn");
 
   var client = null;
+  var sessionStartPromise = null;
   var micActive = false;
   var micMuted = false;
   var sessionStarting = false;
+  var micStartGeneration = 0;
   var sessionGeneration = 0;
   var endAfterReply = false;
   var converseReady = false;
   var pendingBridgeControls = new Map();
+  var typedTurns = new TypedTurnController({
+    send: async function(text){
+      var activeClient = await startSession({noGreeting: true});
+      activeClient.injectContext(text, {role: "user", reply: true});
+    },
+    setBusy: function(busy){
+      textInput.disabled = busy;
+      textSendBtn.disabled = busy;
+      textForm.setAttribute("aria-busy", String(busy));
+      if(!busy) textInput.focus();
+    },
+    clearInput: function(){ textInput.value = ""; },
+    showError: addBanner
+  });
 
   function credentialUrl(){
     var token = new URLSearchParams(location.search).get("t") || "";
@@ -429,13 +471,13 @@
   function renderEvent(ev){
     switch(ev.type){
       case "asr": {
-        if(!currentYouEl) currentYouEl = makeEntry("you", "You");
-        setBody(currentYouEl, pickText(ev));
-        if(isFinal(ev)) freezeYou();
+        var userText = pickText(ev);
+        if(isFinal(ev)) typedTurns.handleAsr(userText);
+        userTurns.handle(ev, userText, isFinal(ev));
         break;
       }
       case "turn": {
-        freezeYou();
+        userTurns.freezeFallback();
         assistantTranscript.handle(ev);
         break;
       }
@@ -451,17 +493,17 @@
       }
       case "done": {
         assistantTranscript.handle(ev);
-        freezeYou();
+        userTurns.freezeFallback();
         finishEndSession();
         break;
       }
       case "bye": {
-        addBanner("Session ended" + (ev.reason ? (": " + ev.reason) : "") + " — click the mic to start again.");
+        addBanner("Session ended" + (ev.reason ? (": " + ev.reason) : "") + " — use voice or text to start again.");
         resetSession();
         break;
       }
       case "session_end": {
-        addBanner("Voice session ended — click the mic to start again.");
+        addBanner("Converse session ended — use voice or text to start again.");
         resetSession();
         break;
       }
@@ -485,17 +527,20 @@
         sendJson({type: "local", event: "bridge_ready"});
         break;
       case "resume_failed":
-        addBanner("The previous voice session expired — click the mic to start a fresh one.");
+        addBanner("The previous Converse session expired — use voice or text to start a fresh one.");
         resetSession();
         break;
       case "error": {
         console.debug("client error", ev);
         var detail = ev.detail || (ev.error && ev.error.message) || "unknown error";
         if(ev.retryable){
-          addBanner("Voice error: " + detail + ". Click the mic to reconnect.");
+          if(typedTurns.pending){
+            addBanner("Typed turn delivery is unknown because the Converse session disconnected.");
+          }
+          addBanner("Converse error: " + detail + ". Use voice or text to reconnect.");
           resetSession();
         } else {
-          addBanner("Voice error: " + detail);
+          addBanner("Converse error: " + detail);
         }
         break;
       }
@@ -506,7 +551,7 @@
   function finishEndSession(){
     if(!endAfterReply) return;
     endAfterReply = false;
-    addBanner("Voice session ended — click the mic to start a new one.");
+    addBanner("Converse session ended — use voice or text to start a new one.");
     resetSession();
   }
 
@@ -514,6 +559,7 @@
   // old client cached, so startSession() hands the dead one back and clicking the
   // mic does nothing until the page is manually reloaded.
   function resetSession(){
+    micStartGeneration += 1;
     sessionGeneration += 1;
     var closingClient = client;
     client = null;
@@ -521,6 +567,9 @@
     sessionStorage.removeItem(RESUME_STORAGE_KEY);
     try{ if(closingClient) closingClient.close(); }catch(e){}
     assistantTranscript.reset();
+    userTurns.reset();
+    sessionStartPromise = null;
+    typedTurns.reset();
     micActive = false;
     micMuted = false;
     sessionStarting = false;
@@ -528,7 +577,7 @@
     micBtn.classList.remove("live");
     micDock.classList.remove("live");
     micBtn.setAttribute("aria-pressed", "false");
-    micBtn.setAttribute("aria-label", "Start voice session");
+    micBtn.setAttribute("aria-label", "Start voice input");
     micLabel.textContent = "Start voice";
     muteBtn.disabled = true;
     muteBtn.classList.remove("muted");
@@ -536,8 +585,22 @@
     muteBtn.textContent = "Mute mic";
   }
 
-  async function startSession(){
-    if(client) return Promise.resolve(client);
+  function startSession(options){
+    options = options || {};
+    if(client){
+      return client.connect({noGreeting: !!options.noGreeting}).then(function(){ return client; });
+    }
+    if(sessionStartPromise) return sessionStartPromise;
+    var opening = openSession(options);
+    sessionStartPromise = opening;
+    opening.then(
+      function(){ if(sessionStartPromise === opening) sessionStartPromise = null; },
+      function(){ if(sessionStartPromise === opening) sessionStartPromise = null; }
+    );
+    return opening;
+  }
+
+  async function openSession(options){
     var generation = ++sessionGeneration;
     var mod = await import("./vendor/converse/index.js");
     var resume = loadResumeRecord();
@@ -548,7 +611,7 @@
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({session_id: sessionId})
     });
-    if(!response.ok) throw new Error("Voice credential failed: " + response.status);
+    if(!response.ok) throw new Error("Converse credential failed: " + response.status);
     var credential = await response.json();
     if(generation !== sessionGeneration) throw {sessionCanceled: true};
     var openingClient = new mod.ConverseClient({
@@ -572,7 +635,7 @@
       if(client === openingClient) renderEvent(e.detail || {});
     });
     await openingClient.unlockAudio();
-    await openingClient.connect();
+    await openingClient.connect({noGreeting: !!options.noGreeting});
     if(generation !== sessionGeneration || client !== openingClient){
       openingClient.close();
       throw {sessionCanceled: true};
@@ -585,22 +648,26 @@
 
   function startMic(){
     if(micActive || sessionStarting) return;
+    var requestGeneration = ++micStartGeneration;
     sessionStarting = true;
     micLabel.textContent = "Connecting…";
-    startSession().then(function(c){
-      return c.startMic({workletUrl: "./vendor/converse/mic-worklet.js"});
-    }).then(function(){
-      if(!client) throw {sessionCanceled: true};
+    startVoiceCapture(
+      function(){ return startSession(); },
+      function(){ return requestGeneration === micStartGeneration; },
+      {workletUrl: "./vendor/converse/mic-worklet.js"}
+    ).then(function(result){
+      if(result.canceled) throw {sessionCanceled: true};
       sessionStarting = false;
       micActive = true;
       micMuted = false;
       micBtn.classList.add("live");
       micDock.classList.add("live");
       micBtn.setAttribute("aria-pressed", "true");
-      micBtn.setAttribute("aria-label", "Stop voice session");
+      micBtn.setAttribute("aria-label", "Stop voice input");
       micLabel.textContent = "Listening";
       muteBtn.disabled = false;
     }).catch(function(err){
+      if(requestGeneration !== micStartGeneration) return;
       sessionStarting = false;
       if(err && err.sessionCanceled) return;
       console.debug("mic error", err);
@@ -610,10 +677,23 @@
     });
   }
 
-  function stopSession(){
-    if(!micActive && !sessionStarting && !client) return;
-    addBanner("Voice session stopped — click the mic to reconnect.");
-    resetSession();
+  function stopVoiceInput(){
+    if(!micActive && !sessionStarting) return;
+    micStartGeneration += 1;
+    sessionStarting = false;
+    micActive = false;
+    micMuted = false;
+    try{ if(client) client.stopMic(); }catch(e){}
+    micBtn.classList.remove("live");
+    micDock.classList.remove("live");
+    micBtn.setAttribute("aria-pressed", "false");
+    micBtn.setAttribute("aria-label", "Start voice input");
+    micLabel.textContent = "Start voice";
+    muteBtn.disabled = true;
+    muteBtn.classList.remove("muted");
+    muteBtn.setAttribute("aria-pressed", "false");
+    muteBtn.textContent = "Mute mic";
+    addBanner("Voice input stopped — the Converse session remains available for text.");
   }
 
   function toggleMute(){
@@ -627,15 +707,20 @@
     micDock.classList.toggle("live", !micMuted);
   }
 
+  textForm.addEventListener("submit", function(event){
+    event.preventDefault();
+    typedTurns.submit(textInput.value);
+  });
+
   micBtn.addEventListener("click", function(){
-    if(micActive || sessionStarting || client){ stopSession(); } else { startMic(); }
+    if(micActive || sessionStarting){ stopVoiceInput(); } else { startMic(); }
   });
   muteBtn.addEventListener("click", toggleMute);
 
   // ---------- Boot ----------
   // Printed so it is always possible to tell which page a browser has loaded —
   // a cached page previously looked identical to a fixed one.
-  console.info("converse-code voice tab | audio: @trelis/converse SDK 0.10.0 | build " + BUILD);
+  console.info("converse-code session | @trelis/converse SDK 0.10.0 | build " + BUILD);
   connect();
 })();
 </script>

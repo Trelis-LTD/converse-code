@@ -38,7 +38,7 @@ def test_startup_checks_credentials_before_launching_claude():
     check. The browser's direct socket is opened later, so an unreachable broker
     must still fail fast here with a clear
     message rather than a traceback or a silent start."""
-    proc = run(["--no-browser", "--headless", "--port", "0", "--broker-url", "ws://127.0.0.1:1"])
+    proc = run(["--no-browser", "--port", "0", "--broker-url", "ws://127.0.0.1:1"])
     assert proc.returncode == 1
     assert "Could not reach Converse" in proc.stderr
     assert "Claude Code was not started" in proc.stderr
@@ -54,9 +54,9 @@ def test_port_in_use_reports_cleanly():
     sock.listen(1)
     busy_port = sock.getsockname()[1]
     try:
-        proc = run(["--no-browser", "--headless", "--port", str(busy_port)])
+        proc = run(["--no-browser", "--port", str(busy_port)])
         assert proc.returncode == 1
-        assert "Could not start the voice tab server" in proc.stderr
+        assert "Could not start the Converse session server" in proc.stderr
         assert "--port" in proc.stderr
         assert "Traceback" not in proc.stderr
     finally:

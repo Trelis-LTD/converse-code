@@ -27,10 +27,74 @@ class _Screen(pyte.Screen):
         # handler doesn't accept; we render read-only, so ignore them.
         pass
 
+MAX_SCREEN_CSI_BYTES = 4096
+
+class _ScreenByteFilter:
+    """Drop terminal queries that pyte renders as visible text.
+
+    Claude's TUI uses DCS-wrapped tmux queries and kitty keyboard-protocol
+    negotiation. Real terminals consume them, but pyte does not implement
+    those extensions and can paint their final bytes into the virtual screen.
+    Keep the raw stream untouched for the user's terminal; only sanitize the
+    copy used for snapshots and menu detection.
+    """
+
+    def __init__(self):
+        self._state = "normal"
+        self._sequence = bytearray()
+
+    def feed(self, data: bytes) -> bytes:
+        output = bytearray()
+        for byte in data:
+            if self._state == "normal":
+                if byte == 0x1B:
+                    self._state = "escape"
+                    self._sequence = bytearray((byte,))
+                elif byte == 0x90:  # 8-bit DCS
+                    self._state = "dcs"
+                else:
+                    output.append(byte)
+            elif self._state == "escape":
+                if byte == ord("P"):
+                    self._state = "dcs"
+                    self._sequence.clear()
+                elif byte == ord("["):
+                    self._state = "csi"
+                    self._sequence.append(byte)
+                else:
+                    self._sequence.append(byte)
+                    output.extend(self._sequence)
+                    self._sequence.clear()
+                    self._state = "normal"
+            elif self._state == "csi":
+                self._sequence.append(byte)
+                if len(self._sequence) > MAX_SCREEN_CSI_BYTES:
+                    self._sequence.clear()
+                    self._state = "normal"
+                elif 0x40 <= byte <= 0x7E:
+                    params = self._sequence[2:-1]
+                    if not (byte == ord("u") and params[:1] in (b"<", b">")):
+                        output.extend(self._sequence)
+                    self._sequence.clear()
+                    self._state = "normal"
+            elif self._state == "dcs":
+                if byte == 0x1B:
+                    self._state = "dcs_escape"
+                elif byte == 0x9C:  # 8-bit ST
+                    self._state = "normal"
+                elif byte in (0x18, 0x1A):  # CAN/SUB abort a control string
+                    self._state = "normal"
+            elif self._state == "dcs_escape":
+                self._state = (
+                    "normal" if byte == ord("\\") or byte in (0x18, 0x1A) else "dcs"
+                )
+        return bytes(output)
+
 
 MAX_INJECT_CHARS = 8000
 INJECT_SUBMIT_DELAY_S = 0.05
 
+STOP_SIGNAL_TIMEOUT_S = 2.0
 
 def sanitize(text: str) -> str:
     """Collapse newlines to spaces and drop control characters (incl. ESC)."""
@@ -67,6 +131,7 @@ class ClaudeHost:
         self._stdin_was_blocking: bool | None = None
         self._screen = _Screen(cols, rows)
         self._stream = pyte.ByteStream(self._screen)
+        self._screen_filter = _ScreenByteFilter()
         self.exited = asyncio.Event()
         self.returncode: int | None = None
         self._injection_queue: deque[bytes] = deque()
@@ -133,7 +198,9 @@ class ClaudeHost:
         if not data:
             self._finish()
             return
-        self._stream.feed(data)
+        screen_data = self._screen_filter.feed(data)
+        if screen_data:
+            self._stream.feed(screen_data)
         if self.attach_terminal:
             self._pending_output.extend(data)
             self._flush_terminal_output()
@@ -219,12 +286,21 @@ class ClaudeHost:
             self._stdin_was_blocking = None
 
     async def stop(self) -> None:
-        if self._pid and not self.exited.is_set():
+        if not self._pid or self.exited.is_set():
+            return
+        for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):
             try:
-                os.kill(self._pid, signal.SIGHUP)
+                os.killpg(self._pid, sig)
             except ProcessLookupError:
                 pass
-        await self.exited.wait()
+            try:
+                await asyncio.wait_for(self.exited.wait(), STOP_SIGNAL_TIMEOUT_S)
+                return
+            except asyncio.TimeoutError:
+                continue
+        raise TimeoutError(
+            "Claude Code did not exit after SIGHUP, SIGTERM, and SIGKILL"
+        )
 
     # -- injection & snapshots -----------------------------------------------
 

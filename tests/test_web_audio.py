@@ -1,4 +1,4 @@
-"""Verify the voice tab's audio wiring by running it in Node.
+"""Verify the session page's voice-input wiring by running it in Node.
 
 Audio is now the vendored @trelis/converse SDK's job. This asserts the page
 still delegates to it (rather than growing a hand-rolled implementation again),
@@ -34,7 +34,7 @@ def test_voice_session_pins_classic_and_explains_retryable_pipeline_errors():
     assert 'voice: "classic"' in page
     assert 'ev.detail ||' in page
     assert "ev.retryable" in page
-    assert "Click the mic to reconnect" in page
+    assert "Use voice or text to reconnect" in page
 
 
 def test_voice_session_closes_after_its_final_reply():
@@ -52,7 +52,8 @@ def test_stop_is_a_clean_session_end_and_mute_is_independent():
     assert ">Mute mic</button>" in page
     assert "#muteBtn:disabled{opacity:.62" in page
     assert "setMicEnabled" in page
-    assert "stopSession" in page
+    assert "stopVoiceInput" in page
+    assert "client.stopMic()" in page
     assert "sessionGeneration" in page
     assert 'case "session_end"' in page
 
