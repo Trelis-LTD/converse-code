@@ -77,8 +77,9 @@ current invocation, such as a rendered model change or an observed blocking-UI t
 The public tool surface is semantic: `long_task`, `steer_task`, `observe_claude`, `set_model`,
 `select_option`, and `end_session`. Arbitrary slash commands and generic keypresses are not exposed.
 Managed cancellation may use Escape internally. `set_model` uses Claude Code's documented
-session-only `/model <alias>` form, verifies the rendered model, and retains picker handling only
-for a genuine picker that was already open.
+`/model <alias>` form, verifies a fresh rendered model result, and preserves the observed scope in
+its evidence. Some Claude Code versions save that selection as the default for new sessions; the
+result reports this explicitly instead of claiming a session-only change.
 
 Prompt injection is acknowledged, not assumed. Text and Enter are separate PTY writes, concurrent
 injections are serialized, and `UserPromptSubmit` confirms that Claude accepted the exact prompt.
@@ -92,8 +93,9 @@ uses structure only and excludes the idle composer and historical prompt cursors
 open only for a genuine user decision; `PermissionRequest` can wake voice but never approves a tool
 automatically. Deterministic internal confirmations are owned by the semantic operation that opened
 them, and unrecognized UI fails closed. When Claude asks whether a model should become the global
-default or apply only to this session, `set_model` chooses session-only; changing the user's default
-is outside its contract.
+default or apply only to this session, `set_model` chooses session-only; it never intentionally
+requests a default change. If Claude applies the semantic `/model <alias>` command as the default,
+the verified result reports that observed scope explicitly.
 
 Claude response prose comes from its JSONL transcript or documented hook payloads, not screen
 scraping. Voice transcript corrections are keyed by Converse turn and barge sequence so revised

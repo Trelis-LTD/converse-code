@@ -14,6 +14,7 @@ Calibrated against the real Claude Code TUI, which is full of traps:
 
 import re
 from dataclasses import dataclass
+from typing import Literal
 
 CURSOR = "❯"
 
@@ -44,6 +45,11 @@ SESSION_MODEL_RE = re.compile(
     r"\bfor this session(?: only)?\b",
     re.IGNORECASE,
 )
+DEFAULT_MODEL_RE = re.compile(
+    r"\bSet model to (?P<model>Default|Opus|Fable|Sonnet|Haiku)\b.*"
+    r"\bsaved as your default for new sessions\b",
+    re.IGNORECASE,
+)
 KEPT_MODEL_RE = re.compile(
     r"\bKept model as (?P<model>Default|Opus|Fable|Sonnet|Haiku)\b", re.IGNORECASE,
 )
@@ -58,6 +64,12 @@ class Menu:
     def __post_init__(self) -> None:
         if not self.options or not 0 <= self.selected < len(self.options):
             raise ValueError("a menu needs options and an in-range selection")
+
+
+@dataclass(frozen=True)
+class ModelAcknowledgement:
+    model: str
+    scope: Literal["current_session", "default_for_new_sessions", "unspecified"]
 
 
 def _clean(line: str) -> str:
@@ -232,15 +244,33 @@ def is_idle(lines: list[str]) -> bool:
 
 def session_model_ack_count(lines: list[str], target: str | None = None) -> int:
     """Count visible session-only model acknowledgements, optionally by model."""
-    matches = (
-        match
-        for line in lines
-        if (match := SESSION_MODEL_RE.search(_clean(line)))
-    )
     return sum(
-        1 for match in matches
-        if target is None or match.group("model").lower() == target
+        1 for ack in model_acknowledgements(lines, target)
+        if ack.scope == "current_session"
     )
+
+
+def model_acknowledgements(
+    lines: list[str], target: str | None = None,
+) -> tuple[ModelAcknowledgement, ...]:
+    """Parse rendered model-change results without treating them as current state."""
+    acknowledgements = []
+    for line in lines:
+        cleaned = _clean(line)
+        match = SET_MODEL_RE.search(cleaned)
+        if not match:
+            continue
+        model = match.group("model").lower()
+        if target is not None and model != target:
+            continue
+        if SESSION_MODEL_RE.search(cleaned):
+            scope = "current_session"
+        elif DEFAULT_MODEL_RE.search(cleaned):
+            scope = "default_for_new_sessions"
+        else:
+            scope = "unspecified"
+        acknowledgements.append(ModelAcknowledgement(model, scope))
+    return tuple(acknowledgements)
 
 
 def _neighbor_is_rule(lines: list[str], idx: int) -> bool:

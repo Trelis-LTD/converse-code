@@ -625,7 +625,7 @@ async def test_observe_claude_returns_authoritative_menu_state(
     }
 
 
-async def test_set_model_uses_documented_direct_session_command(
+async def test_set_model_uses_documented_direct_command(
     router, fake_driver, fake_sender,
 ):
     fake_driver.lines = ["Haiku 4.5 · Claude", " > ", ""]
@@ -653,6 +653,90 @@ async def test_set_model_uses_documented_direct_session_command(
     }
     assert fake_driver.injected == ["/model sonnet"]
     assert fake_driver.keys == []
+
+
+async def test_direct_model_verifies_fresh_default_acknowledgement(
+    router, fake_driver, fake_sender,
+):
+    """Reproduce Claude Code's default-saving acknowledgement for `/model opus`."""
+    fake_driver.lines = ["Sonnet 5 · Claude", " > ", ""]
+
+    async def advance_model_ui():
+        while fake_driver.injected != ["/model opus"]:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [
+            "❯ /model opus",
+            "  ⎿  Set model to Opus 5 and saved as your default for new sessions",
+            " > ",
+        ]
+
+    side = asyncio.create_task(advance_model_ui())
+    await router.handle_tool_call(
+        {"id": "c1", "name": "set_model", "args": {"model": "opus"}}
+    )
+    await side
+
+    result = fake_sender.results[-1][1]
+    assert fake_driver.injected == ["/model opus"]
+    assert fake_driver.keys == []
+    assert result["speak"] == (
+        "Verified that Claude Code changed from sonnet to opus and saved it as the default "
+        "for new sessions."
+    )
+    assert result["data"]["last_action"] == {
+        "action": "set_model", "status": "verified", "effect": "model_changed",
+        "completed": True, "from": "sonnet", "to": "opus",
+        "postcondition_verified": True,
+        "evidence": {
+            "kind": "fresh_model_ack", "model": "opus",
+            "scope": "default_for_new_sessions",
+        },
+    }
+    assert fake_sender.result_metadata[-1] == {"outcome": "succeeded", "verified": True}
+
+
+async def test_direct_model_ignores_historical_default_acknowledgement(
+    router, fake_driver, fake_sender,
+):
+    fake_driver.lines = [
+        "❯ /model opus",
+        "  ⎿  Set model to Opus 5 and saved as your default for new sessions",
+        "Sonnet 5 · Claude", " > ",
+    ]
+
+    await router.handle_tool_call(
+        {"id": "c1", "name": "set_model", "args": {"model": "opus"}}
+    )
+
+    result = fake_sender.results[-1][1]
+    assert fake_driver.injected == ["/model opus"]
+    assert result["data"]["last_action"]["status"] == "failed"
+    assert fake_sender.result_metadata[-1] == {"outcome": "failed", "verified": False}
+
+
+async def test_direct_model_rejects_fresh_acknowledgement_for_wrong_model(
+    router, fake_driver, fake_sender,
+):
+    fake_driver.lines = ["Sonnet 5 · Claude", " > ", ""]
+
+    async def advance_model_ui():
+        while fake_driver.injected != ["/model opus"]:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [
+            "❯ /model opus",
+            "  ⎿  Set model to Haiku 4.5 and saved as your default for new sessions",
+            " > ",
+        ]
+
+    side = asyncio.create_task(advance_model_ui())
+    await router.handle_tool_call(
+        {"id": "c1", "name": "set_model", "args": {"model": "opus"}}
+    )
+    await side
+
+    result = fake_sender.results[-1][1]
+    assert result["data"]["last_action"]["status"] == "failed"
+    assert fake_sender.result_metadata[-1] == {"outcome": "failed", "verified": False}
 
 
 async def test_direct_model_ignores_historical_target_ack(
@@ -709,6 +793,44 @@ async def test_direct_model_command_handles_cached_context_confirmation(
     }
     assert fake_driver.injected == ["/model sonnet"]
     assert fake_driver.keys == ["enter"]
+
+
+async def test_direct_model_confirmation_preserves_default_scope(
+    router, fake_driver, fake_sender,
+):
+    fake_driver.lines = ["Sonnet 5 · Claude", " > ", ""]
+
+    async def advance_model_ui():
+        while fake_driver.injected != ["/model opus"]:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [
+            " This conversation is cached for the current model.",
+            " ❯ 1. Yes, switch to Opus 5",
+            "   2. No, go back",
+            "",
+        ]
+        while fake_driver.keys.count("enter") < 1:
+            await asyncio.sleep(0.01)
+        fake_driver.lines = [
+            "❯ /model opus",
+            "  ⎿  Set model to Opus 5 and saved as your default for new sessions",
+            " > ",
+        ]
+
+    side = asyncio.create_task(advance_model_ui())
+    await router.handle_tool_call(
+        {"id": "c1", "name": "set_model", "args": {"model": "opus"}}
+    )
+    await side
+
+    result = fake_sender.results[-1][1]
+    assert result["data"]["last_action"]["status"] == "verified"
+    assert result["data"]["last_action"]["evidence"] == {
+        "kind": "fresh_model_ack", "model": "opus",
+        "scope": "default_for_new_sessions",
+    }
+    assert fake_driver.keys == ["enter"]
+    assert fake_sender.result_metadata[-1] == {"outcome": "succeeded", "verified": True}
 
 
 async def test_already_selected_model_still_settles_session_scope(
