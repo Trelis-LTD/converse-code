@@ -72,7 +72,8 @@ OBSERVE_DESCRIPTION = (
 
 SET_MODEL_DESCRIPTION = (
     "Change Claude Code's model as one verified operation. Pass the requested model name. This "
-    "uses Claude Code's documented session-only /model command and verifies the rendered result. "
+    "uses Claude Code's documented /model command, verifies the rendered result, and reports "
+    "whether Claude applied it to this session or saved it as the default. "
     "Use this both to change a model and to ensure a requested model is already selected."
 )
 
@@ -1068,13 +1069,7 @@ class ToolRouter:
         return self._result(f"Verified that Claude Code changed from {before} to {actual}.")
 
     async def _set_model_direct(self, wanted: str) -> dict:
-        """Use Claude's documented session-only `/model <alias>` command.
-
-        The interactive picker changes across Claude releases and now exposes a separate
-        default-setting shortcut. The argument form is the stable automation contract and, per
-        Claude's documentation, applies only to this session. We still verify the rendered model
-        after any cached-context confirmation before reporting success.
-        """
+        """Use Claude Code's semantic `/model <alias>` command and verify its result."""
         target = self._model_name(wanted)
         allowed = {"default", "opus", "fable", "sonnet", "haiku"}
         if target not in allowed:
@@ -1088,7 +1083,7 @@ class ToolRouter:
 
         snapshot = self.driver.snapshot()
         before = screenmod.detect_current_model(snapshot)
-        baseline_acks = screenmod.session_model_ack_count(snapshot, target)
+        baseline_acks = len(screenmod.model_acknowledgements(snapshot, target))
         if before == target:
             self._known_model = ModelObservation(target, "verified")
             self._last_action = {
@@ -1101,8 +1096,6 @@ class ToolRouter:
 
         command = f"/model {target}"
         self._model_scope_dismissed = False
-        # The PTY driver types the command name, dismisses its autocomplete, then appends the
-        # argument before Enter. This avoids both selecting a suggestion and clearing full input.
         self.driver.inject_command(command, submit_delay_s=self.COMMAND_SUBMIT_DELAY_S)
         await asyncio.sleep(self.SETTLE_S)
 
@@ -1133,24 +1126,41 @@ class ToolRouter:
             snapshot = self.driver.snapshot()
             if self.menu() is None and not self._model_scope_visible(snapshot):
                 current = screenmod.detect_current_model(snapshot)
-                fresh_ack = screenmod.session_model_ack_count(snapshot, target) > baseline_acks
+                acknowledgements = screenmod.model_acknowledgements(snapshot, target)
+                fresh_ack = (
+                    acknowledgements[-1]
+                    if len(acknowledgements) > baseline_acks
+                    else None
+                )
                 if current == target or fresh_ack:
-                    confirmed = target
-                    self._known_model = ModelObservation(confirmed, "verified")
+                    evidence = {"kind": "current_model_header", "model": target}
+                    if fresh_ack and (
+                        current != target or fresh_ack.scope == "default_for_new_sessions"
+                    ):
+                        evidence = {
+                            "kind": "fresh_model_ack", "model": target,
+                            "scope": fresh_ack.scope,
+                        }
+                    self._known_model = ModelObservation(target, "verified")
                     self._last_action = {
                         "action": "set_model", "status": "verified",
                         "effect": "model_changed", "completed": True,
-                        "from": before, "to": confirmed,
+                        "from": before, "to": target,
                         "postcondition_verified": True,
-                        "evidence": {
-                            "kind": "current_model_header" if current == target
-                            else "fresh_session_model_ack",
-                            "model": confirmed,
-                        },
+                        "evidence": evidence,
                     }
+                    if fresh_ack and fresh_ack.scope == "default_for_new_sessions":
+                        return self._result(
+                            f"Verified that Claude Code changed from {before or 'unknown'} to "
+                            f"{target} and saved it as the default for new sessions."
+                        )
+                    if fresh_ack and fresh_ack.scope == "current_session":
+                        return self._result(
+                            f"Verified that Claude Code changed from {before or 'unknown'} "
+                            f"to {target} for this session."
+                        )
                     return self._result(
-                        f"Verified that Claude Code changed from {before or 'unknown'} "
-                        f"to {confirmed} for this session."
+                        f"Verified that Claude Code changed from {before or 'unknown'} to {target}."
                     )
             await asyncio.sleep(min(self.SETTLE_S, 0.35))
 

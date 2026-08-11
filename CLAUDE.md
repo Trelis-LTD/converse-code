@@ -8,8 +8,7 @@ Converse Code is a semantic bridge to Claude Code, not a general-purpose termina
   guidance while that same episode is active.
 - Keep direct TUI manipulation out of the public Converse tool manifest. The allowed narrow
   exceptions are managed cancellation, answering a currently visible blocking user-choice UI,
-  and a semantic model change implemented with Claude Code's documented session-only
-  `/model <alias>` command.
+  and a semantic model change implemented with Claude Code's documented `/model <alias>` command.
 - Never use raw shell mode or bypass Claude Code's permission system.
 - A menu may remain open only when it represents a real decision that requires the user. Surface
   its structured options and wait. Resolve deterministic internal confirmations inside the

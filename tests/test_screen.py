@@ -1,6 +1,7 @@
 from converse_code.screen import (
-    Menu, detect_current_model, detect_menu, detect_model, has_empty_composer,
-    is_idle, is_model_scope_prompt, match_option,
+    Menu, ModelAcknowledgement, detect_current_model, detect_menu, detect_model,
+    has_empty_composer, is_idle, is_model_scope_prompt, match_option,
+    model_acknowledgements,
 )
 
 PERMISSION_PROMPT = [
@@ -217,6 +218,16 @@ def test_current_model_detected_from_visible_claude_state():
     assert detect_current_model(WELCOME_WITH_MODEL) == "sonnet"
     assert detect_current_model(REAL_IDLE_WITH_PROMPT_HISTORY) is None
     assert detect_current_model(MODEL_PICKER) == "sonnet"
+
+
+def test_model_acknowledgements_preserve_observed_scope():
+    assert model_acknowledgements([
+        "  ⎿  Set model to Opus 5 and saved as your default for new sessions",
+        "  ⎿  Set model to Sonnet 5 for this session",
+    ]) == (
+        ModelAcknowledgement("opus", "default_for_new_sessions"),
+        ModelAcknowledgement("sonnet", "current_session"),
+    )
 
 
 def test_numbered_prose_is_not_a_menu():

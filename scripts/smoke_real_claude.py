@@ -171,7 +171,7 @@ async def main() -> None:
             print("\n".join(l for l in host.snapshot() if l.strip()))
 
         if model_only:
-            # Verify the documented session-only direct model path.
+            # Verify the semantic direct model path and its rendered evidence.
             selected = "Sonnet"
             await router.handle_tool_call({
                 "id": "model-set", "name": "set_model", "args": {"model": selected},
@@ -183,7 +183,7 @@ async def main() -> None:
             await router.handle_tool_call({
                 "id": "model-observe", "name": "observe_claude", "args": {},
             })
-            menu_ok = (
+            model_ok = (
                 changed["data"]["last_action"]["status"] == "verified"
                 and changed["data"]["last_action"]["completed"] is True
                 and changed["data"]["last_action"]["effect"] in {"already_selected", "model_changed"}
@@ -197,12 +197,12 @@ async def main() -> None:
                 and sender.results[-1]["data"]["last_action"] == changed["data"]["last_action"]
             )
             print("model selection:", changed["speak"])
-            if not menu_ok:
+            if not model_ok:
                 print("--- screen after menu selection ---")
                 print("\n".join(line for line in host.snapshot() if line.strip()))
-            print("session-only model switch:", "PASS" if menu_ok else "FAIL")
-            if not menu_ok:
-                raise RuntimeError("session-only model switch failed; refusing to continue past its modal")
+            print("verified model switch:", "PASS" if model_ok else "FAIL")
+            if not model_ok:
+                raise RuntimeError("model switch failed; refusing to continue past its modal")
             print("REAL-CLAUDE MODEL SWITCH: PASS")
             return
 
