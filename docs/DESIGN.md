@@ -85,7 +85,9 @@ uses structure only and excludes the idle composer and historical prompt cursors
 remain user decisions; `PermissionRequest` can wake voice but never approves a tool automatically.
 The one narrow exception is Claude's second-phase model-change confirmation: an explicit model
 choice authorizes the matching “Yes, switch to that model” prompt, and no other confirmation is
-automatically accepted.
+automatically accepted. When Claude asks whether the chosen model should become the global default
+or apply only to the current session, Converse Code chooses session-only; changing the user's
+default is outside the tool's contract.
 
 Claude response prose comes from its JSONL transcript or documented hook payloads, not screen
 scraping. Voice transcript corrections are keyed by Converse turn and barge sequence so revised
