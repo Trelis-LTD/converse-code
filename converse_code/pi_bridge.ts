@@ -6,7 +6,10 @@ export default function (pi) {
   let context = null;
   let reconnectTimer = null;
   let shuttingDown = false;
+  let allowForSession = false;
+  let nextApprovalId = 1;
   const expectedInputs = [];
+  const pendingApprovals = new Map();
 
   const send = (frame) => {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
@@ -32,6 +35,15 @@ export default function (pi) {
     }
   };
 
+  const resolvePendingApprovals = (decision, reason) => {
+    for (const [id, pending] of pendingApprovals) {
+      clearTimeout(pending.timer);
+      pending.resolve({decision, ...(reason ? {reason} : {})});
+      pendingApprovals.delete(id);
+    }
+  };
+  const failPendingApprovals = (reason) => resolvePendingApprovals("block", reason);
+
   const handleCommand = (frame) => {
     if (!context || typeof frame?.id !== "string") return;
     try {
@@ -45,7 +57,21 @@ export default function (pi) {
         if (context.isIdle()) throw new Error("Pi is no longer working on an active turn");
         injectUserMessage(frame.id, message, {deliverAs: "steer"});
       } else if (frame.type === "abort") {
+        failPendingApprovals("the coding task was cancelled");
         context.abort();
+      } else if (frame.type === "approval_response") {
+        const pending = pendingApprovals.get(String(frame.approvalId || ""));
+        if (!pending) throw new Error("approval is no longer pending");
+        if (!["allow_once", "allow_session", "block"].includes(frame.decision)) {
+          throw new Error("invalid approval decision");
+        }
+        pendingApprovals.delete(frame.approvalId);
+        clearTimeout(pending.timer);
+        if (frame.decision === "allow_session") {
+          allowForSession = true;
+          resolvePendingApprovals("allow_session");
+        }
+        pending.resolve({decision: frame.decision});
       } else if (frame.type === "shutdown") {
         respond(frame.id, true);
         setTimeout(() => context.shutdown(), 0);
@@ -72,6 +98,7 @@ export default function (pi) {
       catch (error) { send({type: "extension_error", error: String(error)}); }
     });
     socket.addEventListener("close", () => {
+      failPendingApprovals("the Converse approval bridge disconnected");
       socket = null;
       if (!shuttingDown) {
         setStatus("Converse voice: reconnecting");
@@ -97,6 +124,7 @@ export default function (pi) {
       return;
     }
     expectedInputs.length = 0;
+    failPendingApprovals("unrelated terminal or extension input interrupted approval");
     send({
       type: "input_seen",
       owner: event.source === "interactive" ? "interactive" : "other",
@@ -109,6 +137,34 @@ export default function (pi) {
     toolName: event.toolName,
     args: event.args,
   }));
+  pi.on("tool_call", async (event) => {
+    if (allowForSession || !["bash", "edit", "write"].includes(event.toolName)) return;
+    if (socket?.readyState !== WebSocket.OPEN) {
+      return {block: true, reason: "Blocked because Converse approval is disconnected."};
+    }
+    const input = event.input || {};
+    const target = event.toolName === "bash"
+      ? String(input.command || "")
+      : String(input.path || input.file_path || "project file");
+    const summary = target.replace(/\s+/g, " ").slice(0, 180);
+    const approvalId = `approval-${nextApprovalId++}`;
+    setStatus(`Waiting for approval: ${event.toolName}`);
+    const result = await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingApprovals.delete(approvalId);
+        resolve({decision: "block", reason: "approval timed out"});
+      }, 300000);
+      pendingApprovals.set(approvalId, {resolve, timer});
+      send({type: "approval_request", approvalId, toolName: event.toolName, summary});
+    });
+    setStatus("Converse voice: connected");
+    if (result.decision === "block") {
+      const reason = result.reason
+        ? `Blocked because ${result.reason}: ${target}`
+        : `Blocked by the user: ${target}`;
+      return {block: true, reason};
+    }
+  });
   pi.on("message_end", (event) => send({type: event.type, message: event.message}));
   pi.on("agent_settled", (event) => {
     send({type: event.type});
@@ -117,6 +173,7 @@ export default function (pi) {
   pi.on("session_shutdown", () => {
     shuttingDown = true;
     expectedInputs.length = 0;
+    failPendingApprovals("the Pi session ended");
     if (reconnectTimer) clearTimeout(reconnectTimer);
     send({type: "session_shutdown"});
     socket?.close();

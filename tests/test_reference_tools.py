@@ -45,11 +45,74 @@ class FakeSender:
 
 def test_manifest_is_a_small_background_tool_reference():
     tools = {tool["name"]: tool for tool in manifest()}
-    assert set(tools) == {"coding_task", "continue_task", "end_session"}
+    assert set(tools) == {"coding_task", "continue_task", "approval_decision", "end_session"}
     task = tools["coding_task"]
     assert task["deferred"] is True
     assert task["notify_on_complete"] is True
     assert task["status_label"] == "Coding task"
+    approval = tools["approval_decision"]
+    assert approval["parameters"]["properties"]["decision"]["enum"] == [
+        "allow_once", "allow_session", "block",
+    ]
+
+
+async def test_pi_approval_is_spoken_then_resolved_by_an_explicit_voice_decision():
+    pi, sender = FakePi(), FakeSender()
+    router = AgentToolRouter(pi, sender, handle="task-reference")
+    router.phase = "running"
+    router.active_call_id = "task-1"
+    router._deferred_sent = True
+
+    await router.on_event({
+        "type": "approval_request",
+        "approvalId": "approval-7",
+        "toolName": "bash",
+        "summary": "uv run pytest -q",
+    })
+
+    assert sender.partials == [(
+        "task-1",
+        {
+            "speak": (
+                "Pi wants to run bash: uv run pytest -q. "
+                "Ask the user to allow once, allow for this session, or block it."
+            ),
+            "data": {
+                "event": "approval_required",
+                "approval_id": "approval-7",
+                "tool": "bash",
+                "summary": "uv run pytest -q",
+            },
+            "handle": "task-reference",
+        },
+        True,
+    )]
+
+    await router.handle_tool_call({
+        "id": "decision-1",
+        "name": "approval_decision",
+        "args": {"approval_id": "approval-7", "decision": "allow_once"},
+    })
+
+    assert pi.commands == [(
+        "approval_response",
+        {"approvalId": "approval-7", "decision": "allow_once"},
+    )]
+    assert sender.results[-1][2] == {"outcome": "succeeded", "verified": True}
+
+
+async def test_approval_decision_fails_closed_without_a_matching_pending_request():
+    pi, sender = FakePi(), FakeSender()
+    router = AgentToolRouter(pi, sender, handle="task-reference")
+
+    await router.handle_tool_call({
+        "id": "decision-1",
+        "name": "approval_decision",
+        "args": {"approval_id": "stale", "decision": "allow_once"},
+    })
+
+    assert pi.commands == []
+    assert sender.results[-1][2]["outcome"] == "failed"
 
 
 async def test_task_backgrounds_then_emits_silent_and_spoken_partials_and_final_result():
@@ -83,6 +146,7 @@ async def test_task_backgrounds_then_emits_silent_and_spoken_partials_and_final_
     assert "app.py" in sender.partials[0][1]["speak"]
     assert sender.partials[1][2] is True
     assert "tests" in sender.partials[1][1]["speak"].lower()
+    assert sender.partials[1][1]["data"]["command"] == "uv run pytest -q"
     assert sender.results == [(
         "call-1",
         {"speak": "Fixed and tested.", "data": {}, "handle": "task-reference"},

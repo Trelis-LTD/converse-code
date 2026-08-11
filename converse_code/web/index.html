@@ -6,25 +6,32 @@
 <title>Converse Code</title>
 <style>
 :root{color-scheme:dark;--bg:#11120f;--panel:#1b1d19;--text:#eee9df;--muted:#979d92;--line:#343832;--accent:#ed765f;--ok:#9abb9e}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif;min-height:100vh;display:grid;place-items:center}
-main{width:min(30rem,calc(100% - 2rem));padding:2rem;border:1px solid var(--line);border-radius:1rem;background:var(--panel);text-align:center}
-h1{font-size:1.1rem;margin:0 0 .5rem}.hint,#notice{color:var(--muted)}.badge{display:block;margin:1.5rem 0;color:var(--ok);font:12px ui-monospace,monospace}
-button{font:inherit;border:1px solid var(--accent);border-radius:.65rem;padding:.8rem 1.2rem;background:var(--accent);color:#1a0c08;font-weight:700;cursor:pointer}button:disabled{opacity:.55}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif;min-height:100vh;display:grid;grid-template-rows:auto 1fr auto}
+header,main,footer{width:min(760px,calc(100% - 2rem));margin:auto}header{display:flex;align-items:center;padding:1rem 0;border-bottom:1px solid var(--line)}
+h1{font-size:1rem;margin:0}.badge{margin-left:auto;color:var(--ok);font:12px ui-monospace,monospace}main{padding:1rem 0;overflow:auto}.empty{color:var(--muted);text-align:center;margin-top:20vh}
+.entry{max-width:85%;padding:.7rem .85rem;margin:.6rem 0;border:1px solid var(--line);border-radius:.7rem;background:var(--panel);white-space:pre-wrap}.user{margin-left:auto}.assistant{margin-right:auto}.activity{max-width:100%;color:var(--muted);background:transparent;text-align:center;border-style:dashed;font:13px ui-monospace,monospace}
+footer{display:flex;align-items:center;justify-content:center;gap:1rem;padding:1rem 0}.hint,#notice{color:var(--muted);margin:0}button{font:inherit;border:1px solid var(--accent);border-radius:.65rem;padding:.8rem 1.2rem;background:var(--accent);color:#1a0c08;font-weight:700;cursor:pointer}button:disabled{opacity:.55}
 </style>
 </head>
 <body>
-<main>
-  <h1>Converse voice for Pi</h1>
-  <p class="hint">Speak here. Work, output, and approvals stay in the visible Pi terminal.</p>
-  <span id="status" class="badge">connecting</span>
+<header><h1>Converse voice for Pi</h1><span id="status" class="badge">connecting</span></header>
+<main id="log"><p id="empty" class="empty">Speak to drive the visible Pi terminal.</p></main>
+<footer>
+  <p class="hint">Live speech, replies, and coding activity</p>
   <button id="voice" aria-pressed="false">Start voice</button>
   <p id="notice" role="status"></p>
-</main>
+</footer>
 <script type="module">
 const token=new URLSearchParams(location.search).get("t")||"";
+const log=document.querySelector("#log"),empty=document.querySelector("#empty");
 const voice=document.querySelector("#voice"),status=document.querySelector("#status"),notice=document.querySelector("#notice");
 let client=null,opening=null,mic=false,ready=false,seqs=new Map();
-const instructions=`You are a voice router for the user's visible Pi terminal, not the coding agent. Always pass every substantive or actionable user request to coding_task, preserving its complete technical wording; do not answer the coding request yourself. Never say that you will work, look, check, try, or report back unless the tool call was actually accepted. While a coding task is active, pass corrections, additions, and answers through continue_task. Treat tool partials and results as the only evidence of Pi's progress or completion. Keep spoken acknowledgements brief.`;
+const userRows=new Map(),assistantRows=new Map(),renderedControls=new Set();
+const deferredIds=new Set();
+const instructions=`You are a voice router for the user's visible Pi terminal, not the coding agent. Always pass every substantive or actionable user request to coding_task, preserving its complete technical wording; do not answer the coding request yourself. Never say that you will work, look, check, try, or report back unless the tool call was actually accepted. While a coding task is active, pass corrections, additions, and answers through continue_task. When a tool partial reports approval_required, clearly ask the user for allow once, allow for this session, or block; call approval_decision only after their explicit choice and with the supplied approval_id. Never infer approval. Treat tool partials and results as the only evidence of Pi's progress or completion. Keep spoken acknowledgements brief.`;
+
+function row(kind,text){empty?.remove();const el=document.createElement("div");el.className=`entry ${kind}`;el.textContent=text;log.append(el);log.scrollTop=log.scrollHeight;return el}
+function activity(text){if(text)row("activity",text)}
 
 function wireSend(frame){if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(frame))}
 const ws=new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(token)}`);
@@ -48,11 +55,39 @@ async function openClient(){
 }
 
 function handleEvent(event){
+  const turnId=event.turn_id||event.message_id||"current";
+  if(event.type==="asr"){
+    const current=userRows.get(turnId)||row("user","");current.textContent=event.text||"";
+    userRows.set(turnId,current);if(event.final)userRows.delete(turnId);
+  }
+  if(event.type==="turn"&&!assistantRows.has(turnId))assistantRows.set(turnId,row("assistant",""));
+  if(event.type==="text_delta"){
+    const current=assistantRows.get(turnId)||row("assistant","");
+    current.textContent+=event.delta||"";assistantRows.set(turnId,current);
+  }
+  if(event.type==="utterance"){
+    const current=assistantRows.get(turnId)||row("assistant","");
+    current.textContent=event.text||event.utterance||"";assistantRows.set(turnId,current);
+  }
+  if(event.type==="done"||event.type==="interrupted")assistantRows.delete(turnId);
+  if(event.type==="tool_call")activity(`Requested ${event.name||"tool"}`);
   if(event.type==="tool_call")wireSend({type:"local",event:"tool_call",call:event});
   if(event.type==="tool_cancel")wireSend({type:"local",event:"tool_cancel",call:event});
   if(event.type==="reconnecting")ready=false;
   if(event.type==="reconnected"){ready=true;wireSend({type:"local",event:"bridge_ready"});flush()}
   if(event.type==="error")notice.textContent=event.detail||event.code||"Voice connection failed";
+}
+
+function renderControl(frame){
+  if(renderedControls.has(frame.seq))return;renderedControls.add(frame.seq);
+  if(frame.action==="tool_deferred")activity(`${frame.status_label||"Task"} accepted in the background`);
+  else if(frame.action==="tool_progress")activity(frame.note);
+  else if(frame.action==="tool_partial_result"){
+    const data=frame.content?.data||{};
+    activity(data.command?`bash: ${data.command}`:data.path?`${data.tool||"file"}: ${data.path}`:frame.content?.speak);
+  }
+  else if(frame.action==="tool_result")activity(frame.content?.speak||`Task ${frame.outcome||"finished"}`);
+  else if(frame.action==="tool_cancel")activity("Task cancelled");
 }
 
 async function flush(){
@@ -66,8 +101,9 @@ async function flush(){
     else if(frame.action==="tool_cancel")accepted=client.sendToolCancel(frame.id);
     else{seqs.delete(seq);continue}
     if(accepted!==true){ready=false;break}
-    if(frame.action==="tool_deferred")status.textContent="working";
-    if(frame.action==="tool_result")status.textContent="idle";
+    renderControl(frame);
+    if(frame.action==="tool_deferred"){deferredIds.add(frame.id);status.textContent="working"}
+    if(frame.action==="tool_result"&&deferredIds.delete(frame.id))status.textContent=deferredIds.size?"working":"idle";
     seqs.delete(seq);wireSend({type:"local",event:"bridge_ack",seq});
   }
 }

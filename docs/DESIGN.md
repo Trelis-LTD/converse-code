@@ -7,6 +7,7 @@ visible coding session and terminal UI. Converse owns speech and the background-
 
 - `coding_task(request)` is deferred and starts work only while the bridge is idle.
 - `continue_task(request)` semantically steers active work.
+- `approval_decision(approval_id, decision)` resolves only a matching pending approval.
 - `end_session()` ends the voice session and gracefully shuts down Pi.
 - Tool cancellation calls Pi's documented extension `abort()` API.
 
@@ -38,6 +39,7 @@ types keys, or infers menu state.
 | ordinary tool start | `tool_progress` |
 | `edit` or `write` start | silent `tool_partial_result` |
 | test command start | spoken `tool_partial_result`, `reply: true` |
+| approval request | spoken `tool_partial_result`, `reply: true` |
 | `message_end` | authoritative final-text candidate |
 | `agent_settled` | one terminal `tool_result` |
 | cancellation | Pi extension `abort()` |
@@ -50,10 +52,11 @@ a voice task is active fails that Converse tool closed instead of attributing un
 
 ## Approvals
 
-The approval extension intercepts `bash`, `edit`, and `write` before execution and calls native
-`ctx.ui.select()` with target-specific allow-once, allow-for-session, and block choices. Pi renders
-and owns that menu. Converse never navigates it. `reply: true` is used for meaningful spoken
-progress, not remote menu control.
+The bridge extension intercepts `bash`, `edit`, and `write` before execution, creates a unique
+approval ID, and waits without opening a terminal menu. Converse receives the target through a
+`reply: true` partial and asks the user to allow once, allow for the session, or block. Only an
+explicit `approval_decision` carrying the pending ID can resume the Pi hook. Stale IDs, malformed
+decisions, disconnects, cancellation, and timeouts fail closed.
 
 ## Evidence and outcomes
 
@@ -63,6 +66,7 @@ browsers, or external systems, so ordinary completion remains `verified: false`.
 
 ## Browser boundary
 
-The page contains microphone control and status only. It has no text input or duplicate chat
-transcript. Python holds the persistent Converse key and mints a short-lived browser credential.
-Controls are sequenced, acknowledged, retained across disconnects, and replayed after reconnect.
+The page has microphone control but no text input. It mirrors Browser SDK speech, reply, and tool
+lifecycle events; Pi remains the canonical coding transcript. Python holds the persistent Converse
+key and mints a short-lived browser credential. Controls are sequenced, acknowledged, retained
+across disconnects, and replayed after reconnect.

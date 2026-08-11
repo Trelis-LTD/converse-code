@@ -5,7 +5,9 @@ of Converse background tools and the Browser SDK. Pi/Codex owns coding; do not a
 emulation, screen parsing, model menus, generic keypresses, or provider-specific UI automation.
 
 Voice requests must enter Pi through its documented extension `sendUserMessage()` API. Pi owns
-its transcript and all terminal menus. The browser remains voice-only.
+the canonical coding transcript; the voice-only browser mirrors speech, replies, and tool activity.
+Never navigate terminal menus. Blocking approvals must use the bridge's ID-correlated semantic
+request/response and fail closed without an explicit matching user decision.
 
 Preserve the public lifecycle: accepted prompt → deferred tool → bounded progress/partials → one
 terminal result. Use `reply: true` only for information worth prompting an immediate conversational

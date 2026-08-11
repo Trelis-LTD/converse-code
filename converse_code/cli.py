@@ -54,8 +54,7 @@ async def _login(url: str) -> int:
 
 def _pi_argv(command: str) -> list[str]:
     bridge = Path(__file__).with_name("pi_bridge.ts")
-    approval = Path(__file__).with_name("pi_approval.ts")
-    return [*shlex.split(command), "-e", str(bridge), "-e", str(approval)]
+    return [*shlex.split(command), "-e", str(bridge)]
 
 
 async def _run(args) -> int:
