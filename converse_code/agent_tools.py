@@ -12,10 +12,11 @@ TOOL_TIMEOUT_S = 30
 DEFERRED_TIMEOUT_S = 7200
 
 CODING_TASK_DESCRIPTION = (
-    "Start a coding task in the user's current project. Preserve technical wording and pass the "
-    "complete instruction in request. The task runs in the background; progress, meaningful "
-    "partial results, and completion arrive automatically. Do not call this for a "
-    "task already in progress; use continue_task to refine it."
+    "Immediately pass any request or question requiring knowledge of the user's computer, current "
+    "directory, repository, files, code, git state, commands, or coding work to Pi. Preserve the "
+    "complete wording in request; never ask whether to pass it. The task runs in the background; "
+    "progress, meaningful partial results, and completion arrive automatically. Do not call this "
+    "for a task already in progress; use continue_task to refine it."
 )
 CONTINUE_TASK_DESCRIPTION = (
     "Send guidance or a requested answer to the coding task already in progress. Preserve the "
@@ -269,7 +270,16 @@ class AgentToolRouter:
                 },
                 "handle": self.handle,
             },
-            reply=True,
+            reply=False,
+        )
+        await self.sender.send_voice_prompt(
+            approval_id,
+            (
+                "A protected Pi action is waiting for explicit approval. "
+                f"Approval ID: {approval_id}. Tool: {tool_name}. Target: {summary}. "
+                "Ask the user now whether to allow once, allow for this session, or block. "
+                "Do not approve it until the user answers."
+            ),
         )
 
     async def _approval_decision(self, call_id: str, args: dict) -> None:

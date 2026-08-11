@@ -39,7 +39,7 @@ types keys, or infers menu state.
 | ordinary tool start | `tool_progress` |
 | `edit` or `write` start | silent `tool_partial_result` |
 | test command start | spoken `tool_partial_result`, `reply: true` |
-| approval request | spoken `tool_partial_result`, `reply: true` |
+| approval request | silent structured partial + acknowledged queued voice prompt |
 | `message_end` | authoritative final-text candidate |
 | `agent_settled` | one terminal `tool_result` |
 | cancellation | Pi extension `abort()` |
@@ -53,10 +53,11 @@ a voice task is active fails that Converse tool closed instead of attributing un
 ## Approvals
 
 The bridge extension intercepts `bash`, `edit`, and `write` before execution, creates a unique
-approval ID, and waits without opening a terminal menu. Converse receives the target through a
-`reply: true` partial and asks the user to allow once, allow for the session, or block. Only an
-explicit `approval_decision` carrying the pending ID can resume the Pi hook. Stale IDs, malformed
-decisions, disconnects, cancellation, and timeouts fail closed.
+approval ID, and waits without opening a terminal menu. Converse receives the target as a silent
+structured partial. The browser waits for any active reply to finish, then uses an acknowledged
+context injection with `reply: true` to ask the user aloud to allow once, allow for the session, or
+block. Only an explicit `approval_decision` carrying the pending ID can resume the Pi hook. Stale
+IDs, malformed decisions, disconnects, cancellation, and timeouts fail closed.
 
 ## Evidence and outcomes
 

@@ -94,3 +94,7 @@ class BrowserBridge:
         self, call_id: str, content: dict, reply: bool = False,
     ) -> None:
         await self._control("tool_partial_result", id=call_id, content=content, reply=reply)
+
+    async def send_voice_prompt(self, prompt_id: str, text: str) -> None:
+        """Request one acknowledged browser-model reply, replaying until the browser accepts it."""
+        await self._control("voice_prompt", prompt_id=prompt_id, text=text[:1000])

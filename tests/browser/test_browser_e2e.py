@@ -27,8 +27,9 @@ async def test_page_is_a_voice_only_remote_for_the_visible_pi_terminal(browser_p
     await open_session(page)
     assert await page.evaluate("__fakeConverse.clients.length") == 1
     instructions = await page.evaluate("__fakeConverse.clients[0].options.mode.instructions")
-    assert "Always pass every substantive or actionable user request to coding_task" in instructions
+    assert "For every question or request that depends on that host state" in instructions
     assert "visible Pi terminal" in instructions
+    assert "first action must be coding_task" in instructions
     await page.locator("#voice").click()
     await page.locator("#voice").get_by_text("Start voice", exact=True).wait_for()
     assert errors == []
@@ -55,6 +56,58 @@ async def test_page_streams_user_speech_assistant_text_and_tool_activity(browser
     ).count() == 1
     assert await page.locator(".entry.activity").get_by_text(
         "Requested coding_task", exact=True,
+    ).count() == 1
+
+
+async def test_approval_prompt_waits_for_active_reply_then_forces_a_voiced_turn(
+    browser_page, browser_server,
+):
+    page, _ = browser_page
+    server, _, frames = browser_server
+    await open_session(page)
+    await page.evaluate("__fakeConverse.clients[0].emit({type:'turn',turn_id:'busy-reply'})")
+
+    await server.send_json_to_tab({
+        "type": "local", "event": "bridge_control", "seq": 20,
+        "action": "voice_prompt", "prompt_id": "approval-7",
+        "text": "Ask now whether to allow once, allow for this session, or block.",
+    })
+    await page.wait_for_timeout(50)
+    assert await page.evaluate("__fakeConverse.clients[0].injections.length") == 0
+    assert not any(frame.get("seq") == 20 for frame in frames)
+
+    await page.evaluate("__fakeConverse.clients[0].emit({type:'done',turn_id:'busy-reply'})")
+    await wait_for_frame(frames, lambda frame: frame.get("seq") == 20)
+    injection = await page.evaluate("__fakeConverse.clients[0].injections[0]")
+    assert injection["text"].startswith("Ask now")
+    assert injection["options"] == {
+        "role": "context", "reply": True, "messageId": "converse-approval-approval-7",
+    }
+    assert await page.locator(".entry.assistant").get_by_text(
+        "Would you like to allow that action once, for this session, or block it?", exact=True,
+    ).count() == 1
+
+
+async def test_approval_prompt_retries_after_broker_reports_a_late_reply_race(
+    browser_page, browser_server,
+):
+    page, _ = browser_page
+    server, _, frames = browser_server
+    await open_session(page)
+    await page.evaluate("__fakeConverse.retryInjectionOnce=true")
+
+    await server.send_json_to_tab({
+        "type": "local", "event": "bridge_control", "seq": 21,
+        "action": "voice_prompt", "prompt_id": "approval-race",
+        "text": "Ask the user for explicit approval now.",
+    })
+    await wait_for_frame(frames, lambda frame: frame.get("seq") == 21)
+
+    injections = await page.evaluate("__fakeConverse.clients[0].injections")
+    assert len(injections) == 2
+    assert injections[0]["options"]["messageId"] == injections[1]["options"]["messageId"]
+    assert await page.locator(".entry.assistant").get_by_text(
+        "Would you like to allow that action once, for this session, or block it?", exact=True,
     ).count() == 1
 
 

@@ -8,8 +8,7 @@ The example demonstrates the complete deferred-tool lifecycle:
 
 1. `coding_task` accepts work and immediately backgrounds it.
 2. Pi tool events become progress and partial results.
-3. Routine edits use silent partials; meaningful milestones and approval questions use
-   `reply: true`.
+3. Routine edits use silent partials; meaningful milestones use `reply: true`.
 4. `continue_task` steers the running task from a later voice turn.
 5. Pi's `agent_settled` event resolves the deferred tool exactly once.
 6. Converse cancellation maps directly to Pi's extension `abort()` API.
@@ -22,7 +21,9 @@ shell bypass, or hidden Pi process.
 
 That same extension gates `bash`, `edit`, and `write` with ID-correlated semantic approval
 requests. Converse asks the user to allow once, allow for the session, or block, and Pi accepts
-only an explicit response for the pending ID. No terminal selection menu is opened or navigated.
+only an explicit response for the pending ID. Approval narration is queued until any active voice
+reply finishes and is acknowledged by the Browser SDK. No terminal selection menu is opened or
+navigated.
 
 ## Install
 
