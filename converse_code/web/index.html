@@ -6,9 +6,9 @@
 <title>Converse Code</title>
 <style>
 :root{color-scheme:dark;--bg:#11120f;--panel:#1b1d19;--text:#eee9df;--muted:#979d92;--line:#343832;--accent:#ed765f;--ok:#9abb9e;--user-bg:#35221e;--user-line:#78483f;--assistant-bg:#192622;--assistant-line:#426158}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif;min-height:100vh;display:grid;grid-template-rows:auto 1fr auto}
-header,main,footer{width:min(760px,calc(100% - 2rem));margin:auto}header{display:flex;align-items:center;padding:1rem 0;border-bottom:1px solid var(--line)}
-h1{font-size:1rem;margin:0}.badge{margin-left:auto;color:var(--ok);font:12px ui-monospace,monospace}main{padding:1rem 0;overflow:auto}.empty{color:var(--muted);text-align:center;margin-top:20vh}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif;height:100vh;height:100dvh;overflow:hidden;display:grid;grid-template-rows:auto 1fr auto}
+header,main,footer{width:min(760px,calc(100% - 2rem));margin:0 auto}header{display:flex;align-items:center;padding:1rem 0;border-bottom:1px solid var(--line)}
+h1{font-size:1rem;margin:0}.badge{margin-left:auto;color:var(--ok);font:12px ui-monospace,monospace}main{height:100%;min-height:0;padding:1rem 0;overflow:auto}.empty{color:var(--muted);text-align:center;margin-top:20vh}
 .entry{max-width:85%;padding:.7rem .85rem;margin:.6rem 0;border:1px solid var(--line);border-radius:.7rem;background:var(--panel);white-space:pre-wrap}.entry::before{content:attr(data-label);display:block;margin-bottom:.3rem;color:var(--muted);font:700 10px/1.2 ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}.user{margin-left:auto;background:var(--user-bg);border-color:var(--user-line)}.user::before{color:#f49a87}.assistant{margin-right:auto;background:var(--assistant-bg);border-color:var(--assistant-line)}.assistant::before{color:#a9cfb7}.activity{max-width:100%;padding:.55rem .7rem;color:var(--muted);background:transparent;text-align:left;border-style:dashed;font:13px/1.45 ui-monospace,monospace}.activity::before{display:inline;margin-right:.7rem;color:#c1b9a8}
 footer{display:flex;align-items:center;justify-content:center;gap:1rem;padding:1rem 0}.hint,#notice{color:var(--muted);margin:0}button{font:inherit;border:1px solid var(--accent);border-radius:.65rem;padding:.8rem 1.2rem;background:var(--accent);color:#1a0c08;font-weight:700;cursor:pointer}button:disabled{opacity:.55}
 </style>
@@ -32,7 +32,8 @@ const activeReplies=new Set(),replyWaiters=[];
 const instructions=`You are the voice router for Converse Code's visible Pi terminal, not the coding agent. You have no direct knowledge of the user's computer, current directory, repository, files, code, git state, or commands. For every question or request that depends on that host state, your first action must be coding_task; never answer it yourself, ask permission to pass it, or offer to pass it later. Always preserve the user's complete technical wording in the tool request. Call coding_task immediately with no spoken preamble. After it is accepted, do not narrate your own intent; say at most that Pi is working and do not repeatedly promise updates. While a coding task is active, pass corrections, additions, and answers through continue_task. When told that an approval is waiting, ask the user for allow once, allow for this session, or block. After their explicit choice, call approval_decision immediately with the supplied approval_id and no spoken preamble. After approval succeeds, say only that Pi is continuing; do not answer the original request until coding_task returns. Never infer approval. Treat tool partials and results as the only evidence of Pi's progress or completion. Keep spoken acknowledgements brief.`;
 
 const labels={user:"You",assistant:"Converse Code",activity:"Activity"};
-function row(kind,text,label=labels[kind]){empty?.remove();const el=document.createElement("div");el.className=`entry ${kind}`;el.dataset.label=label;el.setAttribute("aria-label",label);el.textContent=text;log.append(el);log.scrollTop=log.scrollHeight;return el}
+function followBottom(){log.scrollTop=log.scrollHeight}
+function row(kind,text,label=labels[kind]){empty?.remove();const el=document.createElement("div");el.className=`entry ${kind}`;el.dataset.label=label;el.setAttribute("aria-label",label);el.textContent=text;log.append(el);followBottom();return el}
 function activity(text,label="Activity"){if(text)row("activity",text,label)}
 function waitForReplyIdle(){
   if(!activeReplies.size)return Promise.resolve();
@@ -78,16 +79,16 @@ function handleEvent(event){
   const turnId=event.turn_id||event.message_id||"current";
   if(event.type==="asr"){
     const current=userRows.get(turnId)||row("user","");current.textContent=event.text||"";
-    userRows.set(turnId,current);if(event.final)userRows.delete(turnId);
+    userRows.set(turnId,current);if(event.final)userRows.delete(turnId);followBottom();
   }
   if(event.type==="turn"){activeReplies.add(turnId);if(!assistantRows.has(turnId))assistantRows.set(turnId,row("assistant",""))}
   if(event.type==="text_delta"){
     const current=assistantRows.get(turnId)||row("assistant","");
-    current.textContent+=event.delta||"";assistantRows.set(turnId,current);
+    current.textContent+=event.delta||"";assistantRows.set(turnId,current);followBottom();
   }
   if(event.type==="utterance"){
     const current=assistantRows.get(turnId)||row("assistant","");
-    current.textContent=event.text||event.utterance||"";assistantRows.set(turnId,current);
+    current.textContent=event.text||event.utterance||"";assistantRows.set(turnId,current);followBottom();
   }
   if(event.type==="done"||event.type==="interrupted"||event.type==="canceled"){activeReplies.delete(turnId);releaseReplyWaiters()}
   if(event.type==="tool_call")activity(`Requested ${event.name||"tool"}`,"Voice tool");

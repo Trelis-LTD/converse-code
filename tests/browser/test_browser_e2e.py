@@ -79,6 +79,36 @@ async def test_page_streams_user_speech_assistant_text_and_tool_activity(browser
     assert await page.locator(".entry.assistant").get_attribute("aria-label") == "Converse Code"
 
 
+async def test_transcript_follows_new_rows_and_streaming_text_to_the_bottom(browser_page):
+    page, _ = browser_page
+    await open_session(page)
+
+    await page.evaluate("""for(let index=0;index<40;index++){
+      __fakeConverse.clients[0].emit({
+        type:'asr',text:`User message ${index}`,final:true,turn_id:`user-${index}`
+      });
+    }""")
+    await page.wait_for_timeout(50)
+    after_rows = await page.locator("#log").evaluate(
+        "el => ({top:el.scrollTop,max:el.scrollHeight-el.clientHeight})",
+    )
+    assert after_rows["max"] > 0
+    assert after_rows["max"] - after_rows["top"] <= 1
+
+    await page.evaluate("""__fakeConverse.clients[0].emit({type:'turn',turn_id:'long-reply'});
+      for(let index=0;index<80;index++){
+        __fakeConverse.clients[0].emit({
+          type:'text_delta',delta:`Streaming line ${index}.\\n`,turn_id:'long-reply'
+        });
+      }""")
+    await page.wait_for_timeout(50)
+    after_stream = await page.locator("#log").evaluate(
+        "el => ({top:el.scrollTop,max:el.scrollHeight-el.clientHeight})",
+    )
+    assert after_stream["max"] > after_rows["max"]
+    assert after_stream["max"] - after_stream["top"] <= 1
+
+
 async def test_late_interrupted_utterance_updates_one_assistant_row(browser_page):
     page, _ = browser_page
     await open_session(page)
