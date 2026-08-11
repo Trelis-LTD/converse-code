@@ -5,16 +5,16 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Converse Code</title>
 <style>
-:root{color-scheme:dark;--bg:#11120f;--panel:#1b1d19;--text:#eee9df;--muted:#979d92;--line:#343832;--accent:#ed765f;--ok:#9abb9e}
+:root{color-scheme:dark;--bg:#11120f;--panel:#1b1d19;--text:#eee9df;--muted:#979d92;--line:#343832;--accent:#ed765f;--ok:#9abb9e;--user-bg:#35221e;--user-line:#78483f;--assistant-bg:#192622;--assistant-line:#426158}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif;min-height:100vh;display:grid;grid-template-rows:auto 1fr auto}
 header,main,footer{width:min(760px,calc(100% - 2rem));margin:auto}header{display:flex;align-items:center;padding:1rem 0;border-bottom:1px solid var(--line)}
 h1{font-size:1rem;margin:0}.badge{margin-left:auto;color:var(--ok);font:12px ui-monospace,monospace}main{padding:1rem 0;overflow:auto}.empty{color:var(--muted);text-align:center;margin-top:20vh}
-.entry{max-width:85%;padding:.7rem .85rem;margin:.6rem 0;border:1px solid var(--line);border-radius:.7rem;background:var(--panel);white-space:pre-wrap}.user{margin-left:auto}.assistant{margin-right:auto}.activity{max-width:100%;color:var(--muted);background:transparent;text-align:center;border-style:dashed;font:13px ui-monospace,monospace}
+.entry{max-width:85%;padding:.7rem .85rem;margin:.6rem 0;border:1px solid var(--line);border-radius:.7rem;background:var(--panel);white-space:pre-wrap}.entry::before{content:attr(data-label);display:block;margin-bottom:.3rem;color:var(--muted);font:700 10px/1.2 ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}.user{margin-left:auto;background:var(--user-bg);border-color:var(--user-line)}.user::before{color:#f49a87}.assistant{margin-right:auto;background:var(--assistant-bg);border-color:var(--assistant-line)}.assistant::before{color:#a9cfb7}.activity{max-width:100%;padding:.55rem .7rem;color:var(--muted);background:transparent;text-align:left;border-style:dashed;font:13px/1.45 ui-monospace,monospace}.activity::before{display:inline;margin-right:.7rem;color:#c1b9a8}
 footer{display:flex;align-items:center;justify-content:center;gap:1rem;padding:1rem 0}.hint,#notice{color:var(--muted);margin:0}button{font:inherit;border:1px solid var(--accent);border-radius:.65rem;padding:.8rem 1.2rem;background:var(--accent);color:#1a0c08;font-weight:700;cursor:pointer}button:disabled{opacity:.55}
 </style>
 </head>
 <body>
-<header><h1>Converse voice for Pi</h1><span id="status" class="badge">connecting</span></header>
+<header><h1>Converse Code</h1><span id="status" class="badge">connecting</span></header>
 <main id="log"><p id="empty" class="empty">Speak to drive the visible Pi terminal.</p></main>
 <footer>
   <p class="hint">Live speech, replies, and coding activity</p>
@@ -29,10 +29,11 @@ let client=null,opening=null,mic=false,ready=false,flushing=false,seqs=new Map()
 const userRows=new Map(),assistantRows=new Map(),renderedControls=new Set();
 const deferredIds=new Set();
 const activeReplies=new Set(),replyWaiters=[];
-const instructions=`You are a voice router for the user's visible Pi terminal, not the coding agent. You have no direct knowledge of the user's computer, current directory, repository, files, code, git state, or commands. For every question or request that depends on that host state, your first action must be coding_task; never answer it yourself, ask permission to pass it, or offer to pass it later. Always preserve the user's complete technical wording in the tool request. Never say that you will work, look, check, try, monitor, or report back unless the tool call was actually accepted. After a task is deferred, say at most that Pi is working; do not repeatedly promise updates. While a coding task is active, pass corrections, additions, and answers through continue_task. When told that an approval is waiting, ask the user for allow once, allow for this session, or block; call approval_decision only after their explicit choice and with the supplied approval_id. After approval succeeds, say only that Pi is continuing; do not answer the original request until coding_task returns. Never infer approval. Treat tool partials and results as the only evidence of Pi's progress or completion. Keep spoken acknowledgements brief.`;
+const instructions=`You are the voice router for Converse Code's visible Pi terminal, not the coding agent. You have no direct knowledge of the user's computer, current directory, repository, files, code, git state, or commands. For every question or request that depends on that host state, your first action must be coding_task; never answer it yourself, ask permission to pass it, or offer to pass it later. Always preserve the user's complete technical wording in the tool request. Call coding_task immediately with no spoken preamble. After it is accepted, do not narrate your own intent; say at most that Pi is working and do not repeatedly promise updates. While a coding task is active, pass corrections, additions, and answers through continue_task. When told that an approval is waiting, ask the user for allow once, allow for this session, or block. After their explicit choice, call approval_decision immediately with the supplied approval_id and no spoken preamble. After approval succeeds, say only that Pi is continuing; do not answer the original request until coding_task returns. Never infer approval. Treat tool partials and results as the only evidence of Pi's progress or completion. Keep spoken acknowledgements brief.`;
 
-function row(kind,text){empty?.remove();const el=document.createElement("div");el.className=`entry ${kind}`;el.textContent=text;log.append(el);log.scrollTop=log.scrollHeight;return el}
-function activity(text){if(text)row("activity",text)}
+const labels={user:"You",assistant:"Converse Code",activity:"Activity"};
+function row(kind,text,label=labels[kind]){empty?.remove();const el=document.createElement("div");el.className=`entry ${kind}`;el.dataset.label=label;el.setAttribute("aria-label",label);el.textContent=text;log.append(el);log.scrollTop=log.scrollHeight;return el}
+function activity(text,label="Activity"){if(text)row("activity",text,label)}
 function waitForReplyIdle(){
   if(!activeReplies.size)return Promise.resolve();
   return new Promise(resolve=>{
@@ -88,8 +89,8 @@ function handleEvent(event){
     const current=assistantRows.get(turnId)||row("assistant","");
     current.textContent=event.text||event.utterance||"";assistantRows.set(turnId,current);
   }
-  if(event.type==="done"||event.type==="interrupted"||event.type==="canceled"){assistantRows.delete(turnId);activeReplies.delete(turnId);releaseReplyWaiters()}
-  if(event.type==="tool_call")activity(`Requested ${event.name||"tool"}`);
+  if(event.type==="done"||event.type==="interrupted"||event.type==="canceled"){activeReplies.delete(turnId);releaseReplyWaiters()}
+  if(event.type==="tool_call")activity(`Requested ${event.name||"tool"}`,"Voice tool");
   if(event.type==="tool_call")wireSend({type:"local",event:"tool_call",call:event});
   if(event.type==="tool_cancel")wireSend({type:"local",event:"tool_cancel",call:event});
   if(event.type==="reconnecting")ready=false;
@@ -99,14 +100,15 @@ function handleEvent(event){
 
 function renderControl(frame){
   if(renderedControls.has(frame.seq))return;renderedControls.add(frame.seq);
-  if(frame.action==="tool_deferred")activity(`${frame.status_label||"Task"} accepted in the background`);
-  else if(frame.action==="tool_progress")activity(frame.note);
+  if(frame.action==="tool_deferred")activity(`${frame.status_label||"Task"} accepted in the background`,"Background task");
+  else if(frame.action==="tool_progress")activity(frame.note,"Pi activity");
   else if(frame.action==="tool_partial_result"){
     const data=frame.content?.data||{};
-    activity(data.command?`bash: ${data.command}`:data.path?`${data.tool||"file"}: ${data.path}`:frame.content?.speak);
+    if(data.event==="approval_required")activity(`${data.tool||"tool"}: ${data.summary||"protected action"}`,"Approval required");
+    else activity(data.command?`bash: ${data.command}`:data.path?`${data.tool||"file"}: ${data.path}`:frame.content?.speak,"Pi activity");
   }
-  else if(frame.action==="tool_result")activity(frame.content?.speak||`Task ${frame.outcome||"finished"}`);
-  else if(frame.action==="tool_cancel")activity("Task cancelled");
+  else if(frame.action==="tool_result")activity(frame.content?.speak||`Task ${frame.outcome||"finished"}`,frame.verified?"Verified":"Pi reported");
+  else if(frame.action==="tool_cancel")activity("Task cancelled","Cancelled");
 }
 
 async function flush(){

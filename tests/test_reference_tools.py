@@ -167,6 +167,21 @@ async def test_task_backgrounds_then_emits_silent_and_spoken_partials_and_final_
     )]
 
 
+async def test_read_progress_identifies_the_target_instead_of_repeating_generic_chatter():
+    pi, sender = FakePi(), FakeSender()
+    router = AgentToolRouter(pi, sender, handle="task-reference")
+    router.phase = "running"
+    router.active_call_id = "task-1"
+    router._deferred_sent = True
+
+    await router.on_event({
+        "type": "tool_execution_start", "toolCallId": "read-1", "toolName": "read",
+        "args": {"path": "index.html"},
+    })
+
+    assert sender.progress == [("task-1", "Pi is preparing to use read: index.html.")]
+
+
 async def test_unrelated_terminal_input_fails_closed_and_cannot_supply_final_evidence():
     pi, sender = FakePi(), FakeSender()
     router = AgentToolRouter(pi, sender, handle="task-reference")

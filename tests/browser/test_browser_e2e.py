@@ -21,6 +21,7 @@ async def open_session(page):
 async def test_page_is_a_voice_only_remote_for_the_visible_pi_terminal(browser_page):
     page, errors = browser_page
     assert await page.title() == "Converse Code"
+    assert await page.locator("h1").inner_text() == "Converse Code"
     assert await page.locator("#text").count() == 0
     assert await page.locator("#send").count() == 0
     assert await page.locator("#log").count() == 1
@@ -30,6 +31,8 @@ async def test_page_is_a_voice_only_remote_for_the_visible_pi_terminal(browser_p
     assert "For every question or request that depends on that host state" in instructions
     assert "visible Pi terminal" in instructions
     assert "first action must be coding_task" in instructions
+    assert "Call coding_task immediately with no spoken preamble" in instructions
+    assert "call approval_decision immediately" in instructions
     await page.locator("#voice").click()
     await page.locator("#voice").get_by_text("Start voice", exact=True).wait_for()
     assert errors == []
@@ -57,6 +60,75 @@ async def test_page_streams_user_speech_assistant_text_and_tool_activity(browser
     assert await page.locator(".entry.activity").get_by_text(
         "Requested coding_task", exact=True,
     ).count() == 1
+
+    styles = await page.evaluate("""() => {
+      const user=getComputedStyle(document.querySelector('.entry.user'));
+      const assistant=getComputedStyle(document.querySelector('.entry.assistant'));
+      return {
+        userBackground:user.backgroundColor,
+        assistantBackground:assistant.backgroundColor,
+        userBorder:user.borderColor,
+        assistantBorder:assistant.borderColor,
+      };
+    }""")
+    assert styles["userBackground"] != styles["assistantBackground"]
+    assert styles["userBorder"] != styles["assistantBorder"]
+    assert await page.locator(".entry.user").get_attribute("data-label") == "You"
+    assert await page.locator(".entry.assistant").get_attribute("data-label") == "Converse Code"
+    assert await page.locator(".entry.user").get_attribute("aria-label") == "You"
+    assert await page.locator(".entry.assistant").get_attribute("aria-label") == "Converse Code"
+
+
+async def test_late_interrupted_utterance_updates_one_assistant_row(browser_page):
+    page, _ = browser_page
+    await open_session(page)
+
+    await page.evaluate("""__fakeConverse.clients[0].emit({type:'turn',turn_id:'reply-1'});
+      __fakeConverse.clients[0].emit({type:'text_delta',delta:'Hello there.',turn_id:'reply-1'});
+      __fakeConverse.clients[0].emit({type:'interrupted',turn_id:'reply-1'});
+      __fakeConverse.clients[0].emit({
+        type:'utterance',text:'Hello there. [interrupted]',turn_id:'reply-1'
+      });""")
+
+    assert await page.locator(".entry.assistant").count() == 1
+    assert await page.locator(".entry.assistant").inner_text() == "Hello there. [interrupted]"
+
+
+async def test_distinct_identical_interrupted_turns_are_preserved(browser_page):
+    page, _ = browser_page
+    await open_session(page)
+
+    await page.evaluate("""for(const id of ['reply-1','reply-2']){
+      __fakeConverse.clients[0].emit({type:'turn',turn_id:id});
+      __fakeConverse.clients[0].emit({type:'text_delta',delta:'Hello there.',turn_id:id});
+      __fakeConverse.clients[0].emit({type:'interrupted',turn_id:id});
+      __fakeConverse.clients[0].emit({type:'utterance',text:'Hello there. [interrupted]',turn_id:id});
+    }""")
+
+    assert await page.locator(".entry.assistant").count() == 2
+    assert await page.locator(".entry.assistant").all_text_contents() == [
+        "Hello there. [interrupted]", "Hello there. [interrupted]",
+    ]
+
+
+async def test_late_distinct_utterance_cannot_overwrite_an_earlier_matching_turn(browser_page):
+    page, _ = browser_page
+    await open_session(page)
+
+    await page.evaluate("""__fakeConverse.clients[0].emit({type:'turn',turn_id:'reply-1'});
+      __fakeConverse.clients[0].emit({type:'text_delta',delta:'Hello',turn_id:'reply-1'});
+      __fakeConverse.clients[0].emit({type:'interrupted',turn_id:'reply-1'});
+      __fakeConverse.clients[0].emit({type:'turn',turn_id:'reply-2'});
+      __fakeConverse.clients[0].emit({type:'text_delta',delta:'Hello',turn_id:'reply-2'});
+      __fakeConverse.clients[0].emit({type:'interrupted',turn_id:'reply-2'});
+      __fakeConverse.clients[0].emit({
+        type:'utterance',text:'Hello again [interrupted]',turn_id:'reply-2'
+      });""")
+
+    assert await page.locator(".entry.assistant").count() == 2
+    assert await page.locator(".entry.assistant").all_text_contents() == [
+        "Hello", "Hello again [interrupted]",
+    ]
 
 
 async def test_approval_prompt_waits_for_active_reply_then_forces_a_voiced_turn(
@@ -166,6 +238,45 @@ async def test_deferred_silent_partial_reply_partial_and_completion(browser_page
     ]
     assert calls[2]["options"]["reply"] is False
     assert calls[3]["options"]["reply"] is True
+
+
+async def test_activity_rows_distinguish_approval_and_unverified_pi_evidence(
+    browser_page, browser_server,
+):
+    page, _ = browser_page
+    server, _, frames = browser_server
+    await open_session(page)
+
+    await server.send_json_to_tab({
+        "type": "local", "event": "bridge_control", "seq": 30,
+        "action": "tool_partial_result", "id": "task-1", "reply": False,
+        "content": {
+            "speak": "Pi wants to run bash: pwd. Ask the user to allow once, allow for this "
+                     "session, or block it.",
+            "data": {
+                "event": "approval_required", "tool": "bash", "summary": "pwd",
+            },
+        },
+    })
+    await wait_for_frame(frames, lambda frame: frame.get("seq") == 30)
+    assert await page.locator(".entry.activity").get_by_text(
+        "bash: pwd", exact=True,
+    ).count() == 1
+    assert await page.locator(".entry.activity").last.get_attribute("data-label") == (
+        "Approval required"
+    )
+
+    await server.send_json_to_tab({
+        "type": "local", "event": "bridge_control", "seq": 31,
+        "action": "tool_result", "id": "task-1",
+        "content": {"speak": "Opened the airplane game in your default browser."},
+        "outcome": "succeeded", "verified": False,
+    })
+    await wait_for_frame(frames, lambda frame: frame.get("seq") == 31)
+    assert await page.locator(".entry.activity").last.inner_text() == (
+        "Opened the airplane game in your default browser."
+    )
+    assert await page.locator(".entry.activity").last.get_attribute("data-label") == "Pi reported"
 
 
 async def test_sdk_cancellation_reaches_the_local_host(browser_page, browser_server):
