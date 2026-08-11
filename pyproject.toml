@@ -1,14 +1,13 @@
 [project]
 name = "converse-code"
-version = "0.7.0"
-description = "Talk or type to Claude Code via Converse, with headless JSONL control"
+version = "0.8.0"
+description = "Minimal Converse background-tool reference using Pi and Codex"
 readme = "PYPI.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "websockets>=12",
     "aiohttp>=3.9",
-    "pyte>=0.8.2",
     "python-dotenv>=1.0",
 ]
 
@@ -22,7 +21,6 @@ converse-code = "converse_code.cli:main"
 
 [dependency-groups]
 dev = [
-    "claude-agent-sdk>=0.2.135",
     "playwright>=1.54",
     "pytest>=8",
     "pytest-asyncio>=0.24",

@@ -1,145 +1,47 @@
-# Converse Code architecture
+# Design
 
-This document describes the current client. It is not a roadmap or design diary.
+Converse Code is a reference, not a general agent framework. Pi owns the coding loop; Converse
+owns conversation, background-tool lifecycle, and speech.
 
-## Runtime shape
+## Public surface
 
-`converse-code` starts the real interactive `claude` CLI inside a pseudo-terminal and serves a
-single localhost browser page. The terminal remains directly usable. The browser owns voice,
-typed turns, and assistant playback through the bundled `@trelis/converse` Browser SDK.
+- `coding_task(request)` is deferred. It starts work only while idle.
+- `continue_task(request)` steers active work or answers its blocking structured request.
+- `end_session()` ends the Converse session.
+- Cancellation is part of the tool protocol and maps to Pi `abort`; it is not another tool.
 
-`converse-code --headless` instead exposes the same Claude tool router as the
-`converse-code-headless-v1` JSONL protocol on stdin/stdout. It does not connect to Converse
-or require a Converse API key.
+## Event mapping
 
-```text
-browser SDK  <===============================>  hosted Converse
-     |             audio + tool protocol
-     |
-     +-- acknowledged localhost controls --> converse-code
-                                                   |
-                                             PTY + Claude hooks
-                                                   |
-                                             interactive claude CLI
-```
-
-There are five client-side boundaries:
-
-| Component | Responsibility |
+| Pi RPC event | Converse event |
 | --- | --- |
-| Browser SDK | Voice and typed turns, AEC, audio playback, turn events, reconnect/resume |
-| Local server | Serves the page, mints scoped credentials, and carries tool/status controls |
-| Headless controller | Maps JSONL requests and events to the tool router without Converse |
-| Tool router | Sends conversational work, answers user-chosen blocking prompts, and performs narrow semantic controls |
-| PTY host | Preserves the real or virtual Claude TUI while providing safe input injection and screen structure |
+| accepted `prompt` response | `tool_deferred` |
+| ordinary tool start | `tool_progress` |
+| `edit` or `write` start | silent `tool_partial_result` |
+| test command start | `tool_partial_result`, `reply: true` |
+| blocking extension UI request | structured `tool_partial_result`, `reply: true` |
+| `message_end` | authoritative final-text candidate |
+| `agent_settled` | one terminal `tool_result` |
+| tool cancellation | Pi `abort` |
 
-The persistent API key stays in the Python process. For each browser session, the local server
-exchanges it for a short-lived credential bound to that session ID. The browser SDK then connects
-straight to Converse with the tool manifest. Supported SDK resume state is kept in
-`sessionStorage`, so a reload can resume without exposing the persistent key.
+The router has one state: `idle`, `starting`, `running`, `awaiting_input`, or `canceling`. Early
+Pi events are buffered until `tool_deferred` has been delivered, preserving the public lifecycle.
 
-## Channels and state
+The bundled Pi extension intercepts `bash`, `edit`, and `write` before execution and calls
+`ctx.ui.select` with allow-once, allow-for-session, and block choices. Pi RPC turns that into an
+ID-correlated extension UI request. The router never guesses at a menu or types keys; it sends the
+user's explicit answer back by request ID.
 
-Browser session mode exposes these localhost channels:
+## Outcomes
 
-- `/session-credential`: exchanges a requested session ID for a browser-safe scoped credential.
-- `/ws`: acknowledged tool controls plus Claude state and accepted-prompt labels.
-- `/hook/{event}`: native Claude Code HTTP lifecycle hooks.
-- `/vendor/converse/*.js`: the Apache-licensed browser SDK modules bundled with the wheel.
+Prompt acceptance proves only that Pi accepted work. `agent_settled` proves that Pi stopped
+automatically processing it. It does not independently verify claimed file, test, browser, or
+external-system effects, so ordinary completion is `outcome: succeeded, verified: false`.
 
-Headless mode reserves stdout for JSONL protocol events. It accepts tool calls, cancellation,
-screen snapshots, and shutdown requests on stdin. Screen snapshots include rendered terminal
-rows, semantic state, the last full response, and the transcript path. Closing stdin or sending
-`shutdown` ends the wrapped Claude process.
+Immediate protocol actions such as accepted steering are verifiable and may use `verified: true`.
+Cancellation uses the Browser SDK spelling `outcome: cancelled`.
 
-The tool router reports an `idle`, `working`, `canceling`, or `awaiting_input` phase. Blocking UI
-is exposed as a structured decision with an exact title, options, selection, and rendered-state
-revision. A `long_task` call is acknowledged as
-deferred once its prompt is confirmed accepted, so no voice turn is held open while Claude works.
-The unit of work is a **working episode**: one run of Claude Code from accepting input until it
-comes to rest (`Stop`, `StopFailure`, or cancellation). `long_task` starts an episode only while
-idle; `steer_task` explicitly adds guidance to the episode already in progress. There is no
-implicit queue and a second `long_task` is rejected with recovery guidance. A deferred job is the
-broker's handle on the current episode, never on an individual prompt. While an episode runs,
-milestones go out as
-partial results under the cadence rule *milestones speak, telemetry stays silent*: a menu
-(blocked on a decision) and a test run announce themselves; file edits stay silent but keep the
-voice current; other activity is plain progress. The episode's closing message resolves the job
-and is announced by the broker. Episodes typed directly at the terminal inject their outcome
-silently — the user already read it there.
+## Browser boundary
 
-Every tool result also includes a semantic snapshot: phase, active task, open UI and selection,
-known model, and the last action's evidence. `observe_claude` exposes that state without mutating
-the TUI. A matching `UserPromptSubmit` proves acceptance; a matching `Stop` proves that Claude's
-episode completed; neither alone proves an external postcondition such as a GUI application being
-open. Ordinary completed turns therefore resolve as `outcome: succeeded, verified: false` and
-attribute their report to Claude Code. `verified: true` requires target-specific evidence from the
-current invocation, such as a rendered model change or an observed blocking-UI transition.
-
-The public tool surface is semantic: `long_task`, `steer_task`, `observe_claude`, `change_model`,
-`resolve_decision`, and `end_session`. Arbitrary slash commands and generic keypresses are not
-exposed. Ordinary work is prompted through `long_task`. `change_model` is the narrow exception:
-it accepts only documented aliases, runs Claude Code's session-only `/model <alias>` command, and
-requires current-call rendered evidence before claiming success. Managed cancellation may use
-Escape internally. `resolve_decision` accepts only the exact revision and
-option label from the currently rendered blocking state. When the requested row is not selected,
-one call focuses it and returns a new revision; a second revalidates that already-selected row
-immediately before submission. The observed transition is verified afterward.
-
-Prompt injection is acknowledged, not assumed. Text and Enter are separate PTY writes, concurrent
-injections are serialized, and `UserPromptSubmit` confirms that Claude accepted the exact prompt.
-A swallowed Enter is retried twice before the voice call resolves with a recovery instruction.
-The hook's `prompt_id` is retained for the episode and matched against `Stop`. After cancellation,
-the router stays in `canceling` until that prompt stops or the rendered terminal is stably idle;
-duplicate or late Stop events from it are ignored rather than applied to a newer episode.
-
-Claude menus are read from a rendered terminal emulator, never from raw ANSI output. The detector
-uses structure only and excludes the idle composer and historical prompt cursors. `PermissionRequest`
-can wake voice but never approves a tool automatically. A decision is resolved only after the user
-chooses or when it deterministically confirms the active instruction the user already authorized.
-Every resolution handles one transition; a replacement menu receives a new revision and requires a
-new decision. Stale, changed, and unrecognized UI fails closed.
-
-Claude response prose comes from its JSONL transcript or documented hook payloads, not screen
-scraping. Voice transcript corrections are keyed by Converse turn and barge sequence so revised
-events update an existing row instead of duplicating it.
-
-## Security boundaries
-
-- The HTTP server binds to `127.0.0.1` by default.
-- Headless control uses only the launching process's stdin/stdout; it opens no external control
-  socket and never reads a Converse credential.
-- Every page, local WebSocket, credential request, and hook is scoped by a random per-run token. WebSocket
-  upgrades additionally reject foreign browser origins.
-- The Converse API key is read from `CONVERSE_API_KEY` or a mode-`0600` config file and is never
-  sent to browser JavaScript.
-- Remote prompt text is flattened, length-limited, and stripped of terminal control bytes before
-  it reaches the PTY.
-- Only an explicitly matching managed tool cancellation may press Escape against an active turn.
-- Claude starts in `--permission-mode auto`, not a bypass mode. Remaining trust and permission
-  prompts stay visible and require the user's choice.
-- The browser SDK files are public source and contain no runtime secrets, so their static module
-  route is not token-gated. Local control and credential routes are token-gated; audio travels
-  directly between the Browser SDK and Converse under the scoped credential.
-
-The localhost token protects against unrelated pages and local web content; it is not a machine
-account boundary. A process running as the same OS user can generally inspect that user's terminal,
-files, and process state.
-
-## Open-source boundary
-
-Converse Code and the Trelis-authored Browser SDK source bundled with it are licensed under Apache
-2.0. The SDK's binary-derived AEC source retains the third-party licenses, disclaimers, and patent
-notices under `converse_code/web/vendor/converse/THIRD_PARTY_LICENSES`.
-
-Those licenses do not cover the hosted Converse service, its models, Trelis trademarks, or
-server-side software. The client communicates with that service through the documented public
-WebSocket protocol.
-
-## Maintenance
-
-Run the deterministic suite with `uv run pytest -q`. Run
-`uv run scripts/smoke_real_claude.py` for an isolated end-to-end check against the installed Claude
-CLI. Browser SDK updates must come from a source release that declares Apache 2.0 and includes its
-NOTICE and complete third-party terms; regenerate the copy with `scripts/vendor_converse_sdk.py`
-and commit its updated `UPSTREAM.json`.
+The local page uses the official Browser SDK for voice, text, tools, and partial replies. Python
+holds the persistent Converse key and mints a short-lived credential for the page. Local controls
+are sequenced, acknowledged, retained across disconnects, and replayed after SDK reconnection.

@@ -102,7 +102,7 @@ async def browser_page(request, browser_server):
                 ),
             )
             await page.goto(server.url)
-            await page.locator("#wsDot.open").wait_for()
+            await page.locator("#status").get_by_text("idle", exact=True).wait_for()
             try:
                 yield page, errors
             finally:

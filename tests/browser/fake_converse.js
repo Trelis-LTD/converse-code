@@ -139,6 +139,11 @@ export class ConverseClient extends EventTarget {
   sendToolPartialResult(id, content, options) {
     if (state.transportLive) {
       this.bridgeCalls.push({action: "tool_partial_result", id, content, options});
+      if (options.reply) setTimeout(() => {
+        this.emit({type: "turn", turn_id: `partial-${id}`});
+        this.emit({type: "text_delta", delta: content.speak, turn_id: `partial-${id}`});
+        this.emit({type: "done", turn_id: `partial-${id}`});
+      }, 0);
     }
     return state.transportLive;
   }

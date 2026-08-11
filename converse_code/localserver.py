@@ -1,17 +1,14 @@
-"""Local HTTP + WebSocket server. Three channels:
+"""Local server for the Browser SDK reference client.
 
-  /ws     acknowledged tool controls plus Claude Code state (JSON in both
-          directions; audio never crosses localhost)
+  /ws     acknowledged Browser SDK controls
   /session-credential  mints a scoped credential for the direct Browser SDK
-  /hook   Claude Code lifecycle hooks POST their payloads here
 
 Everything here is reachable from any web page the dev happens to have open —
 browsers don't apply same-origin policy to WebSockets, and a simple-content-type
 POST needs no preflight. So all private endpoints require a per-run secret token
 (`?t=…`), the page is served only to a request carrying it, and WebSocket
 upgrades additionally must come from our own origin. Without this, a background
-ad frame could evict the real tab, listen to the conversation, or forge a
-"Claude finished" hook whose text gets spoken to the dev.
+ad frame could evict the real tab or listen to the conversation.
 """
 
 import hmac
@@ -27,15 +24,6 @@ from aiohttp import WSMsgType, web
 
 log = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).parent / "web"
-HOOK_EVENTS = frozenset({"stop", "user_prompt_submit", "permission_request", "stop_failure"})
-HOOK_STRING_FIELDS = {
-    "stop": ("prompt_id", "session_id", "transcript_path", "last_assistant_message"),
-    "user_prompt_submit": ("prompt", "prompt_id", "session_id"),
-    "permission_request": ("tool_name",),
-    "stop_failure": (
-        "error", "error_details", "last_assistant_message", "session_id", "transcript_path",
-    ),
-}
 
 
 class LocalServer:
@@ -46,7 +34,6 @@ class LocalServer:
         self.on_tab_json: Callable[[dict], Awaitable[None]] | None = None
         self.on_tab_closed: Callable[[], Awaitable[None]] | None = None
         self.on_session_credential: Callable[[str], Awaitable[dict]] | None = None
-        self.on_hook: Callable[[str, dict], Awaitable[None]] | None = None
         self._tab: web.WebSocketResponse | None = None
         self._runner: web.AppRunner | None = None
         self._host = "127.0.0.1"
@@ -55,13 +42,10 @@ class LocalServer:
     async def start(self, port: int = 0, host: str = "127.0.0.1") -> int:
         self._host = host
         app = web.Application()
-        app.router.add_get("/typed-turn.js", self._typed_turn)
         app.router.add_get("/", self._index)
-        app.router.add_get("/assistant-transcript.js", self._assistant_transcript)
         app.router.add_get("/ws", self._ws)
         app.router.add_post("/session-credential", self._session_credential)
         app.router.add_get("/vendor/converse/{name}", self._vendor)
-        app.router.add_post("/hook/{event}", self._hook)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, host, port)
@@ -72,9 +56,6 @@ class LocalServer:
     @property
     def url(self) -> str:
         return f"http://{self._host}:{self.port}/?t={self.token}"
-
-    def hook_url(self, event: str) -> str:
-        return f"http://{self._host}:{self.port}/hook/{event}?t={self.token}"
 
     async def stop(self) -> None:
         if self._tab is not None and not self._tab.closed:
@@ -119,24 +100,12 @@ class LocalServer:
             return web.Response(status=403, text="missing or bad token")
         return web.FileResponse(WEB_DIR / "index.html", headers=self.NO_STORE)
 
-    async def _assistant_transcript(self, _request: web.Request) -> web.StreamResponse:
-        return web.FileResponse(
-            WEB_DIR / "assistant-transcript.js",
-            headers={**self.NO_STORE, "Content-Type": "application/javascript"},
-        )
-
-    async def _typed_turn(self, _request: web.Request) -> web.StreamResponse:
-        return web.FileResponse(
-            WEB_DIR / "typed-turn.js",
-            headers={**self.NO_STORE, "Content-Type": "application/javascript"},
-        )
-
     async def _vendor(self, request: web.Request) -> web.StreamResponse:
         """Serve the vendored @trelis/converse SDK modules to the page.
 
         Deliberately not token-gated: an ES module's own static imports can't
         carry a query string, and these are bundled Apache-licensed client modules
-        containing no secrets. The token still guards the page, socket and hooks.
+        containing no secrets. The token still guards the page and socket.
         """
         name = request.match_info["name"]
         if not name.endswith(".js") or "/" in name or ".." in name:
@@ -203,29 +172,3 @@ class LocalServer:
             log.exception("could not mint browser session credential")
             return web.json_response({"error": "could not reach Converse"}, status=502)
         return web.json_response(credential, status=201)
-
-    async def _hook(self, request: web.Request) -> web.Response:
-        if not self._authorized(request):
-            log.warning("rejected unauthenticated hook POST")
-            return web.Response(status=403, text="forbidden")
-        event = request.match_info["event"]
-        if event not in HOOK_EVENTS:
-            return web.json_response({"error": "unknown hook event"}, status=404)
-        try:
-            payload = await request.json()
-        except (json.JSONDecodeError, ValueError):
-            payload = None
-        if not isinstance(payload, dict):
-            return web.json_response({"error": "invalid JSON object"}, status=400)
-        if any(
-            field in payload and not isinstance(payload[field], str)
-            for field in HOOK_STRING_FIELDS[event]
-        ):
-            return web.json_response({"error": "invalid hook payload"}, status=400)
-        if event == "user_prompt_submit" and not payload.get("prompt"):
-            return web.json_response({"error": "invalid hook payload"}, status=400)
-        if self.on_hook:
-            await self.on_hook(event, payload)
-        # Native Claude Code HTTP hooks expect a JSON response body. An empty
-        # object means "observed, no decision" and lets processing continue.
-        return web.json_response({})
