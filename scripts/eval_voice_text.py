@@ -13,6 +13,7 @@ Costs a small amount of Converse and Claude usage. Run manually:
 """
 
 import asyncio
+from contextlib import AsyncExitStack
 import json
 import os
 import sys
@@ -31,22 +32,24 @@ from converse_code.localserver import LocalServer
 from converse_code.ptyhost import ClaudeHost
 from converse_code.tools import ToolRouter, manifest
 
+ROOT = Path(__file__).resolve().parents[1]
+
 QUIET_S = 4.0          # a turn is over when events stop this long and no tool is running
-VOICE_RED_FLAGS = ("*", "#", "`", "http", "](")
+VOICE_RED_FLAGS = ("*", "#", "`", "http", "](", "<<END_CALL>>")
 
 SCENARIOS = [
     {"id": "greeting", "say": "Hello! Just checking you can hear me okay.",
      "expect_tools": [], "timeout": 45},
     {"id": "observe-model",
      "say": "Inspect Claude Code's actual UI state and tell me which model is selected. Do not guess.",
-     "expect_tools_any": ["observe_claude", "command"],
+     "expect_tools": ["observe_claude"],
      "expect_spoken_any": ["default", "opus", "fable", "sonnet", "haiku"], "timeout": 60},
     {"id": "change-model",
      "say": "Change Claude Code's model to Sonnet and verify that it actually changed.",
      "expect_tools": ["set_model"], "timeout": 90},
     {"id": "challenge-model",
      "say": "I don't believe the model changed. Inspect the actual Claude Code state again.",
-     "expect_tools_any": ["observe_claude", "command"],
+     "expect_tools": ["observe_claude"],
      "expect_spoken_any": ["sonnet"], "timeout": 60},
     {"id": "build-file", "say": "Could you create a Python file called hello.py that prints hello world?",
      "expect_tools": ["long_task"], "file": "hello.py", "timeout": 240},
@@ -55,6 +58,8 @@ SCENARIOS = [
     # Regression for the session where "open it up" produced narration and no
     # tool call: a non-coding verb must still be piped through to Claude Code.
     {"id": "open-it", "say": "Can you open that file up for me?",
+     "expect_tools": ["long_task"], "timeout": 240},
+    {"id": "close-it", "say": "Okay, great. Can you close it down now?",
      "expect_tools": ["long_task"], "timeout": 240},
     {"id": "no-action", "say": "Sounds good, thanks.",
      "expect_tools": [], "timeout": 45},
@@ -141,32 +146,62 @@ async def main() -> int:
         return 1
     broker_url = os.environ.get("CONVERSE_URL", DEFAULT_URL)
 
-    original_dir = Path.cwd()
-    project_dir = Path(tempfile.mkdtemp(prefix="cc-eval-project-"))
-    os.chdir(project_dir)
-    server = LocalServer()
-    await server.start(port=0)
-    settings = write_settings(
-        tempfile.mkdtemp(prefix="cc-eval-"),
-        server.hook_url("stop"),
-        server.hook_url("user_prompt_submit"),
-        server.hook_url("permission_request"),
-        server.hook_url("stop_failure"),
-    )
-    host = ClaudeHost(
-        ["claude", "--permission-mode", "auto", "--settings", str(settings)],
-        attach_terminal=False,
-    )
-    await host.start()
+    stack = AsyncExitStack()
+    await stack.__aenter__()
+    try:
+        temp_parent = ROOT / "tmp"
+        temp_parent.mkdir(exist_ok=True)
+        project_temp = tempfile.TemporaryDirectory(prefix="cc-eval-project-", dir=temp_parent)
+        stack.callback(project_temp.cleanup)
+        settings_temp = tempfile.TemporaryDirectory(prefix="cc-eval-settings-", dir=temp_parent)
+        stack.callback(settings_temp.cleanup)
 
-    rec = Recorder()
-    handle = f"cc-eval-{os.urandom(3).hex()}"
-    client = BrokerClient(api_key, session_id=handle, tools=manifest(), url=broker_url,
-                          client_info={"capabilities": []})
-    router = ToolRouter(host, client, handle=handle, project_dir=project_dir)
-    server.on_hook = router.on_hook
+        original_dir = Path.cwd()
+        project_dir = Path(project_temp.name)
+        os.chdir(project_dir)
+        stack.callback(os.chdir, original_dir)
 
-    pending: set[asyncio.Task] = set()
+        server = LocalServer()
+        stack.push_async_callback(server.stop)
+        await server.start(port=0)
+        settings = write_settings(
+            settings_temp.name,
+            server.hook_url("stop"),
+            server.hook_url("user_prompt_submit"),
+            server.hook_url("permission_request"),
+            server.hook_url("stop_failure"),
+        )
+        host = ClaudeHost(
+            ["claude", "--permission-mode", "auto", "--settings", str(settings)],
+            attach_terminal=False,
+        )
+        stack.push_async_callback(host.stop)
+        await host.start()
+    except BaseException:
+        await stack.aclose()
+        raise
+
+    try:
+        rec = Recorder()
+        handle = f"cc-eval-{os.urandom(3).hex()}"
+        client = BrokerClient(api_key, session_id=handle, tools=manifest(), url=broker_url,
+                              client_info={"capabilities": []})
+        stack.push_async_callback(client.close)
+        router = ToolRouter(host, client, handle=handle, project_dir=project_dir)
+        server.on_hook = router.on_hook
+
+        pending: set[asyncio.Task] = set()
+
+        async def cancel_pending() -> None:
+            tasks = list(pending)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        stack.push_async_callback(cancel_pending)
+    except BaseException:
+        await stack.aclose()
+        raise
 
     async def on_tool_call(call: dict) -> None:
         rec.note("tool_call", {"name": call.get("name"), "args": call.get("args")})
@@ -197,10 +232,16 @@ async def main() -> int:
             await router.handle_tool_call({"id": "trust", "name": "select_option",
                                            "args": {"option": "yes"}})
             await asyncio.sleep(3)
-        print(f"claude ready in {project_dir} (state: {router.state()})")
+        print(f"claude ready in {project_dir} (state: {router.semantic_state()['phase']})")
 
         await client.connect()
         broker_task = asyncio.create_task(client.run())
+
+        async def cancel_broker() -> None:
+            broker_task.cancel()
+            await asyncio.gather(broker_task, return_exceptions=True)
+
+        stack.push_async_callback(cancel_broker)
         await asyncio.sleep(2)
 
         for sc in SCENARIOS:
@@ -211,11 +252,9 @@ async def main() -> int:
             expected = sc.get("expect_tools", [])
             expected_any = sc.get("expect_tools_any", [])
             if expected_any:
-                tool_calls_ok = any(name in expected_any for name in called)
+                tool_calls_ok = len(called) == 1 and called[0] in expected_any
             else:
-                tool_calls_ok = called == expected or (
-                    bool(expected) and [c for c in called if c in expected] == expected
-                )
+                tool_calls_ok = called == expected
             checks = {"turn_finished": finished, "tool_calls": tool_calls_ok}
             if sc.get("file"):
                 checks["file_exists"] = (project_dir / sc["file"]).exists()
@@ -244,18 +283,8 @@ async def main() -> int:
               + (f" — FAILED: {[r[0] for r in failed]}" if failed else ""))
         return 1 if failed or not results else 0
     finally:
-        try:
-            await client.close()
-        except Exception:
-            pass
-        host.inject("/exit")
-        try:
-            await asyncio.wait_for(host.exited.wait(), 15)
-        except asyncio.TimeoutError:
-            await host.stop()
-        await server.stop()
-        os.chdir(original_dir)
+        await stack.aclose()
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    sys.exit(asyncio.run(asyncio.wait_for(main(), timeout=1200)))

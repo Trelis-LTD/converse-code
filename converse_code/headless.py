@@ -28,8 +28,14 @@ class JsonLineBridge:
             self.stream.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
             self.stream.flush()
 
-    async def send_tool_result(self, call_id: str, content: dict) -> None:
-        await self.emit({"type": "tool_result", "id": call_id, "content": content})
+    async def send_tool_result(
+        self, call_id: str, content: dict, *,
+        outcome: str = "unknown", verified: bool = False,
+    ) -> None:
+        await self.emit({
+            "type": "tool_result", "id": call_id, "content": content,
+            "outcome": outcome, "verified": verified,
+        })
 
     async def send_tool_progress(self, call_id: str, note: str) -> None:
         await self.emit({"type": "tool_progress", "id": call_id, "note": note})
@@ -71,7 +77,7 @@ class HeadlessController:
 
     def observation(self) -> dict:
         return {
-            **self.router._status_data(),
+            **self.router.semantic_state(),
             "screen": [line.rstrip() for line in self.driver.snapshot()],
             "last_response": self.router.last_assistant_text or None,
             "transcript_path": (

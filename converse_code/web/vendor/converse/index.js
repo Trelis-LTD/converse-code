@@ -194,7 +194,7 @@ export class ConverseClient extends EventTarget {
     echoCancellerFactory = () => new EchoCanceller(),
     autoReconnect = true, reconnectBaseMs = 500, reconnectMaxMs = 5000,
     maxReconnectAttempts = 12, listeningWarmupFrames = LISTENING_WARMUP_FRAMES,
-    resumeState = null,
+    injectionAckTimeoutMs = 10000, resumeState = null,
     transport = 'ws', RTCPeerConnectionImpl = globalThis.RTCPeerConnection } = {}) {
     super();
     if (!url) throw new Error('url is required');
@@ -238,6 +238,10 @@ export class ConverseClient extends EventTarget {
     this.reconnectBaseMs = reconnectBaseMs;
     this.reconnectMaxMs = reconnectMaxMs;
     this.maxReconnectAttempts = maxReconnectAttempts;
+    if (!Number.isFinite(injectionAckTimeoutMs) || injectionAckTimeoutMs <= 0) {
+      throw new RangeError('injectionAckTimeoutMs must be a positive finite number');
+    }
+    this.injectionAckTimeoutMs = injectionAckTimeoutMs;
     this.ws = null;
     this.opened = null;
     this.audioQueue = Promise.resolve();
@@ -245,6 +249,8 @@ export class ConverseClient extends EventTarget {
     this._ackFrames = 0;        // binary frames armed by an `ack` event (playable outside a reply)
     this._ackGen = 0;           // bumped when ack credit is invalidated: guards in-flight ack enqueues
     this._playbackPauseSeq = null; // reversible hold; sequence rejects late resume events
+    this._pendingInjections = new Map(); // message_id -> authoritative broker ack promise
+    this._injectionSeq = 0;
     this._live = false;         // true only while a socket is open AND past `ready`
     this._closedByUser = false; // set by close() so a clean shutdown doesn't trigger reconnect
     this._resumeToken = resumeTokenFromState(resumeState);
@@ -539,12 +545,18 @@ export class ConverseClient extends EventTarget {
       ws.addEventListener('open', () => { ws.send(startPayload); }, { once: true });
       ws.addEventListener('error', () => fail(new Error('Converse WebSocket failed')), { once: true });
       ws.addEventListener('close', (ev) => {
-        this.ws = null;
-        this._live = false;
+        const ownsSocket = this.ws === ws;
+        if (ownsSocket) {
+          this.ws = null;
+          this._live = false;
+          this._rejectPendingInjections(
+            new Error('connection closed before injection acknowledgement'));
+        }
         if (!liveReady) {
           if (!settled) fail(new Error('Converse WebSocket closed before ready'));
           return;
         }
+        if (!ownsSocket) return;  // a failed older attempt closed after a newer retry opened
         if (!this._closedByUser && ev.code === 1000) {
           // The server hung up ON PURPOSE (only intentional ends close 1000 — e.g. the idle
           // sign-off's `close(1000, "idle")`). Redialing here would open a fresh session and
@@ -560,6 +572,7 @@ export class ConverseClient extends EventTarget {
         else this.opened = null;
       });
       ws.addEventListener('message', async (ev) => {
+        if (this.ws !== ws) return;  // ignore queued messages from an obsolete failed attempt
         try {
           const detail = await this._message(ev.data);
           if (!settled && detail?.type === 'ready') {
@@ -720,6 +733,8 @@ export class ConverseClient extends EventTarget {
     this._live = false;
     this._channel = null;
     this.opened = null;
+    this._rejectPendingInjections(
+      new Error('connection closed before injection acknowledgement'));
     if (code === 1000) {
       // Only an intentional server end closes 1000 (mirrors the WS idle sign-off) — surface it the
       // same way so app code doesn't need transport-specific handling.
@@ -817,14 +832,19 @@ export class ConverseClient extends EventTarget {
   // The one primitive every caller uses to send protocol JSON, so index.js has exactly one place
   // that knows the wire differs by transport: over 'ws' it's ws.send(); over 'webrtc' every frame
   // that would have gone over the socket instead rides the "control" RTCDataChannel byte-for-byte
-  // (see serving/broker_webrtc.py's module docstring). Silently no-ops if neither is open —
-  // callers already treat that as "dropped mid-flight, best-effort".
+  // (see serving/broker_webrtc.py's module docstring). Returns whether the frame reached a live
+  // transport; controls are usually best-effort, while injectContext uses this as a delivery gate.
   _sendControl(obj) {
     if (this.transport === 'webrtc') {
-      if (this._channel?.readyState === 'open') this._channel.send(JSON.stringify(obj));
+      if (this._channel?.readyState === 'open') {
+        this._channel.send(JSON.stringify(obj));
+        return true;
+      }
     } else if (this.ws?.readyState === 1) {
       this.ws.send(JSON.stringify(obj));
+      return true;
     }
+    return false;
   }
 
   _sendAudioFrontendStatus() {
@@ -932,8 +952,8 @@ export class ConverseClient extends EventTarget {
   }
 
   /** Add a typed user message or silent host context to the conversation, optionally asking the
-   *  model to reply immediately. Mirrors the public inject_context wire contract. */
-  injectContext(text, { role = 'context', reply = false } = {}) {
+   *  model to reply immediately. Resolves with the broker's authoritative acceptance/rejection. */
+  injectContext(text, { role = 'context', reply = false, messageId } = {}) {
     if (typeof text !== 'string') throw new TypeError('text must be a string');
     if (!text.trim() || [...text].length > 2000) {
       throw new RangeError('text must contain 1 to 2000 characters');
@@ -942,15 +962,63 @@ export class ConverseClient extends EventTarget {
       throw new TypeError('role must be "user" or "context"');
     }
     if (typeof reply !== 'boolean') throw new TypeError('reply must be a boolean');
-    this._sendControl({ type: 'inject_context', text, role, reply });
+    if (messageId === undefined) {
+      messageId = globalThis.crypto?.randomUUID?.()
+        || `${this.sessionId}-message-${++this._injectionSeq}`;
+    }
+    if (typeof messageId !== 'string') throw new TypeError('messageId must be a string');
+    if (!messageId.trim() || [...messageId].length > 128) {
+      throw new RangeError('messageId must contain 1 to 128 characters');
+    }
+    if (this._pendingInjections.has(messageId)) {
+      throw new Error(`an injection with messageId ${messageId} is already pending`);
+    }
+    let resolveAck;
+    let rejectAck;
+    const acknowledgement = new Promise((resolve, reject) => {
+      resolveAck = resolve;
+      rejectAck = reject;
+    });
+    // Keep ignored promises from becoming unhandled while preserving rejection for callers that
+    // await the returned promise. Older integrations legitimately treated this method as void.
+    acknowledgement.catch(() => {});
+    const timer = setTimeout(() => {
+      const pending = this._pendingInjections.get(messageId);
+      if (!pending) return;
+      this._pendingInjections.delete(messageId);
+      pending.reject(new Error(`injection acknowledgement timed out for ${messageId}`));
+    }, this.injectionAckTimeoutMs);
+    this._pendingInjections.set(messageId, { resolve: resolveAck, reject: rejectAck, timer });
+    const sent = this._sendControl(
+      { type: 'inject_context', text, role, reply, message_id: messageId });
+    if (!sent) {
+      this._pendingInjections.delete(messageId);
+      clearTimeout(timer);
+      rejectAck(new Error('cannot inject context without a live connection'));
+    }
+    return acknowledgement;
   }
 
-  /** Resolve a `tool_call` event with JSON content. Keep results compact: the server enforces
+  /** Send a typed user turn and ask the model to reply. This is the text-chat equivalent of a
+   *  final spoken turn and emits the same `asr` transcript event from the server. */
+  sendText(text, { messageId } = {}) {
+    return this.injectContext(text, { role: 'user', reply: true, messageId });
+  }
+
+  /** Resolve a `tool_call` with a terminal outcome. Only succeeded + verified authorizes the
+   *  assistant to describe the requested postcondition as established. A timeout is unknown even
+   *  if the operation may have happened externally. Keep content compact: the server enforces
    *  its configured UTF-8 JSON byte ceiling and replaces oversized content with a bounded
    *  truncation marker and preview. Listen for calls via `client.addEventListener('tool_call', …)`;
    *  the content itself may be produced anywhere (e.g. relayed from your backend). */
-  sendToolResult(id, content) {
-    this._sendControl({ type: 'tool_result', id, content });
+  sendToolResult(id, content, { outcome = 'unknown', verified = false } = {}) {
+    const outcomes = new Set(['succeeded', 'failed', 'cancelled', 'timed_out', 'unknown']);
+    if (!outcomes.has(outcome)) throw new TypeError('invalid tool result outcome');
+    if (typeof verified !== 'boolean') throw new TypeError('verified must be a boolean');
+    if (verified && outcome !== 'succeeded') {
+      throw new TypeError('verified may be true only when outcome is "succeeded"');
+    }
+    return this._sendControl({ type: 'tool_result', id, content, outcome, verified });
   }
 
   /** Detach an eligible tool call from the current voice turn. The host keeps running the job and
@@ -958,13 +1026,13 @@ export class ConverseClient extends EventTarget {
   sendToolDeferred(id, { handle, statusLabel } = {}) {
     const frame = { type: 'tool_deferred', id, handle };
     if (statusLabel) frame.status_label = statusLabel;
-    this._sendControl(frame);
+    return this._sendControl(frame);
   }
 
   /** Report human-readable progress on an in-flight tool call (docs/client-tool-protocol.md §3):
    *  appends to the brain's context so the next turn can speak to it; never resolves the call. */
   sendToolProgress(id, note) {
-    this._sendControl({ type: 'tool_progress', id, note });
+    return this._sendControl({ type: 'tool_progress', id, note });
   }
 
   /** Deliver a structured segment of an in-flight call's eventual answer
@@ -972,12 +1040,12 @@ export class ConverseClient extends EventTarget {
    *  the broker to proactively narrate it now. Never resolves the call — the terminal
    *  sendToolResult is still required exactly once. */
   sendToolPartialResult(id, content, { reply = false } = {}) {
-    this._sendControl({ type: 'tool_partial_result', id, content, ...(reply ? { reply: true } : {}) });
+    return this._sendControl({ type: 'tool_partial_result', id, content, ...(reply ? { reply: true } : {}) });
   }
 
   /** Cancel an in-flight tool call. */
   sendToolCancel(id) {
-    this._sendControl({ type: 'tool_cancel', id });
+    return this._sendControl({ type: 'tool_cancel', id });
   }
 
   /** Switch character voice mid-session. Applies from the next reply; Converse mode only. */
@@ -994,6 +1062,7 @@ export class ConverseClient extends EventTarget {
     this._live = false;
     this._setResumeToken(null); // an intentional reuse starts a new conversation
     this._dropAck();             // armed-but-unsent ack frames must not bleed into a reused client
+    this._rejectPendingInjections(new Error('connection closed before injection acknowledgement'));
 
     this.stopMic();              // release the SDK-owned mic (no-op for custom-capture apps)
     this.player?.stop?.();
@@ -1028,6 +1097,14 @@ export class ConverseClient extends EventTarget {
   _dropAck() {
     this._ackFrames = 0;
     this._ackGen++;
+  }
+
+  _rejectPendingInjections(error) {
+    for (const pending of this._pendingInjections.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this._pendingInjections.clear();
   }
 
   // Drive playback state off each server event, before re-dispatching it.
@@ -1155,6 +1232,14 @@ export class ConverseClient extends EventTarget {
   async _message(data) {
     if (typeof data === 'string') {
       const event = JSON.parse(data);
+      if (event.type === 'inject_context_ack' && typeof event.message_id === 'string') {
+        const pending = this._pendingInjections.get(event.message_id);
+        if (pending) {
+          this._pendingInjections.delete(event.message_id);
+          clearTimeout(pending.timer);
+          pending.resolve(event);
+        }
+      }
       this._applyReflex(event);
       this.dispatchEvent(new CustomEvent(event.type, { detail: event }));
       this.dispatchEvent(new CustomEvent('event', { detail: event }));

@@ -30,9 +30,11 @@ WEB_DIR = Path(__file__).parent / "web"
 HOOK_EVENTS = frozenset({"stop", "user_prompt_submit", "permission_request", "stop_failure"})
 HOOK_STRING_FIELDS = {
     "stop": ("prompt_id", "session_id", "transcript_path", "last_assistant_message"),
-    "user_prompt_submit": ("prompt", "prompt_id"),
+    "user_prompt_submit": ("prompt", "prompt_id", "session_id"),
     "permission_request": ("tool_name",),
-    "stop_failure": ("error", "error_details"),
+    "stop_failure": (
+        "error", "error_details", "last_assistant_message", "session_id", "transcript_path",
+    ),
 }
 
 

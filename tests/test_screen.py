@@ -1,5 +1,5 @@
 from converse_code.screen import (
-    Menu, detect_menu, detect_model, detect_session_model, has_empty_composer,
+    Menu, detect_current_model, detect_menu, detect_model, has_empty_composer,
     is_idle, is_model_scope_prompt, match_option,
 )
 
@@ -124,8 +124,45 @@ def test_model_scope_prompt_is_blocking_but_not_a_generic_menu():
     assert is_model_scope_prompt(MODEL_SCOPE_PROMPT_2_1_227) is True
     assert is_idle(MODEL_SCOPE_PROMPT_2_1_227) is False
     assert detect_model(MODEL_SCOPE_PROMPT_2_1_227) == "haiku"
-    assert detect_session_model(MODEL_SCOPE_PROMPT_2_1_227) is None
     assert has_empty_composer(MODEL_SCOPE_PROMPT_2_1_227) is False
+
+
+def test_historical_prompt_block_is_not_an_unnumbered_menu():
+    lines = [
+        "~/converse-code/tmp/cc-smoke-project",
+        " History:",
+        " ❯ List files only in the current working directory.",
+        "   Listed directory contents",
+        "",
+    ]
+    assert detect_menu(lines) is None
+
+
+def test_empty_composer_accepts_new_footer_without_plain_neighbor_rule():
+    assert has_empty_composer(["status footer", "❯", "─ ? for shortcuts"])
+    assert not has_empty_composer(["❯ previous prompt", "─ ? for shortcuts"])
+    assert not has_empty_composer([
+        "❯", "Old assistant output", "❯ developer draft",
+        "─ ? for shortcuts",
+    ])
+    assert not has_empty_composer([
+        "❯", "Old assistant output with no live composer yet",
+    ])
+    assert has_empty_composer([
+        "────────────────", '❯ Try "fix typecheck errors"',
+        "────────────────", "· ? for shortcuts",
+    ])
+    assert has_empty_composer([
+        "❯", "────────────────", "* Cooked for 1s", "? for shortcuts",
+    ])
+    assert has_empty_composer([
+        "❯", "────────────────", "✻ Baked for 1s",
+        "? for shortcuts · ↳ Respond with pong",
+    ])
+    assert has_empty_composer([
+        "❯", "────────────────", "✢ Brewed for 1s",
+        "? for shortcuts ·",
+    ])
 
 
 def test_model_scope_prompt_can_be_far_from_bottom_of_screen():
@@ -177,10 +214,24 @@ def test_model_detected_from_claude_header():
 def test_current_model_detected_from_visible_claude_state():
     assert detect_model(WELCOME_WITH_MODEL) == "sonnet"
     assert detect_model(REAL_IDLE_WITH_PROMPT_HISTORY) == "fable"
+    assert detect_current_model(WELCOME_WITH_MODEL) == "sonnet"
+    assert detect_current_model(REAL_IDLE_WITH_PROMPT_HISTORY) is None
+    assert detect_current_model(MODEL_PICKER) == "sonnet"
 
 
 def test_numbered_prose_is_not_a_menu():
     assert detect_menu(PROSE_WITH_NUMBERS) is None
+
+
+def test_historical_numbered_menu_above_live_composer_is_not_active():
+    assert detect_menu([
+        "Do you want to proceed?",
+        "❯ 1. Yes",
+        "  2. No",
+        "────────────────",
+        "❯",
+        "────────────────",
+    ]) is None
 
 
 def test_boxed_permission_prompt():

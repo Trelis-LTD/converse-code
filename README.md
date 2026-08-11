@@ -59,10 +59,10 @@ preserving the multimodal Converse session; the separate Mute button temporarily
 audio. Claude Code remains fully interactive in the terminal. Asking to end the Converse session
 closes it after the final spoken reply and leaves Claude running.
 
-Typed turns use Converse's canonical user-turn path: the SDK sends `inject_context` with
-`role: "user"` and `reply: true`, and the broker echoes the turn as `asr` with the same stable
-turn ID used by the response. Starting with text suppresses the voice greeting and does not turn
-on the microphone.
+Typed turns use Converse's canonical user-turn path: `sendText()` returns the broker's
+correlated accepted/rejected acknowledgement, then the broker echoes accepted input as a final
+`asr` event with the same message ID, `input_source: "text"`, and a stable turn ID. Starting
+with text suppresses the voice greeting and does not turn on the microphone.
 
 ## Headless control
 
@@ -80,8 +80,9 @@ converse-code --headless
 {"type":"shutdown","id":"done"}
 ```
 
-The first event is `ready` with protocol `converse-code-headless-v1`. Tool calls use the same
-names as voice mode and emit `tool_deferred`, `tool_progress`, `tool_partial_result`, and
+The first event is `ready` with protocol `converse-code-headless-v1`. Headless exposes the same
+semantic tools as voice mode except `end_session`; use the JSONL `shutdown` request for headless
+lifecycle. Tool calls emit `tool_deferred`, `tool_progress`, `tool_partial_result`, and
 `tool_result` events. A screen snapshot returns Claude's rendered terminal rows, semantic state,
 last full response, and transcript path. stdout is reserved for protocol events; diagnostics go
 to stderr.
@@ -109,23 +110,25 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security b
   never as raw shell commands. The TUI's `!` bash-mode prefix is refused on the voice path,
   so Claude Code's permission system remains the single safety chokepoint.
 - Prompt text and Enter are sent as separate PTY writes. A native `UserPromptSubmit` HTTP hook
-  confirms that Claude accepted the prompt; swallowed submissions get two bounded Enter retries
-  instead of an open tool call that silently waits for minutes.
+  confirms that Claude accepted the prompt; the UI labels this **accepted**, not completed.
+  Swallowed submissions get two bounded Enter retries instead of an open tool call that silently
+  waits for minutes.
 - Claude Code's `Stop` hook resolves voice-started work and proactively wakes Converse when work
   typed directly in the terminal finishes. `StopFailure` resolves errors immediately rather than
   waiting for the long tool deadline. A `PermissionRequest` hook wakes voice when terminal work
   needs a menu decision, but never approves on the user's behalf.
-- Trust dialogs, model pickers, and permission menus are detected from the rendered terminal
-  structure. Prompt-history cursors are excluded so a closed menu cannot be mistaken for an open
-  one. Model changes also consume Claude Code's specific follow-up model confirmation before they
-  report success. Converse's managed pending-job cancellation interrupts only the matching turn.
+- Permission and clarification menus are detected from the rendered terminal structure and remain
+  open only for a genuine user decision. Prompt-history cursors are excluded so a closed menu
+  cannot be mistaken for an open one. Model changes use the documented session-only `/model
+  <alias>` form and verify the rendered result. Managed cancellation interrupts only the matching
+  turn.
 - New work and steering are explicit: `long_task` starts an idle Claude turn, while `steer_task`
   adds requirements to work already in progress. A second task is never silently reinterpreted as
   guidance or claimed to be queued.
 - Voice responses receive an authoritative semantic snapshot of Claude's UI. `observe_claude`
-  reports idle/working/canceling/awaiting_input phase and structured UI and the last verified action; `set_model` selects and
-  confirms the model, verifies Claude's explicit result, and falls back to reopening the picker
-  when that result is unavailable.
+  reports idle/working/canceling/awaiting_input phase, structured UI, and current-call evidence.
+  Ordinary Claude completion is returned as succeeded but unverified; only an observed,
+  target-specific postcondition permits `verified: true`.
 - Claude hook `prompt_id` values bind each voice episode to its actual completion. Cancellation
   remains `canceling` until the matching Stop arrives or the terminal is stably idle. Late
   completion from an older prompt cannot be attributed to newer work.
@@ -139,15 +142,18 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security b
 
 ```bash
 uv sync
-uv run pytest -q
 uv run playwright install chromium
-uv run scripts/browser_e2e.py       # real Chromium + deterministic microphone
-uv run scripts/audio_loopback_probe.py  # Xvfb + private PulseAudio output capture
-uv run scripts/smoke_real_claude.py  # real Claude CLI, isolated temporary project
+uv run scripts/evals.py --profile quick    # deterministic suite
+uv run scripts/evals.py --profile pr       # quick + real Chromium
+uv run scripts/evals.py --profile release  # adds the real Converse Code PTY lifecycle
+uv run scripts/evals.py --profile extended # adds hosted, SDK-compatibility, and host-audio probes
 ```
 
-The real smoke test covers fresh-folder trust, auto mode, prompt acknowledgement and completion,
-plus opening and selecting the `/model` menu. It consumes a small Claude request.
+Profiles deduplicate stages before running them. The release profile validates Converse Code's
+deterministic, browser, and real-PTY boundaries. The extended profile additionally runs the hosted
+Converse tool loop, an upstream Agent SDK compatibility workflow (isolated file operations,
+programmatic model control, game/review/browser behavior), and a generic host audio-output probe.
+Those extended stages test distinct external boundaries and consume Claude/Converse usage.
 
 The browser suite drives the shipped page in Chromium against a deterministic fake SDK, including
 real microphone permissions and WAV input; it does not replace live SDK/broker evaluation. Failed

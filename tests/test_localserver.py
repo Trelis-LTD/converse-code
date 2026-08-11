@@ -149,7 +149,23 @@ async def test_tab_ws_relay_and_hook(server):
             json={"transcript_path": "/tmp/t.jsonl", "session_id": "s1"},
         ) as resp:
             assert resp.status == 200
-    assert hooks == [("stop", {"transcript_path": "/tmp/t.jsonl", "session_id": "s1"})]
+        async with session.post(
+            server.hook_url("stop_failure"),
+            json={
+                "error": "server_error", "error_details": "upstream unavailable",
+                "session_id": "s1", "transcript_path": "/tmp/t.jsonl",
+                "last_assistant_message": "API Error",
+            },
+        ) as resp:
+            assert resp.status == 200
+    assert hooks == [
+        ("stop", {"transcript_path": "/tmp/t.jsonl", "session_id": "s1"}),
+        ("stop_failure", {
+            "error": "server_error", "error_details": "upstream unavailable",
+            "session_id": "s1", "transcript_path": "/tmp/t.jsonl",
+            "last_assistant_message": "API Error",
+        }),
+    ]
 
 
 async def test_send_without_a_connected_page_reports_false(server):

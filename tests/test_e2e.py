@@ -88,11 +88,15 @@ async def test_full_local_tool_loop(tmp_path):
                     "message": {"content": [{"type": "text", "text": "Echoed."}]},
                 }) + "\n")
                 await http.post(
-                    server.hook_url("stop"), json={"transcript_path": str(transcript)},
+                    server.hook_url("stop"), json={
+                        "transcript_path": str(transcript), "prompt_id": "prompt-t1",
+                    },
                 )
                 result = await receive_action(ws, "tool_result", "t1")
-                assert result["content"]["speak"] == "Echoed."
+                assert result["content"]["speak"] == "Claude Code reports: Echoed."
                 assert result["content"]["data"]["phase"] == "idle"
+                assert result["outcome"] == "succeeded"
+                assert result["verified"] is False
 
                 await ws.send_json({
                     "type": "local", "event": "tool_call",
@@ -119,10 +123,11 @@ async def test_full_local_tool_loop(tmp_path):
 
                 await http.post(server.hook_url("stop"), json={
                     "transcript_path": str(transcript),
+                    "prompt_id": "prompt-t2",
                     "last_assistant_message": "Menu answered.",
                 })
                 result = await receive_action(ws, "tool_result", "t2")
-                assert result["content"]["speak"] == "Menu answered."
+                assert result["content"]["speak"] == "Claude Code reports: Menu answered."
     finally:
         host.inject("exit")
         await asyncio.wait_for(host.exited.wait(), 5)

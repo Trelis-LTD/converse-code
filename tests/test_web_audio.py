@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 CHECK = Path(__file__).parent / "web_audio_check.mjs"
+CONTROL_CHECK = Path(__file__).parent / "web_sdk_control_check.mjs"
 PAGE = Path(__file__).parents[1] / "converse_code" / "web" / "index.html"
 
 
@@ -23,10 +24,19 @@ def test_web_audio_resamplers():
     assert "SDK resampler: continuous across chunks: OK" in proc.stdout
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_vendored_sdk_reports_tool_control_delivery():
+    proc = subprocess.run(
+        ["node", str(CONTROL_CHECK)], capture_output=True, text=True, timeout=30
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    assert "SDK tool controls expose transport delivery: OK" in proc.stdout
+
+
 def test_voice_session_pins_classic_and_explains_retryable_pipeline_errors():
     page = PAGE.read_text()
 
-    assert "@trelis/converse SDK 0.10.0" in page
+    assert "@trelis/converse SDK 0.12.3" in page
     assert 'voice: "classic"' in page
     assert 'ev.detail ||' in page
     assert "ev.retryable" in page

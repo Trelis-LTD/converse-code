@@ -23,14 +23,14 @@ browser SDK  <===============================>  hosted Converse
                                              interactive claude CLI
 ```
 
-There are four client-side boundaries:
+There are five client-side boundaries:
 
 | Component | Responsibility |
 | --- | --- |
 | Browser SDK | Voice and typed turns, AEC, audio playback, turn events, reconnect/resume |
 | Local server | Serves the page, mints scoped credentials, and carries tool/status controls |
 | Headless controller | Maps JSONL requests and events to the tool router without Converse |
-| Tool router | Converts tool calls into Claude prompts, commands, keys, and menus |
+| Tool router | Sends conversational work, answers user-chosen blocking prompts, and performs narrow semantic controls |
 | PTY host | Preserves the real or virtual Claude TUI while providing safe input injection and screen structure |
 
 The persistent API key stays in the Python process. For each browser session, the local server
@@ -43,7 +43,7 @@ straight to Converse with the tool manifest. Supported SDK resume state is kept 
 Browser session mode exposes these localhost channels:
 
 - `/session-credential`: exchanges a requested session ID for a browser-safe scoped credential.
-- `/ws`: acknowledged tool controls plus Claude state and injected instruction labels.
+- `/ws`: acknowledged tool controls plus Claude state and accepted-prompt labels.
 - `/hook/{event}`: native Claude Code HTTP lifecycle hooks.
 - `/vendor/converse/*.js`: the Apache-licensed browser SDK modules bundled with the wheel.
 
@@ -67,11 +67,18 @@ and is announced by the broker. Episodes typed directly at the terminal inject t
 silently — the user already read it there.
 
 Every tool result also includes a semantic snapshot: phase, active task, open UI and selection,
-known model, and the last action's verification status. `observe_claude` exposes that state without
-mutating the TUI. State-changing tools distinguish `pending`, `awaiting_input`, `unverified`,
-`failed`, and `verified`; opening `/model` is therefore never equivalent to changing a model.
-`set_model` owns the complete picker/confirmation flow and verifies its postcondition from Claude's
-explicit model result, falling back to reopening the picker when that result is unavailable.
+known model, and the last action's evidence. `observe_claude` exposes that state without mutating
+the TUI. A matching `UserPromptSubmit` proves acceptance; a matching `Stop` proves that Claude's
+episode completed; neither alone proves an external postcondition such as a GUI application being
+open. Ordinary completed turns therefore resolve as `outcome: succeeded, verified: false` and
+attribute their report to Claude Code. `verified: true` requires target-specific evidence from the
+current invocation, such as a rendered model change or an observed blocking-UI transition.
+
+The public tool surface is semantic: `long_task`, `steer_task`, `observe_claude`, `set_model`,
+`select_option`, and `end_session`. Arbitrary slash commands and generic keypresses are not exposed.
+Managed cancellation may use Escape internally. `set_model` uses Claude Code's documented
+session-only `/model <alias>` form, verifies the rendered model, and retains picker handling only
+for a genuine picker that was already open.
 
 Prompt injection is acknowledged, not assumed. Text and Enter are separate PTY writes, concurrent
 injections are serialized, and `UserPromptSubmit` confirms that Claude accepted the exact prompt.
@@ -81,13 +88,12 @@ the router stays in `canceling` until that prompt stops or the rendered terminal
 duplicate or late Stop events from it are ignored rather than applied to a newer episode.
 
 Claude menus are read from a rendered terminal emulator, never from raw ANSI output. The detector
-uses structure only and excludes the idle composer and historical prompt cursors. Menu choices
-remain user decisions; `PermissionRequest` can wake voice but never approves a tool automatically.
-The one narrow exception is Claude's second-phase model-change confirmation: an explicit model
-choice authorizes the matching “Yes, switch to that model” prompt, and no other confirmation is
-automatically accepted. When Claude asks whether the chosen model should become the global default
-or apply only to the current session, Converse Code chooses session-only; changing the user's
-default is outside the tool's contract.
+uses structure only and excludes the idle composer and historical prompt cursors. A menu remains
+open only for a genuine user decision; `PermissionRequest` can wake voice but never approves a tool
+automatically. Deterministic internal confirmations are owned by the semantic operation that opened
+them, and unrecognized UI fails closed. When Claude asks whether a model should become the global
+default or apply only to this session, `set_model` chooses session-only; changing the user's default
+is outside its contract.
 
 Claude response prose comes from its JSONL transcript or documented hook payloads, not screen
 scraping. Voice transcript corrections are keyed by Converse turn and barge sequence so revised

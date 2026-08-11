@@ -189,7 +189,7 @@
 (function(){
   "use strict";
 
-  var BUILD = "2026-08-10-direct-sdk-0.10.0";
+  var BUILD = "2026-08-11-direct-sdk-0.12.3";
   var RESUME_STORAGE_KEY = "converse-code-resume-v1";
 
   // ---------- WebSocket connection with auto-reconnect ----------
@@ -301,8 +301,8 @@
     autoScroll();
   }
 
-  function addInjected(text){
-    var el = makeEntry("inject", "→ sent to Claude Code");
+  function addAcceptedPrompt(text){
+    var el = makeEntry("inject", "→ accepted by Claude Code");
     setBody(el, text);
   }
 
@@ -349,8 +349,8 @@
     }
     if(msg.event === "status"){
       updateStatusChip(msg.phase);
-    } else if(msg.event === "injected"){
-      addInjected(msg.text || "");
+    } else if(msg.event === "prompt_accepted"){
+      addAcceptedPrompt(msg.text || "");
     } else if(msg.event === "end_session"){
       endAfterReply = true;
     } else if(msg.event === "bridge_control"){
@@ -390,10 +390,15 @@
   var endAfterReply = false;
   var converseReady = false;
   var pendingBridgeControls = new Map();
+  var bridgeFlushing = false;
+  var bridgeFlushRequested = false;
+  var admissionRetryDelays = globalThis.__converseCodeAdmissionRetryDelays ||
+    [500, 1000, 2000, 4000, 8000, 8000];
+  globalThis.__converseCodeAdmissionRetryDelays = admissionRetryDelays;
   var typedTurns = new TypedTurnController({
-    send: async function(text){
+    send: async function(text, messageId){
       var activeClient = await startSession({noGreeting: true});
-      activeClient.injectContext(text, {role: "user", reply: true});
+      return activeClient.sendText(text, {messageId: messageId});
     },
     setBusy: function(busy){
       textInput.disabled = busy;
@@ -434,41 +439,80 @@
     flushBridgeControls();
   }
 
-  function flushBridgeControls(){
+  async function flushBridgeControls(){
+    if(bridgeFlushing){ bridgeFlushRequested = true; return; }
     if(!client || !converseReady) return;
-    pendingBridgeControls.forEach(function(frame, seq){
-      try{
-        switch(frame.action){
-          case "tool_result":
-            client.sendToolResult(frame.id, frame.content); break;
-          case "tool_progress":
-            client.sendToolProgress(frame.id, frame.note); break;
-          case "tool_deferred":
-            client.sendToolDeferred(frame.id, {
-              handle: frame.handle, statusLabel: frame.status_label
-            }); break;
-          case "tool_partial_result":
-            client.sendToolPartialResult(frame.id, frame.content, {reply: !!frame.reply}); break;
-          case "tool_cancel":
-            client.sendToolCancel(frame.id); break;
-          case "inject_context":
-            client.injectContext(frame.text, {role: frame.role, reply: !!frame.reply}); break;
-          default:
-            console.debug("unknown bridge action", frame.action); return;
+    bridgeFlushing = true;
+    try{
+      for(const [seq, frame] of pendingBridgeControls){
+        try{
+          var sent = true;
+          switch(frame.action){
+            case "tool_result":
+              sent = client.sendToolResult(frame.id, frame.content, {
+                outcome: frame.outcome, verified: !!frame.verified
+              }); break;
+            case "tool_progress":
+              sent = client.sendToolProgress(frame.id, frame.note); break;
+            case "tool_deferred":
+              sent = client.sendToolDeferred(frame.id, {
+                handle: frame.handle, statusLabel: frame.status_label
+              }); break;
+            case "tool_partial_result":
+              sent = client.sendToolPartialResult(
+                frame.id, frame.content, {reply: !!frame.reply}
+              ); break;
+            case "tool_cancel":
+              sent = client.sendToolCancel(frame.id); break;
+            case "inject_context": {
+              var acknowledgement = await client.injectContext(frame.text, {
+                role: frame.role, reply: !!frame.reply,
+                messageId: client.sessionId + "-bridge-" + seq
+              });
+              if(!acknowledgement || acknowledgement.accepted !== true){
+                pendingBridgeControls.delete(seq);
+                sendJson({
+                  type: "local", event: "bridge_reject", seq: seq,
+                  reason: acknowledgement && acknowledgement.reason
+                }, true);
+                continue;
+              }
+              break;
+            }
+            default:
+              console.debug("unknown bridge action", frame.action);
+              pendingBridgeControls.delete(seq);
+              continue;
+          }
+          if(sent !== true){
+            // The SDK saw no live transport. Retain the durable control and wait for its
+            // authoritative reconnected event instead of acknowledging a dropped frame.
+            converseReady = false;
+            throw new Error("Converse transport did not accept bridge control");
+          }
+          pendingBridgeControls.delete(seq);
+          sendJson({type: "local", event: "bridge_ack", seq: seq}, true);
+        }catch(err){
+          // Retain the control for the next bridge-ready/reconnect cycle. The
+          // stable message ID makes an acknowledgement replay correlatable.
+          console.debug("could not deliver bridge control", err);
+          break;
         }
-        pendingBridgeControls.delete(seq);
-        sendJson({type: "local", event: "bridge_ack", seq: seq}, true);
-      }catch(err){
-        console.debug("could not deliver bridge control", err);
       }
-    });
+    }finally{
+      bridgeFlushing = false;
+      if(bridgeFlushRequested){
+        bridgeFlushRequested = false;
+        if(client && converseReady) queueMicrotask(flushBridgeControls);
+      }
+    }
   }
 
   function renderEvent(ev){
     switch(ev.type){
       case "asr": {
         var userText = pickText(ev);
-        if(isFinal(ev)) typedTurns.handleAsr(userText);
+        if(isFinal(ev)) typedTurns.handleAsr(ev, userText);
         userTurns.handle(ev, userText, isFinal(ev));
         break;
       }
@@ -526,6 +570,10 @@
       case "error": {
         console.debug("client error", ev);
         var detail = ev.detail || (ev.error && ev.error.message) || "unknown error";
+        // The SDK dispatches the broker error before its initial connect promise rejects.
+        // Capacity errors are handled by openSession's bounded retry loop; resetting here would
+        // cancel that loop and turn a transient busy period into a misleading manual-retry banner.
+        if(!converseReady && sessionStartPromise && isAdmissionCapacityError(ev)) break;
         if(ev.retryable){
           if(typedTurns.pending){
             addBanner("Typed turn delivery is unknown because the Converse session disconnected.");
@@ -538,6 +586,51 @@
         break;
       }
       default: break;   // audio frames and everything else: the client handles it
+    }
+  }
+
+  function isAdmissionCapacityError(value){
+    return value && (value.code === "too_many_sessions" || value.code === "server_busy" ||
+      value.code === "server_restarting");
+  }
+
+  function admissionError(value){
+    var error = new Error(
+      value && value.code === "too_many_sessions"
+        ? "This account is already using all of its concurrent Converse sessions. " +
+          "Automatic retries did not find a free slot."
+        : ((value && value.message) || "Converse is temporarily at capacity")
+    );
+    error.code = value && value.code;
+    error.retryable = true;
+    return error;
+  }
+
+  async function connectWithAdmissionRetry(openingClient, options, generation){
+    var attempt = 0;
+    while(true){
+      if(generation !== sessionGeneration || client !== openingClient){
+        throw {sessionCanceled: true};
+      }
+      try{
+        await openingClient.connect({noGreeting: !!options.noGreeting});
+        return;
+      }catch(err){
+        if(generation !== sessionGeneration || client !== openingClient){
+          throw {sessionCanceled: true};
+        }
+        if(!isAdmissionCapacityError(err) || attempt >= admissionRetryDelays.length){
+          throw isAdmissionCapacityError(err) ? admissionError(err) : err;
+        }
+        if(attempt === 0){
+          addBanner(err.code === "too_many_sessions"
+            ? "This account is at its concurrent-session limit — retrying automatically…"
+            : "Converse is temporarily busy — retrying automatically…");
+        }
+        if(sessionStarting) micLabel.textContent = "Waiting for capacity…";
+        var delay = admissionRetryDelays[attempt++];
+        await new Promise(function(resolve){ setTimeout(resolve, delay); });
+      }
     }
   }
 
@@ -580,10 +673,11 @@
 
   function startSession(options){
     options = options || {};
+    if(sessionStartPromise) return sessionStartPromise;
     if(client){
       return client.connect({noGreeting: !!options.noGreeting}).then(function(){ return client; });
     }
-    if(sessionStartPromise) return sessionStartPromise;
+
     var opening = openSession(options);
     sessionStartPromise = opening;
     opening.then(
@@ -628,7 +722,7 @@
       if(client === openingClient) renderEvent(e.detail || {});
     });
     await openingClient.unlockAudio();
-    await openingClient.connect({noGreeting: !!options.noGreeting});
+    await connectWithAdmissionRetry(openingClient, options, generation);
     if(generation !== sessionGeneration || client !== openingClient){
       openingClient.close();
       throw {sessionCanceled: true};
@@ -666,12 +760,19 @@
       console.debug("mic error", err);
       resetSession();
       micLabel.textContent = "Start voice";
-      addBanner("Microphone unavailable: " + (err && err.message ? err.message : err));
+      addBanner(isAdmissionCapacityError(err)
+        ? (err.message || "Converse is temporarily at capacity")
+        : "Microphone unavailable: " + (err && err.message ? err.message : err));
     });
   }
 
   function stopVoiceInput(){
     if(!micActive && !sessionStarting) return;
+    if(sessionStarting && !converseReady && !typedTurns.pending){
+      resetSession();
+      addBanner("Voice connection canceled.");
+      return;
+    }
     micStartGeneration += 1;
     sessionStarting = false;
     micActive = false;
@@ -713,7 +814,7 @@
   // ---------- Boot ----------
   // Printed so it is always possible to tell which page a browser has loaded —
   // a cached page previously looked identical to a fixed one.
-  console.info("converse-code session | @trelis/converse SDK 0.10.0 | build " + BUILD);
+  console.info("converse-code session | @trelis/converse SDK 0.12.3 | build " + BUILD);
   connect();
 })();
 </script>
