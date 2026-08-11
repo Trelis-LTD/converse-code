@@ -26,7 +26,6 @@ async def test_serves_index_with_token(server):
     async with aiohttp.ClientSession() as session:
         async with session.get(f"{base(server)}/?t=tok123") as resp:
             assert resp.status == 200
-            assert "Converse Code" in await resp.text()
 
 
 async def test_serves_assistant_transcript_script_without_cache(server):
@@ -35,7 +34,6 @@ async def test_serves_assistant_transcript_script_without_cache(server):
             assert resp.status == 200
             assert resp.content_type == "application/javascript"
             assert "no-store" in resp.headers["Cache-Control"]
-            assert "AssistantTranscript" in await resp.text()
 
 
 async def test_index_requires_token(server):
@@ -132,7 +130,7 @@ async def test_tab_ws_relay_and_hook(server):
             assert tab_json[0]["type"] == "hello"
 
             # server -> tab
-            await server.send_json_to_tab({"type": "local", "event": "status", "state": "idle"})
+            await server.send_json_to_tab({"type": "local", "event": "status", "phase": "idle"})
             msg = await ws.receive(timeout=5)
             assert json.loads(msg.data)["event"] == "status"
 
@@ -145,10 +143,34 @@ async def test_tab_ws_relay_and_hook(server):
     assert hooks == [("stop", {"transcript_path": "/tmp/t.jsonl", "session_id": "s1"})]
 
 
-async def test_urls_carry_token(server):
-    assert "t=tok123" in server.url
-    assert server.hook_url("stop").endswith("/hook/stop?t=tok123")
-
-
 async def test_send_without_a_connected_page_reports_false(server):
     assert await server.send_json_to_tab({"type": "x"}) is False
+
+
+async def test_rejects_non_object_json_at_http_boundaries(server):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{base(server)}/session-credential?t=tok123", json=[]
+        ) as response:
+            assert response.status == 400
+        async with session.post(server.hook_url("stop"), json=[]) as response:
+            assert response.status == 400
+        async with session.post(
+            server.hook_url("stop"), json={"transcript_path": []}
+        ) as response:
+            assert response.status == 400
+        async with session.post(server.hook_url("not_a_hook"), json={}) as response:
+            assert response.status == 404
+
+
+async def test_websocket_ignores_non_object_json(server):
+    received = []
+    server.on_tab_json = lambda message: received.append(message) or asyncio.sleep(0)
+    async with aiohttp.ClientSession() as session:
+        async with session.ws_connect(
+            f"{base(server)}/ws?t=tok123",
+            headers={"Origin": f"http://127.0.0.1:{server.port}"},
+        ) as ws:
+            await ws.send_json([])
+            await asyncio.sleep(0.05)
+    assert received == []

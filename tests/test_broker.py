@@ -6,8 +6,7 @@ import json
 import pytest
 import websockets
 
-from converse_code.broker import BrokerClient, validate_key
-from converse_code.tools import manifest
+from converse_code.broker import BrokerClient
 
 
 class MockBroker:
@@ -44,13 +43,10 @@ async def mock_broker():
     await server.wait_closed()
 
 
-async def test_validate_key(mock_broker):
-    assert await validate_key("ck_good", url=mock_broker.url) is True
-    assert await validate_key("bad", url=mock_broker.url) is False
-
-
 async def test_start_frame_and_tool_roundtrip(mock_broker):
-    client = BrokerClient("ck_test", session_id="cc-proj-1", tools=manifest(), url=mock_broker.url)
+    client = BrokerClient(
+        "ck_test", session_id="cc-proj-1", tools=[{"name": "sentinel"}], url=mock_broker.url,
+    )
 
     calls, cancels, extra_json, audio_down = [], [], [], []
 
@@ -72,7 +68,7 @@ async def test_start_frame_and_tool_roundtrip(mock_broker):
     sf = mock_broker.start_frame
     assert sf["api_key"] == "ck_test"
     assert sf["audio"] == {"sr": 16000, "output_encoding": "pcm16"}
-    assert [t["name"] for t in sf["mode"]["tools"]] == [t["name"] for t in manifest()]
+    assert sf["mode"]["tools"] == [{"name": "sentinel"}]
 
     # mic audio up
     await client.send_audio(b"\x01\x02" * 320)

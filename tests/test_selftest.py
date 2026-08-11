@@ -43,7 +43,7 @@ async def test_selftest_records_exact_wire_audio(monkeypatch, tmp_path, capsys):
         pass
 
     monkeypatch.setattr(selftest.config, "get_api_key", lambda: "ck_test")
-    monkeypatch.setattr(selftest.brokermod, "validate_key", lambda *args, **kwargs: _true())
+    monkeypatch.setattr(selftest.converse, "validate_key", lambda *args, **kwargs: _true())
     monkeypatch.setattr(selftest.brokermod, "BrokerClient", FakeClient)
     monkeypatch.setattr(selftest, "_synthesise", lambda _text: _speech_pcm())
     monkeypatch.setattr(selftest.asyncio, "sleep", no_sleep)

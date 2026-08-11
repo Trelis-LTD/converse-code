@@ -325,7 +325,7 @@
       return;
     }
     if(msg.event === "status"){
-      updateStatusChip(msg.state, msg.queue);
+      updateStatusChip(msg.phase);
     } else if(msg.event === "injected"){
       addInjected(msg.text || "");
     } else if(msg.event === "end_session"){
@@ -335,14 +335,10 @@
     }
   }
 
-  function updateStatusChip(state, queue){
+  function updateStatusChip(state){
     state = state || "idle";
     statusChip.className = "chip " + state;
-    var label = state;
-    if(Array.isArray(queue) && queue.length > 0){
-      label += " (" + queue.length + ")";
-    }
-    statusChip.textContent = label;
+    statusChip.textContent = state;
   }
 
   // ---------- Session + audio: the SDK's own ConverseClient ----------
@@ -471,9 +467,6 @@
       case "tool_cancel":
         sendJson({type: "local", event: "tool_cancel", call: ev}, true);
         break;
-      case "tool_deferred_resume":
-        sendJson({type: "local", event: "tool_deferred_resume", call: ev}, true);
-        break;
       case "reconnecting":
         converseReady = false;
         micLabel.textContent = "Reconnecting…";
@@ -587,10 +580,17 @@
     if(micActive || sessionStarting) return;
     sessionStarting = true;
     micLabel.textContent = "Connecting…";
-    startSession().then(function(c){
+    var starting = startSession();
+    var generation = sessionGeneration;
+    var openingClient = null;
+    starting.then(function(c){
+      openingClient = c;
+      if(generation !== sessionGeneration || client !== c) throw {sessionCanceled: true};
       return c.startMic({workletUrl: "./vendor/converse/mic-worklet.js"});
     }).then(function(){
-      if(!client) throw {sessionCanceled: true};
+      if(generation !== sessionGeneration || client !== openingClient){
+        throw {sessionCanceled: true};
+      }
       sessionStarting = false;
       micActive = true;
       micMuted = false;
@@ -601,6 +601,7 @@
       micLabel.textContent = "Listening";
       muteBtn.disabled = false;
     }).catch(function(err){
+      if(generation !== sessionGeneration) return;
       sessionStarting = false;
       if(err && err.sessionCanceled) return;
       console.debug("mic error", err);

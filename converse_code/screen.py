@@ -13,7 +13,7 @@ Calibrated against the real Claude Code TUI, which is full of traps:
 """
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 CURSOR = "❯"
 
@@ -30,11 +30,15 @@ STATUS_MODEL_RE = re.compile(
 )
 
 
-@dataclass
+@dataclass(frozen=True)
 class Menu:
     title: str
-    options: list[str] = field(default_factory=list)
-    selected: int = 0  # index into options
+    options: tuple[str, ...]
+    selected: int
+
+    def __post_init__(self) -> None:
+        if not self.options or not 0 <= self.selected < len(self.options):
+            raise ValueError("a menu needs options and an in-range selection")
 
 
 def _clean(line: str) -> str:
@@ -59,7 +63,7 @@ def detect_menu(lines: list[str]) -> Menu | None:
         options = [m.group("label") for _, m in numbered]
         return Menu(
             title=_title_above(cleaned, numbered[0][0]),
-            options=options,
+            options=tuple(options),
             selected=cursor_on_numbered[0],
         )
 
@@ -86,7 +90,7 @@ def detect_menu(lines: list[str]) -> Menu | None:
         if len(block) < 2:
             continue
         options = [l.replace(CURSOR, " ").strip() for l in block]
-        return Menu(title=_title_above(cleaned, start), options=options, selected=i - start)
+        return Menu(title=_title_above(cleaned, start), options=tuple(options), selected=i - start)
     return None
 
 

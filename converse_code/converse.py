@@ -19,7 +19,7 @@ async def validate_key(api_key: str, url: str = DEFAULT_WS_URL) -> bool:
     async with websockets.connect(url) as ws:
         await ws.send(json.dumps({"type": "auth", "api_key": api_key}))
         reply = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
-        return reply.get("type") == "ok"
+        return isinstance(reply, dict) and reply.get("type") == "ok"
 
 
 async def mint_session_credential(
@@ -48,8 +48,10 @@ async def mint_session_credential(
     if (
         not isinstance(body, dict)
         or not isinstance(body.get("api_key"), str)
+        or not body["api_key"]
         or body.get("session_id") != session_id
-        or not isinstance(body.get("expires_in"), int)
+        or type(body.get("expires_in")) is not int
+        or body["expires_in"] <= 0
     ):
         raise CredentialError("Converse credential endpoint returned an invalid response")
     return {

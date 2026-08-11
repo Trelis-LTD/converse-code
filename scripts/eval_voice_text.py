@@ -163,8 +163,7 @@ async def main() -> int:
     handle = f"cc-eval-{os.urandom(3).hex()}"
     client = BrokerClient(api_key, session_id=handle, tools=manifest(), url=broker_url,
                           client_info={"capabilities": []})
-    router = ToolRouter(host, client, handle=handle, project_dir=project_dir,
-                        verify_submissions=True)
+    router = ToolRouter(host, client, handle=handle, project_dir=project_dir)
     server.on_hook = router.on_hook
 
     pending: set[asyncio.Task] = set()

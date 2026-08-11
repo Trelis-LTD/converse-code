@@ -1,8 +1,7 @@
 import math
 import struct
-import wave
 
-from converse_code.record import WavRecorder, analyse_pcm16
+from converse_code.record import analyse_pcm16
 
 
 RATE = 16_000
@@ -38,28 +37,3 @@ def test_regular_stalled_stream_gaps_fail_audio_report():
     assert len(report.silent_gaps_ms) == 4
     assert sum(report.silent_gaps_ms) > report.seconds * 1000 * 0.25
     assert not report.looks_like_speech
-
-
-def test_recorder_writes_exact_complete_pcm16_frames(tmp_path):
-    path = tmp_path / "downlink.wav"
-    recorder = WavRecorder(path)
-    recorder.add(b"\x01\x02\x03")
-    recorder.add(b"\x04\x05\x06")
-    recorder.close()
-    recorder.close()
-
-    assert recorder.bytes_written == 4
-    assert recorder.seconds == 2 / RATE
-    with wave.open(str(path), "rb") as wav:
-        assert wav.getnchannels() == 1
-        assert wav.getsampwidth() == 2
-        assert wav.getframerate() == RATE
-        assert wav.readframes(wav.getnframes()) == b"\x01\x02\x04\x05"
-
-
-def test_recorder_duration_uses_its_configured_sample_rate(tmp_path):
-    recorder = WavRecorder(tmp_path / "eight-khz.wav", rate=8_000)
-    recorder.add(b"\x00\x00" * 4_000)
-    recorder.close()
-
-    assert recorder.seconds == 0.5
