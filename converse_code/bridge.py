@@ -2,7 +2,7 @@
 
 import asyncio
 from collections import OrderedDict
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 
 class BrowserBridge:

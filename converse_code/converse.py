@@ -29,22 +29,24 @@ async def mint_session_credential(
 ) -> dict:
     """Exchange the server-held key for one browser-safe scoped credential."""
     endpoint = f"{api_url.rstrip('/')}/api/v1/session-keys"
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-        async with session.post(
+    async with (
+        aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session,
+        session.post(
             endpoint,
             headers={"Authorization": f"Bearer {api_key}"},
             json={"session_id": session_id},
-        ) as response:
-            try:
-                body = await response.json()
-            except (aiohttp.ContentTypeError, ValueError) as exc:
-                raise CredentialError(
-                    f"Converse credential endpoint returned HTTP {response.status}"
-                ) from exc
-            if response.status != 201:
-                raise CredentialError(
-                    f"Converse credential endpoint returned HTTP {response.status}"
-                )
+        ) as response,
+    ):
+        try:
+            body = await response.json()
+        except (aiohttp.ContentTypeError, ValueError) as exc:
+            raise CredentialError(
+                f"Converse credential endpoint returned HTTP {response.status}"
+            ) from exc
+        if response.status != 201:
+            raise CredentialError(
+                f"Converse credential endpoint returned HTTP {response.status}"
+            )
     if (
         not isinstance(body, dict)
         or not isinstance(body.get("api_key"), str)

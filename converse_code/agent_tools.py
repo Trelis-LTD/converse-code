@@ -1,4 +1,4 @@
-"""Minimal reference implementation of Converse background tools over Pi RPC."""
+"""Converse background tools controlling a visible Pi TUI semantically."""
 
 from __future__ import annotations
 
@@ -6,8 +6,7 @@ import asyncio
 import re
 from typing import Literal
 
-from .pi_rpc import PiRPCError
-
+from .pi_tui import PiTUIBridgeError
 
 TOOL_TIMEOUT_S = 30
 DEFERRED_TIMEOUT_S = 7200
@@ -15,12 +14,12 @@ DEFERRED_TIMEOUT_S = 7200
 CODING_TASK_DESCRIPTION = (
     "Start a coding task in the user's current project. Preserve technical wording and pass the "
     "complete instruction in request. The task runs in the background; progress, meaningful "
-    "partial results, questions, and completion arrive automatically. Do not call this for a "
-    "task already in progress; use continue_task to refine it or answer its question."
+    "partial results, and completion arrive automatically. Do not call this for a "
+    "task already in progress; use continue_task to refine it."
 )
 CONTINUE_TASK_DESCRIPTION = (
     "Send guidance or a requested answer to the coding task already in progress. Preserve the "
-    "user's wording. Use this for refinements, corrections, and replies to a blocking question."
+    "user's wording. Use this for refinements and corrections while Pi is still working."
 )
 END_SESSION_DESCRIPTION = (
     "End this Converse session after a brief goodbye. Use only when the user explicitly asks to "
@@ -54,7 +53,6 @@ def manifest() -> list[dict]:
 class AgentToolRouter:
     """Translate one Pi session into the smallest useful Converse tool lifecycle."""
 
-    MAX_PARTIALS = 8
     MAX_ROUTINE_PARTIALS = 3
     MAX_PROGRESS = 12
 
@@ -63,27 +61,21 @@ class AgentToolRouter:
         self.sender = sender
         self.handle = handle
         self.pi.on_event = self.on_event
-        self.phase: Literal["idle", "starting", "running", "awaiting_input", "canceling"] = "idle"
+        self.phase: Literal["idle", "starting", "running", "canceling"] = "idle"
         self.active_call_id: str | None = None
         self.active_request: str | None = None
         self.last_assistant_text = ""
-        self.pending_ui: dict | None = None
         self._settled = asyncio.Event()
         self._cancelled = False
         self._failure = ""
-        self._partial_count = 0
         self._routine_partial_count = 0
         self._progress_count = 0
         self._deferred_sent = False
         self._early_events: list[dict] = []
+        self._ownership_confirmed = False
+        self._prompt_command_id: str | None = None
+        self._terminal_observed = False
         self.on_end_session = None
-
-    def semantic_state(self) -> dict:
-        return {
-            "phase": self.phase,
-            "active_task": self.active_request,
-            "waiting_for": self._public_ui(self.pending_ui) if self.pending_ui else None,
-        }
 
     async def handle_tool_call(self, call: dict) -> None:
         call_id = str(call.get("id") or "")
@@ -107,7 +99,7 @@ class AgentToolRouter:
         self._cancelled = True
         try:
             await self.pi.command("abort")
-        except PiRPCError:
+        except PiTUIBridgeError:
             self._settled.set()
 
     async def on_event(self, event: dict) -> None:
@@ -118,40 +110,50 @@ class AgentToolRouter:
 
     async def _handle_event(self, event: dict) -> None:
         kind = event.get("type")
-        if kind == "agent_start" and self.phase == "starting":
+        if kind == "input_seen" and self.active_call_id and not self._terminal_observed:
+            if event.get("owner") == "bridge":
+                if self._ownership_confirmed or event.get("commandId") == self._prompt_command_id:
+                    self._ownership_confirmed = True
+                else:
+                    self._failure = (
+                        "Pi reported bridge input that did not match the active voice task."
+                    )
+                    self._settled.set()
+            else:
+                self._failure = (
+                    "Pi received unrelated terminal or extension input while the voice task was "
+                    "active, so its outcome cannot be attributed safely."
+                )
+                self._settled.set()
+        elif kind in {"session_shutdown", "bridge_disconnect", "bridge_replaced"}:
+            if self.active_call_id and not self._terminal_observed and not self._failure:
+                self._failure = (
+                    "The visible Pi session or semantic bridge ended before the voice task "
+                    "produced attributable completion evidence."
+                )
+                self._settled.set()
+        elif self._failure and self._settled.is_set():
+            return
+        elif kind == "agent_start" and self.phase == "starting":
             self.phase = "running"
         elif kind == "tool_execution_start" and self.active_call_id:
             await self._tool_started(event)
         elif kind == "message_end":
             message = event.get("message")
             text = self._message_text(message)
-            if text:
+            if text and self._ownership_confirmed:
                 self.last_assistant_text = text
             if isinstance(message, dict) and message.get("stopReason") in {"error", "aborted"}:
                 self._failure = str(message.get("errorMessage") or "Pi stopped with an error.")
-        elif kind == "extension_ui_request" and event.get("method") in {
-            "select", "confirm", "input", "editor",
-        }:
-            if self._partial_count >= self.MAX_PARTIALS:
-                self._failure = "The task exceeded the supported number of user interactions."
-                await self.pi.send_extension_response(event["id"], cancelled=True)
-                return
-            self.pending_ui = event
-            self.phase = "awaiting_input"
-            if self.active_call_id:
-                self._partial_count += 1
-                await self.sender.send_tool_partial_result(
-                    self.active_call_id,
-                    {
-                        "speak": self._ui_prompt(event),
-                        "data": self._public_ui(event),
-                        "handle": self.handle,
-                    },
-                    reply=True,
-                )
         elif kind == "agent_settled":
+            self._terminal_observed = True
+            if not self._ownership_confirmed:
+                self._failure = (
+                    "Pi settled without confirming that the active turn belonged to the voice "
+                    "task, so no outcome can be attributed safely."
+                )
             self._settled.set()
-        elif kind == "process_exit" and self.active_call_id:
+        elif kind == "process_exit" and self.active_call_id and not self._terminal_observed:
             self._failure = f"Pi exited unexpectedly with status {event.get('status')}."
             self._settled.set()
 
@@ -171,18 +173,21 @@ class AgentToolRouter:
         self.last_assistant_text = ""
         self._cancelled = False
         self._failure = ""
-        self._partial_count = 0
         self._routine_partial_count = 0
         self._progress_count = 0
         self._deferred_sent = False
         self._early_events.clear()
+        self._ownership_confirmed = False
+        self._prompt_command_id = None
+        self._terminal_observed = False
         self._settled.clear()
         try:
-            await self.pi.command("prompt", message=request)
-        except PiRPCError as exc:
+            response = await self.pi.command("prompt", message=request)
+        except PiTUIBridgeError as exc:
             await self._result(call_id, f"Pi rejected the task: {exc}", outcome="failed")
             self._reset()
             return
+        self._prompt_command_id = response.get("id")
         await self.sender.send_tool_deferred(call_id, self.handle, status_label="Coding task")
         self._deferred_sent = True
         for event in self._early_events:
@@ -206,53 +211,16 @@ class AgentToolRouter:
         if not request:
             await self._result(call_id, "A reply or instruction is required.", outcome="failed")
             return
-        if self.phase == "awaiting_input" and self.pending_ui:
-            try:
-                answered = await self._answer_ui(request)
-            except PiRPCError as exc:
-                await self._result(
-                    call_id, f"Pi did not accept that answer: {exc}", outcome="failed",
-                )
-                return
-            if not answered:
-                await self._result(
-                    call_id, "That reply does not match the pending question.", outcome="failed",
-                )
-                return
-            self.pending_ui = None
-            self.phase = "running"
-        elif self.phase in {"starting", "running"}:
+        if self.phase in {"starting", "running"}:
             try:
                 await self.pi.command("steer", message=request)
-            except PiRPCError as exc:
+            except PiTUIBridgeError as exc:
                 await self._result(call_id, f"Pi rejected the guidance: {exc}", outcome="failed")
                 return
         else:
             await self._result(call_id, "There is no active coding task.", outcome="failed")
             return
         await self._result(call_id, "Passed that to the active coding task.", verified=True)
-
-    async def _answer_ui(self, request: str) -> bool:
-        assert self.pending_ui is not None
-        event = self.pending_ui
-        method = event["method"]
-        if method == "confirm":
-            normalized = request.casefold().strip(" .!?")
-            yes = {"yes", "y", "confirm", "allow", "approve", "continue", "do it"}
-            no = {"no", "n", "deny", "block", "cancel", "stop", "don't", "do not"}
-            if normalized not in yes | no:
-                return False
-            await self.pi.send_extension_response(event["id"], confirmed=normalized in yes)
-            return True
-        if method == "select":
-            options = event.get("options") or []
-            match = next((option for option in options if option.casefold() == request.casefold()), None)
-            if match is None:
-                return False
-            await self.pi.send_extension_response(event["id"], value=match)
-            return True
-        await self.pi.send_extension_response(event["id"], value=request)
-        return True
 
     async def _tool_started(self, event: dict) -> None:
         name = str(event.get("toolName") or "tool")
@@ -262,10 +230,13 @@ class AgentToolRouter:
                 return
             path = str(args.get("path") or args.get("file_path") or "a file")
             self._routine_partial_count += 1
-            self._partial_count += 1
             await self.sender.send_tool_partial_result(
                 self.active_call_id,
-                {"speak": f"Updating {path}.", "data": {"tool": name}, "handle": self.handle},
+                {
+                    "speak": f"Pi is preparing to update {path}.",
+                    "data": {"tool": name},
+                    "handle": self.handle,
+                },
                 reply=False,
             )
             return
@@ -273,7 +244,6 @@ class AgentToolRouter:
             if self._routine_partial_count >= self.MAX_ROUTINE_PARTIALS:
                 return
             self._routine_partial_count += 1
-            self._partial_count += 1
             await self.sender.send_tool_partial_result(
                 self.active_call_id,
                 {"speak": "The coding agent is preparing to run tests.", "data": {"tool": name},
@@ -283,7 +253,9 @@ class AgentToolRouter:
             return
         if self._progress_count < self.MAX_PROGRESS:
             self._progress_count += 1
-            await self.sender.send_tool_progress(self.active_call_id, f"Using {name}.")
+            await self.sender.send_tool_progress(
+                self.active_call_id, f"Pi is preparing to use {name}.",
+            )
 
     @staticmethod
     def _is_test_command(command: str) -> bool:
@@ -304,27 +276,6 @@ class AgentToolRouter:
             if item.get("text")
         ).strip()
 
-    @staticmethod
-    def _public_ui(event: dict | None) -> dict | None:
-        if event is None:
-            return None
-        return {
-            "request_id": event.get("id"),
-            "method": event.get("method"),
-            "title": event.get("title"),
-            "message": event.get("message"),
-            "options": event.get("options") or [],
-        }
-
-    @staticmethod
-    def _ui_prompt(event: dict) -> str:
-        parts = [str(event.get("title") or "The coding agent needs input")]
-        if event.get("message"):
-            parts.append(str(event["message"]))
-        if event.get("options"):
-            parts.append("Options: " + ", ".join(map(str, event["options"])))
-        return " — ".join(parts)
-
     async def _result(
         self, call_id: str, speak: str, *, outcome: str = "succeeded", verified: bool = False,
     ) -> None:
@@ -339,7 +290,9 @@ class AgentToolRouter:
         self.phase = "idle"
         self.active_call_id = None
         self.active_request = None
-        self.pending_ui = None
         self._deferred_sent = False
         self._early_events.clear()
+        self._ownership_confirmed = False
+        self._prompt_command_id = None
+        self._terminal_observed = False
         self._settled.clear()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 import shutil
@@ -13,7 +12,6 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
 from converse_code.localserver import LocalServer
-
 
 FAKE_SDK = Path(__file__).with_name("fake_converse.js")
 ARTIFACTS = Path("test-results/browser")
@@ -60,7 +58,7 @@ async def browser_page(request, browser_server):
     server, _, _ = browser_server
     test_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", request.node.nodeid)
     artifact_dir = ARTIFACTS / test_name
-    wav_path = Path(__file__).with_name("microphone.wav").resolve()
+    wav_path = Path(os.environ["CONVERSE_CODE_TEST_WAV"]).resolve()
     errors = []
 
     async with async_playwright() as playwright:

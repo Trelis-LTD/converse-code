@@ -1,5 +1,4 @@
-// Minimal structured approval gate for Pi RPC. In RPC mode ctx.ui.select is transported as an
-// extension_ui_request, so Converse can ask the user and return an ID-correlated answer.
+// Minimal approval gate rendered and answered in the visible Pi terminal.
 export default function (pi) {
   let allowForSession = false;
   pi.on("tool_call", async (event, ctx) => {
@@ -15,7 +14,7 @@ export default function (pi) {
     );
     if (choice === "Allow for session") allowForSession = true;
     if (!choice || choice === "Block") {
-      return {block: true, reason: `Blocked by the user through Converse: ${target}`};
+      return {block: true, reason: `Blocked by the user in the Pi terminal: ${target}`};
     }
   });
 }
