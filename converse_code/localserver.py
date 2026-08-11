@@ -53,6 +53,7 @@ class LocalServer:
     async def start(self, port: int = 0, host: str = "127.0.0.1") -> int:
         self._host = host
         app = web.Application()
+        app.router.add_get("/typed-turn.js", self._typed_turn)
         app.router.add_get("/", self._index)
         app.router.add_get("/assistant-transcript.js", self._assistant_transcript)
         app.router.add_get("/ws", self._ws)
@@ -119,6 +120,12 @@ class LocalServer:
     async def _assistant_transcript(self, _request: web.Request) -> web.StreamResponse:
         return web.FileResponse(
             WEB_DIR / "assistant-transcript.js",
+            headers={**self.NO_STORE, "Content-Type": "application/javascript"},
+        )
+
+    async def _typed_turn(self, _request: web.Request) -> web.StreamResponse:
+        return web.FileResponse(
+            WEB_DIR / "typed-turn.js",
             headers={**self.NO_STORE, "Content-Type": "application/javascript"},
         )
 

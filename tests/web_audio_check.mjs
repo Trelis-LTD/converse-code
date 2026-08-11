@@ -1,5 +1,4 @@
-/* Check that the voice tab script parses and exercise the vendored SDK's audio math:
-
+/* Check the session page's voice-input wiring and the vendored SDK's own audio math:
      1. the inline page script parses
      2. the SDK's decoder reads PCM16 — the wire format, verified against the
         live broker (an earlier npm release decoded f32 and produced noise)

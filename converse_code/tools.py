@@ -87,8 +87,8 @@ PRESS_KEY_DESCRIPTION = (
 )
 
 END_SESSION_DESCRIPTION = (
-    "End the current Converse voice session after a brief goodbye. Use only when the user "
-    "explicitly asks to end, close, leave, or hang up the voice session. This stops the "
+    "End the current Converse session after a brief goodbye. Use only when the user "
+    "explicitly asks to end, close, leave, or hang up the Converse session. This stops the "
     "microphone and voice connection but leaves Claude Code running in the terminal."
 )
 
@@ -1052,7 +1052,7 @@ class ToolRouter:
     async def _end_session(self, _call_id: str, _args: dict) -> dict:
         if self.on_status:
             await self.on_status({"type": "local", "event": "end_session"})
-        return self._result("Ending the voice session now. Claude Code will remain open in the terminal.")
+        return self._result("Ending the Converse session now. Claude Code will remain open in the terminal.")
 
     # -- transcript tailing ----------------------------------------------------
 

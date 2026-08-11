@@ -36,6 +36,15 @@ async def test_serves_assistant_transcript_script_without_cache(server):
             assert "no-store" in resp.headers["Cache-Control"]
 
 
+async def test_serves_typed_turn_controller_without_cache(server):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"{base(server)}/typed-turn.js") as resp:
+            assert resp.status == 200
+            assert resp.content_type == "application/javascript"
+            assert "no-store" in resp.headers["Cache-Control"]
+            assert "TypedTurnController" in await resp.text()
+
+
 async def test_index_requires_token(server):
     async with aiohttp.ClientSession() as session:
         for url in (f"{base(server)}/", f"{base(server)}/?t=wrong"):

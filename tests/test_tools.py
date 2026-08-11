@@ -643,7 +643,7 @@ async def test_end_session_arms_browser_close_after_goodbye(router, fake_sender)
     await router.handle_tool_call({"id": "c1", "name": "end_session", "args": {}})
 
     assert events[0] == {"type": "local", "event": "end_session"}
-    assert "voice session" in fake_sender.results[0][1]["speak"].lower()
+    assert "converse session" in fake_sender.results[0][1]["speak"].lower()
 
 
 async def test_cancel_before_prompt_id_remains_non_idle_until_ui_settles(

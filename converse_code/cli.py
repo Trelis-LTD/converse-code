@@ -15,6 +15,7 @@ from pathlib import Path
 
 from . import config, converse, hooks, selftest, tools
 from .bridge import BrowserBridge
+from .headless import HeadlessController, JsonLineBridge, stdin_reader
 from .localserver import LocalServer
 from .ptyhost import ClaudeHost
 
@@ -65,7 +66,7 @@ async def _run(args) -> int:
         await server.start(port=args.port)
     except OSError as exc:
         print(
-            f"Could not start the voice tab server on port {args.port}: {exc}\n"
+            f"Could not start the Converse session server on port {args.port}: {exc}\n"
             "Another converse-code may already be running — stop it, or pass "
             "--port <other> (or --port 0 to pick a free one).",
             file=sys.stderr,
@@ -97,7 +98,7 @@ async def _run(args) -> int:
         server.hook_url("stop_failure"),
     )
     claude_argv = shlex.split(args.claude) + ["--settings", str(settings_path)]
-    host = ClaudeHost(claude_argv)
+    host = ClaudeHost(claude_argv, attach_terminal=True)
 
     handle = _session_handle()
     bridge = BrowserBridge(server.send_json_to_tab)
@@ -127,7 +128,7 @@ async def _run(args) -> int:
     bridge.on_tool_call = lambda call: _spawn_tool(router, call)
     bridge.on_tool_cancel = router.handle_tool_cancel
 
-    print(f"Converse Code — voice tab: {url}   (session: {handle})")
+    print(f"Converse Code — session page: {url}   (session: {handle})")
     print(f"Logs: {LOG_PATH}")
     if not args.no_browser:
         webbrowser.open(url)
@@ -141,6 +142,72 @@ async def _run(args) -> int:
         await server.stop()
         shutil.rmtree(scratch, ignore_errors=True)
     return host.returncode or 0
+
+
+async def _run_headless(args) -> int:
+    """Run Claude behind a JSONL stdin/stdout control protocol."""
+    server = LocalServer()
+    try:
+        await server.start(port=args.port)
+    except OSError as exc:
+        print(f"Could not start the headless hook server on port {args.port}: {exc}", file=sys.stderr)
+        return 1
+
+    scratch = tempfile.mkdtemp(prefix="converse-code-")
+    settings_path = hooks.write_settings(
+        scratch,
+        server.hook_url("stop"),
+        server.hook_url("user_prompt_submit"),
+        server.hook_url("permission_request"),
+        server.hook_url("stop_failure"),
+    )
+    claude_argv = shlex.split(args.claude) + ["--settings", str(settings_path)]
+    host = ClaudeHost(claude_argv, attach_terminal=False)
+    bridge = JsonLineBridge(sys.stdout)
+    router = tools.ToolRouter(host, bridge, handle=_session_handle())
+    controller = HeadlessController(router, host, bridge)
+    router.on_status = controller.status_event
+    server.on_hook = router.on_hook
+
+    started_at = asyncio.get_running_loop().time()
+    requested_stop = False
+    reader = None
+    try:
+        await host.start()
+        reader = await stdin_reader()
+        await bridge.emit({
+            "type": "ready",
+            "protocol": "converse-code-headless-v1",
+            "handle": router.handle,
+            "tools": [item["name"] for item in tools.manifest() if item["name"] != "end_session"],
+        })
+        control_task = asyncio.create_task(controller.read(reader))
+        exit_task = asyncio.create_task(host.exited.wait())
+        done, pending = await asyncio.wait(
+            {control_task, exit_task}, return_when=asyncio.FIRST_COMPLETED,
+        )
+        requested_stop = control_task in done
+        if requested_stop and not host.exited.is_set():
+            await controller.cancel_tasks()
+            await host.stop()
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    finally:
+        try:
+            if reader is not None:
+                reader.close()
+            await controller.cancel_tasks()
+            if not host.exited.is_set():
+                await host.stop()
+            if not requested_stop:
+                _report_early_exit(host, asyncio.get_running_loop().time() - started_at)
+        finally:
+            try:
+                await server.stop()
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
+    return 0 if requested_stop else (host.returncode or 0)
 
 
 LOG_PATH = Path(tempfile.gettempdir()) / "converse-code.log"
@@ -200,8 +267,8 @@ async def _spawn_tool(router: tools.ToolRouter, call: dict) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="converse-code", description="Talk to Claude Code by voice via Converse.")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="local port for the voice tab")
+    parser = argparse.ArgumentParser(prog="converse-code", description="Talk or type to Claude Code via Converse, or use headless JSONL control.")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="local port for the session page")
     parser.add_argument("--claude", default=os.environ.get("CONVERSE_CODE_CLAUDE_CMD", DEFAULT_CLAUDE_CMD),
                         help="command used to launch Claude Code")
     parser.add_argument(
@@ -211,7 +278,11 @@ def main() -> None:
         "--api-url", default=os.environ.get("CONVERSE_API_URL", converse.DEFAULT_API_URL),
         help="Converse HTTP API base used to mint browser session credentials",
     )
-    parser.add_argument("--no-browser", action="store_true", help="don't auto-open the voice tab")
+    parser.add_argument("--no-browser", action="store_true", help="don't auto-open the session page")
+    parser.add_argument(
+        "--headless", action="store_true",
+        help="run Claude through the headless JSONL control protocol",
+    )
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("login", help="store and validate your Converse API key")
     sub.add_parser("selftest", help="check the audio path end to end, without a browser")
@@ -222,7 +293,8 @@ def main() -> None:
         raise SystemExit(asyncio.run(_login(args.broker_url)))
     if args.cmd == "selftest":
         raise SystemExit(asyncio.run(selftest.run(args.broker_url)))
-    raise SystemExit(asyncio.run(_run(args)))
+    runner = _run_headless if args.headless else _run
+    raise SystemExit(asyncio.run(runner(args)))
 
 
 if __name__ == "__main__":

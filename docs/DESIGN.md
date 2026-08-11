@@ -5,8 +5,12 @@ This document describes the current client. It is not a roadmap or design diary.
 ## Runtime shape
 
 `converse-code` starts the real interactive `claude` CLI inside a pseudo-terminal and serves a
-single localhost browser page. The terminal remains directly usable. The browser owns microphone
-capture and assistant playback through the bundled `@trelis/converse` Browser SDK.
+single localhost browser page. The terminal remains directly usable. The browser owns voice,
+typed turns, and assistant playback through the bundled `@trelis/converse` Browser SDK.
+
+`converse-code --headless` instead exposes the same Claude tool router as the
+`converse-code-headless-v1` JSONL protocol on stdin/stdout. It does not connect to Converse
+or require a Converse API key.
 
 ```text
 browser SDK  <===============================>  hosted Converse
@@ -23,10 +27,11 @@ There are four client-side boundaries:
 
 | Component | Responsibility |
 | --- | --- |
-| Browser SDK | Microphone capture, AEC, audio playback, turn events, reconnect/resume |
+| Browser SDK | Voice and typed turns, AEC, audio playback, turn events, reconnect/resume |
 | Local server | Serves the page, mints scoped credentials, and carries tool/status controls |
-| Tool router | Converts explicit voice tool calls into Claude prompts, commands, keys, and menus |
-| PTY host | Preserves the real Claude TUI while providing safe input injection and screen structure |
+| Headless controller | Maps JSONL requests and events to the tool router without Converse |
+| Tool router | Converts tool calls into Claude prompts, commands, keys, and menus |
+| PTY host | Preserves the real or virtual Claude TUI while providing safe input injection and screen structure |
 
 The persistent API key stays in the Python process. For each browser session, the local server
 exchanges it for a short-lived credential bound to that session ID. The browser SDK then connects
@@ -35,12 +40,17 @@ straight to Converse with the tool manifest. Supported SDK resume state is kept 
 
 ## Channels and state
 
-The localhost server exposes:
+Browser session mode exposes these localhost channels:
 
 - `/session-credential`: exchanges a requested session ID for a browser-safe scoped credential.
 - `/ws`: acknowledged tool controls plus Claude state and injected instruction labels.
 - `/hook/{event}`: native Claude Code HTTP lifecycle hooks.
 - `/vendor/converse/*.js`: the Apache-licensed browser SDK modules bundled with the wheel.
+
+Headless mode reserves stdout for JSONL protocol events. It accepts tool calls, cancellation,
+screen snapshots, and shutdown requests on stdin. Screen snapshots include rendered terminal
+rows, semantic state, the last full response, and the transcript path. Closing stdin or sending
+`shutdown` ends the wrapped Claude process.
 
 The tool router reports an `idle`, `working`, `canceling`, or `awaiting_input` phase; structured UI distinguishes ordinary menus from the model picker. A `long_task` call is acknowledged as
 deferred once its prompt is confirmed accepted, so no voice turn is held open while Claude works.
@@ -84,6 +94,8 @@ events update an existing row instead of duplicating it.
 ## Security boundaries
 
 - The HTTP server binds to `127.0.0.1` by default.
+- Headless control uses only the launching process's stdin/stdout; it opens no external control
+  socket and never reads a Converse credential.
 - Every page, local WebSocket, credential request, and hook is scoped by a random per-run token. WebSocket
   upgrades additionally reject foreign browser origins.
 - The Converse API key is read from `CONVERSE_API_KEY` or a mode-`0600` config file and is never

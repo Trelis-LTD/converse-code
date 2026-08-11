@@ -21,7 +21,7 @@ def run(args, env_extra=None, timeout=30):
 def test_help_works():
     proc = run(["--help"])
     assert proc.returncode == 0
-    assert "Talk to Claude Code by voice" in proc.stdout
+    assert "Talk or type to Claude Code" in proc.stdout
     assert "--api-url" in proc.stdout
 
 
@@ -48,7 +48,7 @@ def test_port_in_use_reports_cleanly():
     try:
         proc = run(["--no-browser", "--port", str(busy_port)])
         assert proc.returncode == 1
-        assert "Could not start the voice tab server" in proc.stderr
+        assert "Could not start the Converse session server" in proc.stderr
         assert "--port" in proc.stderr
         assert "Traceback" not in proc.stderr
     finally:

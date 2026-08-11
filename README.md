@@ -1,9 +1,9 @@
 # Converse Code
 
-Talk to Claude Code by voice. `converse-code` wraps the real `claude` CLI in your own
+Talk or type to Claude Code. `converse-code` wraps the real `claude` CLI in your own
 terminal and connects it to [Converse](https://converse.trelis.com) over the public
-WebSocket tool protocol — you speak into a browser tab, instructions appear in the
-terminal as typed text, and the voice tells you what happened.
+WebSocket tool protocol — speak or type in a browser tab, watch instructions arrive in
+Claude's terminal, and hear or read what happened.
 
 > **Alpha — invite only.** Trelis Converse is in alpha for individual developers and
 > enterprise. Reach out to [voice@trelis.com](mailto:voice@trelis.com) to get on the waitlist.
@@ -44,7 +44,7 @@ First run asks for a Converse API key from the Converse dashboard, validates it,
 `~/.config/converse-code/config.json` with mode `0600`. Run `converse-code login` to replace the
 saved key, or set `CONVERSE_API_KEY` to supply one without writing it to disk. Every run: Claude
 Code opens in your terminal as normal, plus a
-`http://127.0.0.1:<port>/?t=<token>` tab with a mic button and a live transcript — open the
+`http://127.0.0.1:<port>/?t=<token>` tab with voice controls, typed input, and a live transcript — open the
 URL it prints, since the token is what keeps other pages out. Close the terminal, everything
 stops.
 
@@ -54,10 +54,37 @@ Claude starts in auto permission mode by default. Override the wrapped command w
 converse-code --claude "claude --permission-mode default"
 ```
 
-The browser uses Converse's Classic voice. The mic button starts or cleanly ends the voice
-connection; the separate Mute button gates microphone audio without disconnecting. Claude Code
-remains fully interactive in the terminal. Saying that you want to end the session closes the
-voice connection after the final spoken reply and leaves Claude running.
+The browser uses Converse's Classic voice. The mic button starts or stops voice input while
+preserving the multimodal Converse session; the separate Mute button temporarily gates microphone
+audio. Claude Code remains fully interactive in the terminal. Asking to end the Converse session
+closes it after the final spoken reply and leaves Claude running.
+
+Typed turns use Converse's canonical user-turn path: the SDK sends `inject_context` with
+`role: "user"` and `reply: true`, and the broker echoes the turn as `asr` with the same stable
+turn ID used by the response. Starting with text suppresses the voice greeting and does not turn
+on the microphone.
+
+## Headless control
+
+`--headless` replaces the terminal and Converse connection with a JSONL control channel on
+stdin/stdout. It does not require a Converse API key. Each request and event is one JSON object:
+
+```bash
+converse-code --headless
+```
+
+```json
+{"type":"tool_call","id":"task-1","name":"long_task","args":{"request":"Fix the failing tests"}}
+{"type":"screen_snapshot","id":"state-1"}
+{"type":"tool_cancel","id":"task-1"}
+{"type":"shutdown","id":"done"}
+```
+
+The first event is `ready` with protocol `converse-code-headless-v1`. Tool calls use the same
+names as voice mode and emit `tool_deferred`, `tool_progress`, `tool_partial_result`, and
+`tool_result` events. A screen snapshot returns Claude's rendered terminal rows, semantic state,
+last full response, and transcript path. stdout is reserved for protocol events; diagnostics go
+to stderr.
 
 See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security boundaries.
 
@@ -65,7 +92,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security b
 
 ```
    Dev's terminal                        Dev's browser tab (localhost)
-   `claude` TUI, fully interactive      mic + speaker + live ASR transcript
+   `claude` TUI, fully interactive      mic + typed turns + transcript
         ^                                       |
         | pty                           audio + tool protocol
         |                                       v
@@ -78,7 +105,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for the current architecture and security b
 
 - Nothing about voice reaches Claude Code directly; nothing about Claude Code's raw
   output reaches the user directly. `converse-code` translates in both directions.
-- Voice input reaches the machine only as natural-language instructions to Claude Code —
+- Voice and typed input reach the machine only as natural-language instructions to Claude Code —
   never as raw shell commands. The TUI's `!` bash-mode prefix is refused on the voice path,
   so Claude Code's permission system remains the single safety chokepoint.
 - Prompt text and Enter are sent as separate PTY writes. A native `UserPromptSubmit` HTTP hook
