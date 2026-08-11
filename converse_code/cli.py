@@ -271,7 +271,7 @@ async def _spawn_tool(router: tools.ToolRouter, call: dict) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="converse-code", description="Talk to Claude Code by voice via Converse.")
+    parser = argparse.ArgumentParser(prog="converse-code", description="Talk or type to Claude Code via Converse, or use headless JSONL control.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="local port for the session page")
     parser.add_argument("--claude", default=os.environ.get("CONVERSE_CODE_CLAUDE_CMD", DEFAULT_CLAUDE_CMD),
                         help="command used to launch Claude Code")

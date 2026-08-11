@@ -25,7 +25,7 @@ def run(args, env_extra=None, timeout=30):
 def test_help_works():
     proc = run(["--help"])
     assert proc.returncode == 0
-    assert "Talk to Claude Code by voice" in proc.stdout
+    assert "Talk or type to Claude Code" in proc.stdout
     assert "--api-url" in proc.stdout
 
 

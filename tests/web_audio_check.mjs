@@ -1,4 +1,4 @@
-/* Check the voice tab's audio wiring and the vendored SDK's own audio math:
+/* Check the session page's voice-input wiring and the vendored SDK's own audio math:
 
      1. the page delegates to the SDK rather than reimplementing audio
      2. the SDK's decoder reads PCM16 — the wire format, verified against the
