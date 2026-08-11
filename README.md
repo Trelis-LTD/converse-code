@@ -8,19 +8,21 @@ The example demonstrates the complete deferred-tool lifecycle:
 
 1. `coding_task` accepts work and immediately backgrounds it.
 2. Pi tool events become progress and partial results.
-3. Routine edits use silent partials; meaningful milestones and questions use `reply: true`.
+3. Routine edits use silent partials; meaningful milestones and approval questions use
+   `reply: true`.
 4. `continue_task` steers the running task from a later voice turn.
 5. Pi's `agent_settled` event resolves the deferred tool exactly once.
 6. Converse cancellation maps directly to Pi's extension `abort()` API.
 
-The browser is voice-only. Work, output, model state, and approval menus remain in Pi. A bundled
-extension injects voice requests with Pi's documented `sendUserMessage()` API and observes Pi's
-semantic lifecycle events. There is no terminal emulation, screen scraping, key injection, model
-picker, shell bypass, or hidden Pi process.
+The browser remains voice-only but mirrors the live speech transcript, assistant replies, and
+coding activity. Pi retains the canonical coding transcript and model state. A bundled extension
+injects voice requests with Pi's documented `sendUserMessage()` API and observes Pi's semantic
+lifecycle events. There is no terminal emulation, screen scraping, key injection, model picker,
+shell bypass, or hidden Pi process.
 
-A second tiny extension gates `bash`, `edit`, and `write` with native Pi terminal choices:
-allow once, allow for the session, or block. `reply: true` is reserved for worthwhile spoken
-milestones; it is not used to reconstruct or manipulate terminal menus.
+That same extension gates `bash`, `edit`, and `write` with ID-correlated semantic approval
+requests. Converse asks the user to allow once, allow for the session, or block, and Pi accepts
+only an explicit response for the pending ID. No terminal selection menu is opened or navigated.
 
 ## Install
 
@@ -63,8 +65,9 @@ AgentToolRouter ── local semantic bridge ── visible Pi TUI ── Codex
         └─ deferred / progress / partial(reply) / terminal result
 ```
 
-The model-facing surface is intentionally limited to `coding_task`, `continue_task`, and
-`end_session`. See [docs/DESIGN.md](docs/DESIGN.md) for the event mapping and evidence rules.
+The model-facing surface is intentionally limited to `coding_task`, `continue_task`,
+`approval_decision`, and `end_session`. See [docs/DESIGN.md](docs/DESIGN.md) for the event mapping
+and evidence rules.
 
 ## Test
 
@@ -76,9 +79,10 @@ uv run scripts/browser_e2e.py
 ```
 
 The deterministic suite exercises the Python bridge and the real TypeScript Pi extensions. The
-browser suite drives the shipped voice-only page in Chromium and checks backgrounding, silent and
-spoken partials, completion, cancellation, and reconnect replay. Release testing also launches a
-real visible Pi TUI and injects a bounded task through the semantic extension bridge.
+browser suite drives the shipped voice-only page in Chromium and checks transcript streaming,
+activity indicators, backgrounding, silent and spoken partials, completion, cancellation, and
+reconnect replay. Release testing also launches a real visible Pi TUI and injects a bounded task
+through the semantic extension bridge.
 
 ## License
 

@@ -23,6 +23,7 @@ async def test_page_is_a_voice_only_remote_for_the_visible_pi_terminal(browser_p
     assert await page.title() == "Converse Code"
     assert await page.locator("#text").count() == 0
     assert await page.locator("#send").count() == 0
+    assert await page.locator("#log").count() == 1
     await open_session(page)
     assert await page.evaluate("__fakeConverse.clients.length") == 1
     instructions = await page.evaluate("__fakeConverse.clients[0].options.mode.instructions")
@@ -31,6 +32,30 @@ async def test_page_is_a_voice_only_remote_for_the_visible_pi_terminal(browser_p
     await page.locator("#voice").click()
     await page.locator("#voice").get_by_text("Start voice", exact=True).wait_for()
     assert errors == []
+
+
+async def test_page_streams_user_speech_assistant_text_and_tool_activity(browser_page):
+    page, _ = browser_page
+    await open_session(page)
+
+    await page.evaluate("""__fakeConverse.clients[0].emit({
+      type:'asr', text:'List the files', final:true, turn_id:'user-1'
+    })""")
+    await page.evaluate("""__fakeConverse.clients[0].emit({type:'turn',turn_id:'reply-1'});
+      __fakeConverse.clients[0].emit({type:'text_delta',delta:'I will inspect ',turn_id:'reply-1'});
+      __fakeConverse.clients[0].emit({type:'text_delta',delta:'the repository.',turn_id:'reply-1'});
+      __fakeConverse.clients[0].emit({type:'done',turn_id:'reply-1'});""")
+    await page.evaluate("""__fakeConverse.clients[0].emit({
+      type:'tool_call', id:'task-1', name:'coding_task', args:{request:'List the files'}
+    })""")
+
+    assert await page.locator(".entry.user").get_by_text("List the files", exact=True).count() == 1
+    assert await page.locator(".entry.assistant").get_by_text(
+        "I will inspect the repository.", exact=True,
+    ).count() == 1
+    assert await page.locator(".entry.activity").get_by_text(
+        "Requested coding_task", exact=True,
+    ).count() == 1
 
 
 async def test_deferred_silent_partial_reply_partial_and_completion(browser_page, browser_server):
@@ -45,6 +70,18 @@ async def test_deferred_silent_partial_reply_partial_and_completion(browser_page
     })
     await wait_for_frame(frames, lambda frame: frame.get("seq") == 1)
     assert await page.locator("#status").inner_text() == "working"
+    assert await page.locator(".entry.activity").get_by_text(
+        "Coding task accepted in the background", exact=True,
+    ).count() == 1
+
+    await server.send_json_to_tab({
+        "type": "local", "event": "bridge_control", "seq": 10,
+        "action": "tool_result", "id": "approval-call-1",
+        "content": {"speak": "Allowed that action once."},
+        "outcome": "succeeded", "verified": True,
+    })
+    await wait_for_frame(frames, lambda frame: frame.get("seq") == 10)
+    assert await page.locator("#status").inner_text() == "working"
 
     await server.send_json_to_tab({
         "type": "local", "event": "bridge_control", "seq": 2,
@@ -52,6 +89,7 @@ async def test_deferred_silent_partial_reply_partial_and_completion(browser_page
         "content": {"speak": "Updated app.py"}, "reply": False,
     })
     await wait_for_frame(frames, lambda frame: frame.get("seq") == 2)
+    assert await page.locator(".entry.activity").get_by_text("Updated app.py", exact=True).count() == 1
 
     await server.send_json_to_tab({
         "type": "local", "event": "bridge_control", "seq": 3,
@@ -67,13 +105,14 @@ async def test_deferred_silent_partial_reply_partial_and_completion(browser_page
     })
     await wait_for_frame(frames, lambda frame: frame.get("seq") == 4)
     assert await page.locator("#status").inner_text() == "idle"
+    assert await page.locator(".entry.activity").get_by_text("Finished", exact=True).count() == 1
 
     calls = await page.evaluate("__fakeConverse.clients[0].bridgeCalls")
     assert [call["action"] for call in calls] == [
-        "tool_deferred", "tool_partial_result", "tool_partial_result", "tool_result",
+        "tool_deferred", "tool_result", "tool_partial_result", "tool_partial_result", "tool_result",
     ]
-    assert calls[1]["options"]["reply"] is False
-    assert calls[2]["options"]["reply"] is True
+    assert calls[2]["options"]["reply"] is False
+    assert calls[3]["options"]["reply"] is True
 
 
 async def test_sdk_cancellation_reaches_the_local_host(browser_page, browser_server):

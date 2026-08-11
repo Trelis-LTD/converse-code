@@ -1,5 +1,4 @@
 import bridgeExtension from "../converse_code/pi_bridge.ts";
-import approvalExtension from "../converse_code/pi_approval.ts";
 
 class FakeSocket {
   static OPEN = 1;
@@ -56,8 +55,6 @@ pi.handlers.get("tool_execution_start")({
 });
 pi.handlers.get("message_end")({type: "message_end", message: {role: "assistant", content: "Done"}});
 pi.handlers.get("agent_settled")({type: "agent_settled"});
-socket.emit("message", {data: JSON.stringify({id: "x1", type: "shutdown"})});
-await new Promise((resolve) => setTimeout(resolve, 1));
 
 if (pi.userMessages.length !== 2) throw new Error("bridge did not inject both user messages");
 if (pi.userMessages[0].message !== "Fix it" || pi.userMessages[0].options !== undefined) {
@@ -76,22 +73,48 @@ if (ownedInputs[0].commandId !== "p1" || ownedInputs[1].commandId !== "s1") {
   throw new Error("bridge input ownership was not command-correlated");
 }
 if (!statuses.includes("Converse voice: connected")) throw new Error("visible status was not set");
+
+const approval = pi.handlers.get("tool_call")({
+  toolCallId: "tool-approval-1", toolName: "bash", input: {command: "uv run pytest -q"},
+}, context);
+await new Promise((resolve) => setTimeout(resolve, 1));
+const request = socket.frames.find((frame) => frame.type === "approval_request");
+if (!request || !request.summary.includes("uv run pytest -q")) {
+  throw new Error("semantic approval request omitted the command");
+}
+if (typeof context.ui.select === "function") {
+  throw new Error("approval must not open a terminal selection menu");
+}
+socket.emit("message", {data: JSON.stringify({
+  id: "a1", type: "approval_response", approvalId: request.approvalId, decision: "block",
+})});
+const decision = await approval;
+if (decision?.block !== true) throw new Error("remote block did not block the tool");
+
+socket.emit("message", {data: JSON.stringify({id: "x1", type: "shutdown"})});
+await new Promise((resolve) => setTimeout(resolve, 1));
 if (context.shutDown !== true) throw new Error("shutdown was not semantic");
 
-const approvalPi = fakePi();
-approvalExtension(approvalPi);
-let requested = null;
-const approvalContext = {ui: {select: async (title, options) => {
-  requested = {title, options};
-  return "Block";
-}}};
-const decision = await approvalPi.handlers.get("tool_call")({
-  toolName: "bash", input: {command: "uv run pytest -q"},
-}, approvalContext);
-if (!requested.title.includes("uv run pytest -q")) throw new Error("approval omitted command");
-if (requested.options.join("|") !== "Allow once|Allow for session|Block") {
-  throw new Error("approval options changed");
+const disconnectedPi = fakePi();
+const disconnectedContext = {
+  isIdle: () => false,
+  abort: () => {},
+  shutdown: () => {},
+  ui: {setStatus: () => {}},
+};
+bridgeExtension(disconnectedPi);
+disconnectedPi.handlers.get("session_start")({}, disconnectedContext);
+const disconnectedSocket = FakeSocket.latest;
+disconnectedSocket.emit("open");
+const disconnectedApproval = disconnectedPi.handlers.get("tool_call")({
+  toolCallId: "tool-approval-2", toolName: "edit", input: {path: "app.py"},
+}, disconnectedContext);
+await new Promise((resolve) => setTimeout(resolve, 1));
+disconnectedSocket.emit("close");
+const disconnectedDecision = await disconnectedApproval;
+if (disconnectedDecision?.block !== true || !disconnectedDecision.reason.includes("disconnected")) {
+  throw new Error("bridge loss did not fail the pending approval closed");
 }
-if (decision?.block !== true) throw new Error("blocked approval did not block the tool");
+disconnectedPi.handlers.get("session_shutdown")();
 
 console.log("Pi extension contract: passed");

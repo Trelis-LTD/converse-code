@@ -35,8 +35,8 @@ def test_pi_command_launches_visible_tui_with_semantic_extensions():
     assert argv[:3] == ["pi", "--provider", "openai-codex"]
     assert "--mode" not in argv
     extensions = [argv[index + 1] for index, value in enumerate(argv) if value == "-e"]
-    assert extensions[-2].endswith("pi_bridge.ts")
-    assert extensions[-1].endswith("pi_approval.ts")
+    assert len(extensions) == 1
+    assert extensions[0].endswith("pi_bridge.ts")
 
 
 def test_startup_checks_credentials_before_launching_pi():

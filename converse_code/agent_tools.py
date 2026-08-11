@@ -25,6 +25,10 @@ END_SESSION_DESCRIPTION = (
     "End this Converse session after a brief goodbye. Use only when the user explicitly asks to "
     "end or hang up the conversation."
 )
+APPROVAL_DECISION_DESCRIPTION = (
+    "Answer a pending Pi approval only after the user explicitly chooses. Use the exact "
+    "approval_id from the approval request. Never infer approval from the coding task itself."
+)
 
 
 def manifest() -> list[dict]:
@@ -46,6 +50,19 @@ def manifest() -> list[dict]:
             notify_on_complete=True, status_label="Coding task",
         ),
         tool("continue_task", CONTINUE_TASK_DESCRIPTION, request, ["request"], timeout=15),
+        tool(
+            "approval_decision",
+            APPROVAL_DECISION_DESCRIPTION,
+            {
+                "approval_id": {"type": "string", "description": "Pending approval ID."},
+                "decision": {
+                    "type": "string",
+                    "enum": ["allow_once", "allow_session", "block"],
+                },
+            },
+            ["approval_id", "decision"],
+            timeout=15,
+        ),
         tool("end_session", END_SESSION_DESCRIPTION, timeout=15),
     ]
 
@@ -75,6 +92,7 @@ class AgentToolRouter:
         self._ownership_confirmed = False
         self._prompt_command_id: str | None = None
         self._terminal_observed = False
+        self._pending_approvals: dict[str, dict] = {}
         self.on_end_session = None
 
     async def handle_tool_call(self, call: dict) -> None:
@@ -85,6 +103,8 @@ class AgentToolRouter:
             await self._coding_task(call_id, args)
         elif name == "continue_task":
             await self._continue_task(call_id, args)
+        elif name == "approval_decision":
+            await self._approval_decision(call_id, args)
         elif name == "end_session":
             await self._result(call_id, "Ending the Converse session.", verified=True)
             if self.on_end_session is not None:
@@ -138,6 +158,8 @@ class AgentToolRouter:
             self.phase = "running"
         elif kind == "tool_execution_start" and self.active_call_id:
             await self._tool_started(event)
+        elif kind == "approval_request" and self.active_call_id:
+            await self._approval_requested(event)
         elif kind == "message_end":
             message = event.get("message")
             text = self._message_text(message)
@@ -222,6 +244,63 @@ class AgentToolRouter:
             return
         await self._result(call_id, "Passed that to the active coding task.", verified=True)
 
+    async def _approval_requested(self, event: dict) -> None:
+        approval_id = str(event.get("approvalId") or "")
+        tool_name = str(event.get("toolName") or "tool")
+        summary = str(event.get("summary") or "").strip()
+        if not approval_id or approval_id in self._pending_approvals:
+            return
+        self._pending_approvals[approval_id] = {
+            "tool": tool_name,
+            "summary": summary,
+        }
+        await self.sender.send_tool_partial_result(
+            self.active_call_id,
+            {
+                "speak": (
+                    f"Pi wants to run {tool_name}: {summary}. Ask the user to allow once, "
+                    "allow for this session, or block it."
+                ),
+                "data": {
+                    "event": "approval_required",
+                    "approval_id": approval_id,
+                    "tool": tool_name,
+                    "summary": summary,
+                },
+                "handle": self.handle,
+            },
+            reply=True,
+        )
+
+    async def _approval_decision(self, call_id: str, args: dict) -> None:
+        approval_id = str(args.get("approval_id") or "")
+        decision = str(args.get("decision") or "")
+        pending = self._pending_approvals.get(approval_id)
+        if pending is None or decision not in {"allow_once", "allow_session", "block"}:
+            await self._result(
+                call_id,
+                "There is no matching pending approval; nothing was changed.",
+                outcome="failed",
+            )
+            return
+        try:
+            await self.pi.command(
+                "approval_response", approvalId=approval_id, decision=decision,
+            )
+        except PiTUIBridgeError as exc:
+            await self._result(call_id, f"Pi rejected the approval response: {exc}", outcome="failed")
+            return
+        if decision == "allow_session":
+            self._pending_approvals.clear()
+        else:
+            self._pending_approvals.pop(approval_id, None)
+        labels = {
+            "allow_once": "Allowed that action once.",
+            "allow_session": "Allowed protected actions for this Pi session.",
+            "block": "Blocked that action.",
+        }
+        await self._result(call_id, labels[decision], verified=True)
+
     async def _tool_started(self, event: dict) -> None:
         name = str(event.get("toolName") or "tool")
         args = event.get("args") if isinstance(event.get("args"), dict) else {}
@@ -234,7 +313,7 @@ class AgentToolRouter:
                 self.active_call_id,
                 {
                     "speak": f"Pi is preparing to update {path}.",
-                    "data": {"tool": name},
+                    "data": {"tool": name, "path": path},
                     "handle": self.handle,
                 },
                 reply=False,
@@ -246,15 +325,22 @@ class AgentToolRouter:
             self._routine_partial_count += 1
             await self.sender.send_tool_partial_result(
                 self.active_call_id,
-                {"speak": "The coding agent is preparing to run tests.", "data": {"tool": name},
-                 "handle": self.handle},
+                {
+                    "speak": "The coding agent is preparing to run tests.",
+                    "data": {"tool": name, "command": str(args.get("command") or "")[:500]},
+                    "handle": self.handle,
+                },
                 reply=True,
             )
             return
         if self._progress_count < self.MAX_PROGRESS:
             self._progress_count += 1
+            detail = ""
+            if name == "bash":
+                command = " ".join(str(args.get("command") or "").split())[:180]
+                detail = f": {command}" if command else ""
             await self.sender.send_tool_progress(
-                self.active_call_id, f"Pi is preparing to use {name}.",
+                self.active_call_id, f"Pi is preparing to use {name}{detail}.",
             )
 
     @staticmethod
@@ -295,4 +381,5 @@ class AgentToolRouter:
         self._ownership_confirmed = False
         self._prompt_command_id = None
         self._terminal_observed = False
+        self._pending_approvals.clear()
         self._settled.clear()

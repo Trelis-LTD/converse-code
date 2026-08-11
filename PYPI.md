@@ -8,9 +8,10 @@ npm install -g @earendil-works/pi-coding-agent
 uvx converse-code
 ```
 
-The browser is voice-only; Pi retains its real transcript, model state, tools, and approval menus.
-It demonstrates deferred execution, progress, partial results, `reply: true`, steering,
-cancellation, and terminal results through Pi's official extension APIs—without terminal scraping
-or keystroke injection.
+The browser is voice-only while mirroring live speech, replies, and coding activity; Pi retains
+the canonical coding transcript, model state, and tools. It demonstrates deferred execution,
+progress, partial results, `reply: true`, steering, ID-correlated voice approvals, cancellation,
+and terminal results through Pi's official extension APIs—without terminal scraping, menus, or
+keystroke injection.
 
 Documentation: https://github.com/Trelis-LTD/converse-code
