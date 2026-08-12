@@ -1,0 +1,61 @@
+# Go operating model
+
+This is the default change workflow for Converse Code. Its purpose is confidence per line of code, not maximum test count. Read this together with the [domain-first operating model](domain-first-operating-model.md).
+
+## Start from behavior
+
+State the user, protocol, security, or operational behavior being protected. Trace its real boundary-to-outcome path before choosing a test seam. A test must have concise answers to all of these questions:
+
+- What observable behavior does it protect?
+- What distinct failure would make it fail?
+- Why would a cheaper existing test not catch that failure?
+- Is this the strongest practical layer at which to observe the behavior?
+
+If those answers are unclear, delete or rewrite the test. Organize the inventory by behavior and failure mode, not by function, class, or source module.
+
+## Tests must justify their maintenance cost
+
+Delete or rewrite tests that:
+
+- read source, HTML, documentation, or project metadata and assert their literals;
+- restate constants, generated manifests, private dictionaries, or exact helper call sequences;
+- require edits whenever a harmless implementation detail changes;
+- duplicate a stronger integration or boundary test without adding a distinct failure signal;
+- manufacture impossible collaborators or mutate private state;
+- merely call a function without asserting an observable result.
+
+Exact values remain appropriate when they are the external contract itself, such as a tool manifest, wire encoding, security permission, or documented protocol limit. Assert them where the consumer observes them. Keep one canonical package version and derive runtime metadata from it instead of testing duplicated declarations for equality.
+
+Prefer the strongest test that is still deterministic and affordable. A lower-level test earns a place beside a broader one only when it protects a separate boundary invariant, identifies a materially different failure, or makes an otherwise impractical case deterministic. Do not keep every layer merely because each can assert the same happy path.
+
+## Exercise reachable states
+
+Drive stateful behavior through the events and commands available in production. Do not assign phases, active identifiers, pending decisions, or other private fields to arrange a scenario. Such tests admit states the application may never produce and force internal representations to remain stable.
+
+Test doubles should simulate an external boundary, not mirror the production implementation. Assert semantic ordering only where ordering is part of the protocol; avoid snapshots of complete callback sequences when a public outcome proves the behavior.
+
+Regression tests should reproduce the failure mechanism through inputs and event order, then assert the public outcome. When a stronger boundary test later subsumes that regression, remove the narrower duplicate.
+
+## Simplify after deleting tests
+
+Every test removal triggers a production search for the seam it kept alive. Remove test-only flags, constructor parameters, accessors, callbacks, branches, helpers, and data fields. Do not parameterize production timeouts, credentials, or modes solely to make tests faster or easier to arrange. Test at the appropriate boundary instead.
+
+Follow removals through every caller, serializer, trace, and UI consumer. Git history preserves deleted abstractions; production does not need compatibility with tests that no longer exist.
+
+## Parse, then operate
+
+Follow the domain-first operating model. Boundary code parses; domain code operates on valid values. Prefer immutable values and explicit state alternatives. If a bug arises from two fields disagreeing, replace the pair with one representation instead of adding another validator.
+
+## Verification ladder
+
+Run the narrowest behavioral tests while developing, then the complete deterministic suite and browser suite. Review the final diff for unnecessary seams, state contradictions, security regressions, and accidentally deleted behavior. A green suite is necessary but not sufficient: inspect what the remaining tests actually prove.
+
+For this repository, the durable behavioral inventory is:
+
+- HTTP, WebSocket, credential, origin, and token security boundaries;
+- Pi command acknowledgement, ownership attribution, fail-closed disconnects, cancellation, and approval decisions;
+- the public Converse background-tool manifest and lifecycle outcomes;
+- browser transcript provenance, interruption ordering, approval partial delivery, partial reply behavior, durable control replay, autoscroll, and user-visible activity state;
+- session trace structure and redaction.
+
+Wholesale instruction-copy checks, CLI help snapshots, package-version self-comparisons, private-state router setup, exact internal callback lists, and tests already subsumed by the Chromium lifecycle do not earn permanent maintenance cost. A small prompt contract can still be justified when it protects a critical routing constraint that cannot be exercised deterministically at a stronger boundary.

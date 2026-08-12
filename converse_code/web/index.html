@@ -25,39 +25,21 @@ footer{display:flex;align-items:center;justify-content:center;gap:1rem;padding:1
 const token=new URLSearchParams(location.search).get("t")||"";
 const log=document.querySelector("#log"),empty=document.querySelector("#empty");
 const voice=document.querySelector("#voice"),status=document.querySelector("#status"),notice=document.querySelector("#notice");
-let client=null,opening=null,mic=false,ready=false,flushing=false,seqs=new Map();
+let client=null,delivery=null,opening=null,mic=false,flushing=false,seqs=new Map();
 const userRows=new Map(),assistantRows=new Map(),renderedControls=new Set();
 const deferredIds=new Set();
-const activeReplies=new Set(),replyWaiters=[];
-const instructions=`You are the voice router for Converse Code's visible Pi terminal, not the coding agent. You have no direct knowledge of the user's computer, current directory, repository, files, code, git state, or commands. For every question or request that depends on that host state, your first action must be coding_task; never answer it yourself, ask permission to pass it, or offer to pass it later. Always preserve the user's complete technical wording in the tool request. Call coding_task immediately with no spoken preamble. After it is accepted, do not narrate your own intent; say at most that Pi is working and do not repeatedly promise updates. While a coding task is active, pass corrections, additions, and answers through continue_task. When told that an approval is waiting, ask the user for allow once, allow for this session, or block. After their explicit choice, call approval_decision immediately with the supplied approval_id and no spoken preamble. After approval succeeds, say only that Pi is continuing; do not answer the original request until coding_task returns. Never infer approval. Treat tool partials and results as the only evidence of Pi's progress or completion. Keep spoken acknowledgements brief.`;
+const activeReplies=new Set(),replyIdleWaiters=[];
+const instructions=`You are Converse Code, the voice interface to the visible Pi coding agent. The user is speaking to Pi through you, not to a separate assistant. Follow the declared tool descriptions as the authoritative contract and keep spoken replies brief.`;
 
 const labels={user:"You",assistant:"Converse Code",activity:"Activity"};
 function followBottom(){log.scrollTop=log.scrollHeight}
 function row(kind,text,label=labels[kind]){empty?.remove();const el=document.createElement("div");el.className=`entry ${kind}`;el.dataset.label=label;el.setAttribute("aria-label",label);el.textContent=text;log.append(el);followBottom();return el}
 function activity(text,label="Activity"){if(text)row("activity",text,label)}
 function waitForReplyIdle(){
-  if(!activeReplies.size)return Promise.resolve("idle");
-  return new Promise(resolve=>{
-    const waiter=()=>{clearTimeout(timer);resolve("idle")};
-    const timer=setTimeout(()=>{const index=replyWaiters.indexOf(waiter);if(index>=0)replyWaiters.splice(index,1);resolve("timeout")},10000);
-    replyWaiters.push(waiter);
-  });
+  if(!activeReplies.size)return Promise.resolve();
+  return new Promise(resolve=>replyIdleWaiters.push(resolve));
 }
-function releaseReplyWaiters(){if(activeReplies.size)return;for(const resolve of replyWaiters.splice(0))resolve()}
-async function deliverVoicePrompt(frame){
-  debugTrace("voice_prompt_waiting",{prompt_id:frame.prompt_id,active_replies:activeReplies.size});
-  for(let attempt=0;attempt<3;attempt++){
-    const waitOutcome=await waitForReplyIdle();
-    debugTrace("voice_prompt_wait_complete",{prompt_id:frame.prompt_id,attempt:attempt+1,outcome:waitOutcome,active_replies:activeReplies.size});
-    debugTrace("voice_prompt_injection_attempt",{prompt_id:frame.prompt_id,attempt:attempt+1});
-    const ack=await client.injectContext(frame.text,{role:"context",reply:true,messageId:`converse-approval-${frame.prompt_id}`});
-    debugTrace("voice_prompt_injection_result",{prompt_id:frame.prompt_id,attempt:attempt+1,accepted:ack?.accepted===true,retryable:ack?.retryable===true});
-    if(ack?.accepted===true)return true;
-    if(ack?.retryable!==true)return false;
-  }
-  return false;
-}
-
+function releaseReplyIdle(){if(!activeReplies.size)for(const resolve of replyIdleWaiters.splice(0))resolve()}
 function wireSend(frame){if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(frame))}
 function debugTrace(name,data={}){wireSend({type:"local",event:"debug_trace",name,data})}
 const ws=new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(token)}`);
@@ -75,7 +57,7 @@ async function openClient(){
     const instance=new sdk.ConverseClient({url:credential.ws_url,apiKey:credential.api_key,sessionId:credential.session_id,mode:{kind:"converse",voice:"classic",instructions,web_search:false,tools:credential.tools||[]}});
     instance.addEventListener("event",event=>handleEvent(event.detail||{}));
     await instance.unlockAudio();await instance.connect({noGreeting:true});
-    client=instance;ready=true;wireSend({type:"local",event:"bridge_ready"});await flush();return instance;
+    client=instance;delivery={client:instance};wireSend({type:"local",event:"bridge_ready"});await flush();return instance;
   })();
   try{return await opening}finally{opening=null}
 }
@@ -85,10 +67,14 @@ function handleEvent(event){
   if(event.type==="turn")debugTrace("voice_turn",{type:event.type,turn_id:turnId});
   if(event.type==="asr"){
     const current=userRows.get(turnId)||row("user","");current.textContent=event.text||"";
-    userRows.set(turnId,current);if(event.final)userRows.delete(turnId);followBottom();
-    if(event.final)debugTrace("user_transcript",{turn_id:turnId,text:event.text||""});
+    const final=event.final!==false;
+    userRows.set(turnId,current);if(final)userRows.delete(turnId);followBottom();
+    if(final)debugTrace("user_transcript",{turn_id:turnId,text:event.text||""});
   }
-  if(event.type==="turn"){activeReplies.add(turnId);if(!assistantRows.has(turnId))assistantRows.set(turnId,row("assistant",""))}
+  if(event.type==="turn"){
+    activeReplies.add(turnId);
+    if(!assistantRows.has(turnId))assistantRows.set(turnId,row("assistant",""));
+  }
   if(event.type==="text_delta"){
     const current=assistantRows.get(turnId)||row("assistant","");
     current.textContent+=event.delta||"";assistantRows.set(turnId,current);followBottom();
@@ -100,14 +86,21 @@ function handleEvent(event){
   }
   if(event.type==="done"||event.type==="interrupted"||event.type==="canceled"){
     debugTrace("voice_turn",{type:event.type,turn_id:turnId,text:assistantRows.get(turnId)?.textContent||""});
-    activeReplies.delete(turnId);releaseReplyWaiters();
+    activeReplies.delete(turnId);releaseReplyIdle();
+  }
+  if(event.type==="session_end"){
+    client?.stopMic();mic=false;delivery=null;activeReplies.clear();releaseReplyIdle();
+    status.textContent="ended";voice.textContent="Session ended";voice.disabled=true;
+    voice.setAttribute("aria-pressed","false");
+    debugTrace("session_end",{code:event.code,reason:event.reason||""});
+    wireSend({type:"local",event:"session_end",code:event.code,reason:event.reason||""});
   }
   if(event.type==="tool_call")activity(`Requested ${event.name||"tool"}`,"Voice tool");
   if(event.type==="tool_call")debugTrace("tool_call",{id:event.id,name:event.name,args:event.args});
   if(event.type==="tool_call")wireSend({type:"local",event:"tool_call",call:event});
   if(event.type==="tool_cancel"){debugTrace("tool_cancel",{id:event.id});wireSend({type:"local",event:"tool_cancel",call:event})}
-  if(event.type==="reconnecting")ready=false;
-  if(event.type==="reconnected"){ready=true;wireSend({type:"local",event:"bridge_ready"});flush()}
+  if(event.type==="reconnecting"){activeReplies.clear();releaseReplyIdle();delivery=null}
+  if(event.type==="reconnected"){delivery={client};wireSend({type:"local",event:"bridge_ready"});flush()}
   if(event.type==="error"){debugTrace("voice_error",{code:event.code,detail:event.detail});notice.textContent=event.detail||event.code||"Voice connection failed"}
 }
 
@@ -125,26 +118,31 @@ function renderControl(frame){
 }
 
 async function flush(){
-  if(flushing||!ready||!client)return;flushing=true;
+  if(flushing||!delivery)return;flushing=true;const target=delivery;
   try{
     for(const [seq,frame]of [...seqs]){
+      if(delivery!==target)break;
       let accepted=true;
-      if(frame.action==="tool_deferred")accepted=client.sendToolDeferred(frame.id,{handle:frame.handle,statusLabel:frame.status_label});
-      else if(frame.action==="tool_progress")accepted=client.sendToolProgress(frame.id,frame.note);
-      else if(frame.action==="tool_partial_result")accepted=client.sendToolPartialResult(frame.id,frame.content,{reply:!!frame.reply});
-      else if(frame.action==="tool_result")accepted=client.sendToolResult(frame.id,frame.content,{outcome:frame.outcome,verified:!!frame.verified});
-      else if(frame.action==="tool_cancel")accepted=client.sendToolCancel(frame.id);
-      else if(frame.action==="voice_prompt")accepted=await deliverVoicePrompt(frame);
+      if(frame.action==="tool_deferred")accepted=target.client.sendToolDeferred(frame.id,{handle:frame.handle,statusLabel:frame.status_label});
+      else if(frame.action==="tool_progress")accepted=target.client.sendToolProgress(frame.id,frame.note);
+      else if(frame.action==="tool_partial_result"){
+        if(frame.reply)await waitForReplyIdle();
+        if(delivery!==target)break;
+        accepted=target.client.sendToolPartialResult(frame.id,frame.content,{reply:!!frame.reply});
+      }
+      else if(frame.action==="tool_result")accepted=target.client.sendToolResult(frame.id,frame.content,{outcome:frame.outcome,verified:!!frame.verified});
+      else if(frame.action==="tool_cancel")accepted=target.client.sendToolCancel(frame.id);
       else{seqs.delete(seq);continue}
-      if(accepted!==true){ready=false;break}
+      if(delivery!==target)break;
+      if(accepted!==true){delivery=null;break}
       renderControl(frame);
       if(frame.action==="tool_deferred"){deferredIds.add(frame.id);status.textContent="working"}
       if(frame.action==="tool_result"&&deferredIds.delete(frame.id))status.textContent=deferredIds.size?"working":"idle";
       seqs.delete(seq);wireSend({type:"local",event:"bridge_ack",seq});
     }
-  }catch(error){ready=false;notice.textContent=`Voice control delivery failed: ${error.message||error}`}
+  }catch(error){if(delivery===target)delivery=null;notice.textContent=`Voice control delivery failed: ${error.message||error}`}
   finally{flushing=false}
-  if(ready&&seqs.size)queueMicrotask(flush);
+  if(delivery&&seqs.size)queueMicrotask(flush);
 }
 
 voice.onclick=async()=>{

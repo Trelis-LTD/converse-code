@@ -29,6 +29,7 @@ function fakePi() {
       this.userMessages.push({message, options});
       handlers.get("input")?.({text: message, source: "extension", streamingBehavior: options?.deliverAs});
     },
+    async setModel(model) { this.selectedModel = model; return true; },
   };
 }
 
@@ -36,7 +37,12 @@ const pi = fakePi();
 let idle = true;
 const statuses = [];
 const context = {
-  model: {id: "gpt-test"},
+  model: {provider: "openai-codex", id: "gpt-5.6-luna"},
+  scopedModels: [],
+  modelRegistry: {getAvailable: async () => [
+    {provider: "openai-codex", id: "gpt-5.6-luna"},
+    {provider: "openai-codex", id: "gpt-5.6-sol"},
+  ]},
   isIdle: () => idle,
   abort: () => { context.aborted = true; },
   shutdown: () => { context.shutDown = true; },
@@ -46,6 +52,10 @@ bridgeExtension(pi);
 pi.handlers.get("session_start")({}, context);
 const socket = FakeSocket.latest;
 socket.emit("open");
+socket.emit("message", {data: JSON.stringify({id: "bad", type: "prompt", message: 42})});
+if (pi.userMessages.length !== 0) throw new Error("malformed prompt entered the Pi domain");
+const malformed = socket.frames.find((frame) => frame.id === "bad");
+if (malformed?.success !== false) throw new Error("malformed prompt was not rejected");
 socket.emit("message", {data: JSON.stringify({id: "p1", type: "prompt", message: "Fix it"})});
 idle = false;
 socket.emit("message", {data: JSON.stringify({id: "s1", type: "steer", message: "Also test"})});
@@ -73,6 +83,38 @@ if (ownedInputs[0].commandId !== "p1" || ownedInputs[1].commandId !== "s1") {
   throw new Error("bridge input ownership was not command-correlated");
 }
 if (!statuses.includes("Converse voice: connected")) throw new Error("visible status was not set");
+
+idle = true;
+socket.emit("message", {data: JSON.stringify({
+  id: "m0", type: "model_state", request: "What model are we using?",
+})});
+await new Promise((resolve) => setTimeout(resolve, 10));
+const currentModelResponse = socket.frames.find((frame) => frame.id === "m0");
+if (currentModelResponse?.success !== true || currentModelResponse.model !== "gpt-5.6-luna"
+    || currentModelResponse.changed !== false || pi.selectedModel !== undefined) {
+  throw new Error("current model query was not authoritative and read-only");
+}
+
+socket.emit("message", {data: JSON.stringify({
+  id: "m1", type: "model_state", request: "Use GPT 5.6 Sol",
+})});
+await new Promise((resolve) => setTimeout(resolve, 10));
+const modelResponse = socket.frames.find((frame) => frame.id === "m1");
+if (modelResponse?.success !== true || modelResponse.model !== "gpt-5.6-sol") {
+  throw new Error(`model change did not return authoritative selected state: ${JSON.stringify(modelResponse)}`);
+}
+if (pi.selectedModel?.id !== "gpt-5.6-sol") throw new Error("Pi model was not changed semantically");
+
+pi.selectedModel = null;
+socket.emit("message", {data: JSON.stringify({
+  id: "m2", type: "model_state", request: "Use GPT 5.6 Luna or GPT 5.6 Sol",
+})});
+await new Promise((resolve) => setTimeout(resolve, 10));
+const ambiguousModelResponse = socket.frames.find((frame) => frame.id === "m2");
+if (ambiguousModelResponse?.success !== false || !ambiguousModelResponse.error?.includes("ambiguous")) {
+  throw new Error("ambiguous model request did not fail closed");
+}
+if (pi.selectedModel !== null) throw new Error("ambiguous model request changed Pi state");
 
 const approval = pi.handlers.get("tool_call")({
   toolCallId: "tool-approval-1", toolName: "bash", input: {command: "uv run pytest -q"},

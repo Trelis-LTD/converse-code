@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from dataclasses import asdict, dataclass
 
 import aiohttp
 import websockets
@@ -12,6 +13,16 @@ DEFAULT_API_URL = "https://converse.trelis.com"
 
 class CredentialError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class SessionCredential:
+    api_key: str
+    session_id: str
+    expires_in: int
+
+    def as_payload(self) -> dict:
+        return asdict(self)
 
 
 async def validate_key(api_key: str, url: str = DEFAULT_WS_URL) -> bool:
@@ -26,7 +37,7 @@ async def mint_session_credential(
     api_key: str,
     session_id: str,
     api_url: str = DEFAULT_API_URL,
-) -> dict:
+) -> SessionCredential:
     """Exchange the server-held key for one browser-safe scoped credential."""
     endpoint = f"{api_url.rstrip('/')}/api/v1/session-keys"
     async with (
@@ -56,8 +67,4 @@ async def mint_session_credential(
         or body["expires_in"] <= 0
     ):
         raise CredentialError("Converse credential endpoint returned an invalid response")
-    return {
-        "api_key": body["api_key"],
-        "session_id": body["session_id"],
-        "expires_in": body["expires_in"],
-    }
+    return SessionCredential(body["api_key"], body["session_id"], body["expires_in"])

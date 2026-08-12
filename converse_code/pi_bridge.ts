@@ -5,7 +5,6 @@ export default function (pi) {
   let socket = null;
   let context = null;
   let reconnectTimer = null;
-  let shuttingDown = false;
   let allowForSession = false;
   let nextApprovalId = 1;
   const expectedInputs = [];
@@ -19,8 +18,8 @@ export default function (pi) {
     if (context) context.ui.setStatus("converse-code", text);
   };
 
-  const respond = (id, success, error) => {
-    send({type: "response", id, success, ...(error ? {error: String(error)} : {})});
+  const respond = (id, success, error, data = {}) => {
+    send({type: "response", id, success, ...data, ...(error ? {error: String(error)} : {})});
   };
 
   const injectUserMessage = (id, message, options) => {
@@ -44,15 +43,18 @@ export default function (pi) {
   };
   const failPendingApprovals = (reason) => resolvePendingApprovals("block", reason);
 
-  const handleCommand = (frame) => {
-    if (!context || typeof frame?.id !== "string") return;
+  const handleCommand = async (frame) => {
+    if (!context || typeof frame?.id !== "string" || !frame.id) return;
     try {
-      const message = String(frame.message || "").trim();
       if (frame.type === "prompt") {
+        if (typeof frame.message !== "string") throw new Error("a prompt is required");
+        const message = frame.message.trim();
         if (!message) throw new Error("a prompt is required");
         if (!context.isIdle()) throw new Error("Pi is already working; steer it instead");
         injectUserMessage(frame.id, message);
       } else if (frame.type === "steer") {
+        if (typeof frame.message !== "string") throw new Error("a message is required");
+        const message = frame.message.trim();
         if (!message) throw new Error("a message is required");
         if (context.isIdle()) throw new Error("Pi is no longer working on an active turn");
         injectUserMessage(frame.id, message, {deliverAs: "steer"});
@@ -60,11 +62,14 @@ export default function (pi) {
         failPendingApprovals("the coding task was cancelled");
         context.abort();
       } else if (frame.type === "approval_response") {
-        const pending = pendingApprovals.get(String(frame.approvalId || ""));
-        if (!pending) throw new Error("approval is no longer pending");
+        if (typeof frame.approvalId !== "string" || !frame.approvalId) {
+          throw new Error("approval id is required");
+        }
         if (!["allow_once", "allow_session", "block"].includes(frame.decision)) {
           throw new Error("invalid approval decision");
         }
+        const pending = pendingApprovals.get(frame.approvalId);
+        if (!pending) throw new Error("approval is no longer pending");
         pendingApprovals.delete(frame.approvalId);
         clearTimeout(pending.timer);
         if (frame.decision === "allow_session") {
@@ -72,6 +77,49 @@ export default function (pi) {
           resolvePendingApprovals("allow_session");
         }
         pending.resolve({decision: frame.decision});
+      } else if (frame.type === "model_state") {
+        if (typeof frame.request !== "string" || !frame.request.trim()) {
+          throw new Error("a model is required");
+        }
+        if (!context.isIdle()) throw new Error("Pi must be idle before changing model");
+        const normalize = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+        const requested = normalize(frame.request);
+        const scoped = Array.isArray(context.scopedModels) ? context.scopedModels : [];
+        const available = scoped.length
+          ? scoped.map((entry) => entry.model || entry)
+          : await context.modelRegistry.getAvailable();
+        const valid = available.filter((model) => (
+          typeof model?.provider === "string" && model.provider
+          && typeof model?.id === "string" && model.id
+        ));
+        const matches = valid.filter((model) => {
+          const id = normalize(model.id);
+          const qualified = normalize(`${model.provider}/${model.id}`);
+          return requested === id || requested === qualified
+            || requested.includes(qualified) || requested.includes(id)
+            || id.endsWith(requested);
+        });
+        if (matches.length > 1) {
+          throw new Error("the requested model is ambiguous");
+        }
+        const current = context.model;
+        if (typeof current?.provider !== "string" || typeof current?.id !== "string") {
+          throw new Error("Pi did not report its current model");
+        }
+        const names = valid.map((model) => `${model.provider}/${model.id}`);
+        if (!names.length) names.push(`${current.provider}/${current.id}`);
+        if (matches.length === 0) {
+          respond(frame.id, true, null, {
+            provider: current.provider, model: current.id, changed: false, available: names,
+          });
+          return;
+        }
+        const selected = matches[0];
+        if (!await pi.setModel(selected)) throw new Error("the requested model is unavailable");
+        respond(frame.id, true, null, {
+          provider: selected.provider, model: selected.id, changed: true, available: names,
+        });
+        return;
       } else if (frame.type === "shutdown") {
         respond(frame.id, true);
         setTimeout(() => context.shutdown(), 0);
@@ -86,21 +134,24 @@ export default function (pi) {
   };
 
   const connect = () => {
-    if (!url || shuttingDown) return;
+    if (!url || !context) return;
     setStatus("Converse voice: connecting");
     socket = new WebSocket(url);
     socket.addEventListener("open", () => {
       setStatus("Converse voice: connected");
       send({type: "bridge_ready"});
     });
-    socket.addEventListener("message", (event) => {
-      try { handleCommand(JSON.parse(String(event.data))); }
+    socket.addEventListener("message", async (event) => {
+      try {
+        if (typeof event.data !== "string") throw new Error("bridge command must be JSON text");
+        await handleCommand(JSON.parse(event.data));
+      }
       catch (error) { send({type: "extension_error", error: String(error)}); }
     });
     socket.addEventListener("close", () => {
       failPendingApprovals("the Converse approval bridge disconnected");
       socket = null;
-      if (!shuttingDown) {
+      if (context) {
         setStatus("Converse voice: reconnecting");
         reconnectTimer = setTimeout(connect, 500);
       }
@@ -143,9 +194,9 @@ export default function (pi) {
       return {block: true, reason: "Blocked because Converse approval is disconnected."};
     }
     const input = event.input || {};
-    const target = event.toolName === "bash"
-      ? String(input.command || "")
-      : String(input.path || input.file_path || "project file");
+    const supplied = event.toolName === "bash" ? input.command : (input.path || input.file_path);
+    const fallback = event.toolName === "bash" ? "shell command" : "project file";
+    const target = typeof supplied === "string" && supplied ? supplied : fallback;
     const summary = target.replace(/\s+/g, " ").slice(0, 180);
     const approvalId = `approval-${nextApprovalId++}`;
     setStatus(`Waiting for approval: ${event.toolName}`);
@@ -171,11 +222,11 @@ export default function (pi) {
     expectedInputs.length = 0;
   });
   pi.on("session_shutdown", () => {
-    shuttingDown = true;
     expectedInputs.length = 0;
     failPendingApprovals("the Pi session ended");
     if (reconnectTimer) clearTimeout(reconnectTimer);
     send({type: "session_shutdown"});
+    context = null;
     socket?.close();
   });
 }

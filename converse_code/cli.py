@@ -15,7 +15,7 @@ from pathlib import Path
 from . import agent_tools, config, converse
 from .agent_tools import AgentToolRouter
 from .bridge import BrowserBridge
-from .localserver import LocalServer
+from .localserver import LocalServer, ServerHandlers
 from .pi_tui import PiTUIBridge, PiTUIBridgeError
 from .session_trace import SessionTrace
 
@@ -53,11 +53,6 @@ async def _login(url: str) -> int:
     return 1
 
 
-def _pi_argv(command: str) -> list[str]:
-    bridge = Path(__file__).with_name("pi_bridge.ts")
-    return [*shlex.split(command), "-e", str(bridge)]
-
-
 async def _run(args) -> int:
     trace = args.session_trace
     def trace_event(source: str, event: str, **data) -> None:
@@ -69,7 +64,72 @@ async def _run(args) -> int:
         print("Cannot start without an API key. Run: converse-code login", file=sys.stderr)
         return 1
 
-    server = LocalServer()
+    stopped = asyncio.Event()
+    tool_tasks: set[asyncio.Task] = set()
+
+    async def issue_credential(session_id: str) -> dict:
+        credential = await converse.mint_session_credential(
+            api_key, session_id, api_url=args.api_url,
+        )
+        return {
+            **credential.as_payload(),
+            "ws_url": args.broker_url,
+            "tools": agent_tools.manifest(),
+        }
+
+    async def spawn_tool(call: dict) -> None:
+        trace_event("host", "tool_call_received", call=call)
+        task = asyncio.create_task(router.handle_tool_call(call))
+        tool_tasks.add(task)
+        task.add_done_callback(tool_tasks.discard)
+
+    async def handle_tab_message(frame: dict) -> None:
+        await bridge.handle_browser_message(
+            frame, on_tool_call=spawn_tool, on_tool_cancel=router.handle_tool_cancel,
+            on_session_end=handle_native_session_end,
+        )
+
+    async def handle_pi_message(frame: dict) -> None:
+        trace_event("pi", "event_received", frame=frame)
+        event = await pi.handle_message(frame)
+        if event is not None:
+            await router.on_event(event)
+
+    async def pi_connected() -> None:
+        trace_event("pi_bridge", "connected")
+        event = pi.connect()
+        if event is not None:
+            await router.on_event(event)
+
+    async def pi_disconnected() -> None:
+        trace_event("pi_bridge", "disconnected")
+        await router.on_event(pi.disconnect())
+
+    async def bridge_disconnected() -> None:
+        await bridge.on_browser_disconnected()
+
+    server = LocalServer(ServerHandlers(
+        tab_message=handle_tab_message,
+        tab_closed=bridge_disconnected,
+        pi_message=handle_pi_message,
+        pi_connected=pi_connected,
+        pi_closed=pi_disconnected,
+        session_credential=issue_credential,
+    ))
+    bridge = BrowserBridge(server.send_json_to_tab, trace=trace_event)
+    async def send_to_pi(frame: dict) -> bool:
+        trace_event("pi_bridge", "command_sent", frame=frame)
+        sent = await server.send_json_to_pi(frame)
+        trace_event("pi_bridge", "command_delivery", id=frame.get("id"), sent=sent)
+        return sent
+
+    pi = PiTUIBridge(send_to_pi)
+    async def handle_native_session_end(event: dict) -> None:
+        trace_event("host", "native_session_end", **event)
+        stopped.set()
+
+    router = AgentToolRouter(pi, bridge, handle=_session_handle())
+
     try:
         await server.start(port=args.port)
     except OSError as exc:
@@ -89,59 +149,12 @@ async def _run(args) -> int:
         print(f"Could not reach Converse ({exc}). Pi was not started.", file=sys.stderr)
         return 1
 
-    stopped = asyncio.Event()
-    tool_tasks: set[asyncio.Task] = set()
-    bridge = BrowserBridge(server.send_json_to_tab, trace=trace_event)
-    async def send_to_pi(frame: dict) -> bool:
-        trace_event("pi_bridge", "command_sent", frame=frame)
-        sent = await server.send_json_to_pi(frame)
-        trace_event("pi_bridge", "command_delivery", id=frame.get("id"), sent=sent)
-        return sent
-
-    pi = PiTUIBridge(send_to_pi)
-    router = AgentToolRouter(pi, bridge, handle=_session_handle())
-    pi.on_event = router.on_event
-    async def end_session() -> None:
-        stopped.set()
-
-    router.on_end_session = end_session
-
-    async def issue_credential(session_id: str) -> dict:
-        credential = await converse.mint_session_credential(
-            api_key, session_id, api_url=args.api_url,
-        )
-        return {**credential, "ws_url": args.broker_url, "tools": agent_tools.manifest()}
-
-    server.on_session_credential = issue_credential
-    server.on_tab_json = bridge.handle_browser_message
-    server.on_tab_closed = bridge.on_browser_disconnected
-    async def handle_pi_message(frame: dict) -> None:
-        trace_event("pi", "event_received", frame=frame)
-        await pi.handle_message(frame)
-
-    async def pi_connected() -> None:
-        trace_event("pi_bridge", "connected")
-        await pi.set_connected(True)
-
-    async def pi_disconnected() -> None:
-        trace_event("pi_bridge", "disconnected")
-        await pi.set_connected(False)
-
-    server.on_pi_json = handle_pi_message
-    server.on_pi_connected = pi_connected
-    server.on_pi_closed = pi_disconnected
-    async def spawn_tool(call: dict) -> None:
-        trace_event("host", "tool_call_received", call=call)
-        task = asyncio.create_task(router.handle_tool_call(call))
-        tool_tasks.add(task)
-        task.add_done_callback(tool_tasks.discard)
-
-    bridge.on_tool_call = spawn_tool
-    bridge.on_tool_cancel = router.handle_tool_cancel
-
     environment = {**os.environ, "CONVERSE_CODE_PI_BRIDGE_URL": server.pi_url}
     try:
-        process = await asyncio.create_subprocess_exec(*_pi_argv(args.pi), env=environment)
+        pi_command = [
+            *shlex.split(args.pi), "-e", str(Path(__file__).with_name("pi_bridge.ts")),
+        ]
+        process = await asyncio.create_subprocess_exec(*pi_command, env=environment)
     except FileNotFoundError:
         await server.stop()
         print("Could not launch Pi. Install it first, then run converse-code again.", file=sys.stderr)

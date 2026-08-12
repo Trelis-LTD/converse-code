@@ -11,7 +11,7 @@ import pytest
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import async_playwright
 
-from converse_code.localserver import LocalServer
+from converse_code.localserver import LocalServer, ServerHandlers
 
 FAKE_SDK = Path(__file__).with_name("fake_converse.js")
 ARTIFACTS = Path("test-results/browser")
@@ -26,7 +26,6 @@ def pytest_runtest_makereport(item, call):
 async def browser_server():
     if os.environ.get("CONVERSE_CODE_BROWSER_E2E") != "1":
         pytest.skip("run real Chromium scenarios with: uv run scripts/browser_e2e.py")
-    server = LocalServer(token="browser-e2e-token")
     credentials = []
     tab_frames = []
 
@@ -42,8 +41,14 @@ async def browser_server():
     async def tab_frame(frame):
         tab_frames.append(frame)
 
-    server.on_session_credential = credential
-    server.on_tab_json = tab_frame
+    async def ignore(*_args):
+        pass
+
+    server = LocalServer(ServerHandlers(
+        tab_message=tab_frame, tab_closed=ignore,
+        pi_message=ignore, pi_connected=ignore, pi_closed=ignore,
+        session_credential=credential,
+    ))
     await server.start(port=0)
     try:
         yield server, credentials, tab_frames
