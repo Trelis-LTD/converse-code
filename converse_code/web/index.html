@@ -36,18 +36,22 @@ function followBottom(){log.scrollTop=log.scrollHeight}
 function row(kind,text,label=labels[kind]){empty?.remove();const el=document.createElement("div");el.className=`entry ${kind}`;el.dataset.label=label;el.setAttribute("aria-label",label);el.textContent=text;log.append(el);followBottom();return el}
 function activity(text,label="Activity"){if(text)row("activity",text,label)}
 function waitForReplyIdle(){
-  if(!activeReplies.size)return Promise.resolve();
+  if(!activeReplies.size)return Promise.resolve("idle");
   return new Promise(resolve=>{
-    const waiter=()=>{clearTimeout(timer);resolve()};
-    const timer=setTimeout(()=>{const index=replyWaiters.indexOf(waiter);if(index>=0)replyWaiters.splice(index,1);resolve()},10000);
+    const waiter=()=>{clearTimeout(timer);resolve("idle")};
+    const timer=setTimeout(()=>{const index=replyWaiters.indexOf(waiter);if(index>=0)replyWaiters.splice(index,1);resolve("timeout")},10000);
     replyWaiters.push(waiter);
   });
 }
 function releaseReplyWaiters(){if(activeReplies.size)return;for(const resolve of replyWaiters.splice(0))resolve()}
 async function deliverVoicePrompt(frame){
+  debugTrace("voice_prompt_waiting",{prompt_id:frame.prompt_id,active_replies:activeReplies.size});
   for(let attempt=0;attempt<3;attempt++){
-    await waitForReplyIdle();
+    const waitOutcome=await waitForReplyIdle();
+    debugTrace("voice_prompt_wait_complete",{prompt_id:frame.prompt_id,attempt:attempt+1,outcome:waitOutcome,active_replies:activeReplies.size});
+    debugTrace("voice_prompt_injection_attempt",{prompt_id:frame.prompt_id,attempt:attempt+1});
     const ack=await client.injectContext(frame.text,{role:"context",reply:true,messageId:`converse-approval-${frame.prompt_id}`});
+    debugTrace("voice_prompt_injection_result",{prompt_id:frame.prompt_id,attempt:attempt+1,accepted:ack?.accepted===true,retryable:ack?.retryable===true});
     if(ack?.accepted===true)return true;
     if(ack?.retryable!==true)return false;
   }
@@ -55,6 +59,7 @@ async function deliverVoicePrompt(frame){
 }
 
 function wireSend(frame){if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(frame))}
+function debugTrace(name,data={}){wireSend({type:"local",event:"debug_trace",name,data})}
 const ws=new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(token)}`);
 ws.onopen=()=>{status.textContent="idle"};
 ws.onmessage=event=>{const frame=JSON.parse(event.data);if(frame.event==="bridge_control"){seqs.set(frame.seq,frame);flush()}};
@@ -77,9 +82,11 @@ async function openClient(){
 
 function handleEvent(event){
   const turnId=event.turn_id||event.message_id||"current";
+  if(event.type==="turn")debugTrace("voice_turn",{type:event.type,turn_id:turnId});
   if(event.type==="asr"){
     const current=userRows.get(turnId)||row("user","");current.textContent=event.text||"";
     userRows.set(turnId,current);if(event.final)userRows.delete(turnId);followBottom();
+    if(event.final)debugTrace("user_transcript",{turn_id:turnId,text:event.text||""});
   }
   if(event.type==="turn"){activeReplies.add(turnId);if(!assistantRows.has(turnId))assistantRows.set(turnId,row("assistant",""))}
   if(event.type==="text_delta"){
@@ -89,14 +96,19 @@ function handleEvent(event){
   if(event.type==="utterance"){
     const current=assistantRows.get(turnId)||row("assistant","");
     current.textContent=event.text||event.utterance||"";assistantRows.set(turnId,current);followBottom();
+    debugTrace("assistant_utterance",{turn_id:turnId,text:event.text||event.utterance||""});
   }
-  if(event.type==="done"||event.type==="interrupted"||event.type==="canceled"){activeReplies.delete(turnId);releaseReplyWaiters()}
+  if(event.type==="done"||event.type==="interrupted"||event.type==="canceled"){
+    debugTrace("voice_turn",{type:event.type,turn_id:turnId,text:assistantRows.get(turnId)?.textContent||""});
+    activeReplies.delete(turnId);releaseReplyWaiters();
+  }
   if(event.type==="tool_call")activity(`Requested ${event.name||"tool"}`,"Voice tool");
+  if(event.type==="tool_call")debugTrace("tool_call",{id:event.id,name:event.name,args:event.args});
   if(event.type==="tool_call")wireSend({type:"local",event:"tool_call",call:event});
-  if(event.type==="tool_cancel")wireSend({type:"local",event:"tool_cancel",call:event});
+  if(event.type==="tool_cancel"){debugTrace("tool_cancel",{id:event.id});wireSend({type:"local",event:"tool_cancel",call:event})}
   if(event.type==="reconnecting")ready=false;
   if(event.type==="reconnected"){ready=true;wireSend({type:"local",event:"bridge_ready"});flush()}
-  if(event.type==="error")notice.textContent=event.detail||event.code||"Voice connection failed";
+  if(event.type==="error"){debugTrace("voice_error",{code:event.code,detail:event.detail});notice.textContent=event.detail||event.code||"Voice connection failed"}
 }
 
 function renderControl(frame){

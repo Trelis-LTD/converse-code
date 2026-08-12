@@ -92,6 +92,37 @@ async def test_voice_prompt_is_an_acknowledged_replayable_browser_control():
     assert prompt["text"] == "Ask for explicit approval"
 
 
+async def test_trace_records_control_delivery_ack_and_browser_prompt_milestones():
+    tab = FakeTab()
+    tab.connected = True
+    events = []
+    bridge = BrowserBridge(
+        tab.send,
+        trace=lambda source, event, **data: events.append((source, event, data)),
+    )
+    await bridge.handle_browser_message({"type": "local", "event": "bridge_ready"})
+    await bridge.send_voice_prompt("approval-7", "Ask for approval")
+    prompt = tab.frames[0]
+    await bridge.handle_browser_message({
+        "type": "local", "event": "debug_trace",
+        "name": "voice_prompt_injection_result",
+        "data": {"prompt_id": "approval-7", "accepted": True},
+    })
+    await bridge.handle_browser_message({
+        "type": "local", "event": "bridge_ack", "seq": prompt["seq"],
+    })
+
+    assert [(source, event) for source, event, _ in events] == [
+        ("browser_bridge", "ready"),
+        ("browser_bridge", "control_queued"),
+        ("browser_bridge", "control_sent"),
+        ("browser", "voice_prompt_injection_result"),
+        ("browser_bridge", "control_acknowledged"),
+    ]
+    assert events[1][2]["action"] == "voice_prompt"
+    assert events[3][2] == {"prompt_id": "approval-7", "accepted": True}
+
+
 async def test_browser_tool_calls_and_cancellation_reach_python_handlers():
     bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True))
     calls, cancels = [], []

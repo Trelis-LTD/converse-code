@@ -211,6 +211,61 @@ async def test_approval_prompt_retries_after_broker_reports_a_late_reply_race(
     assert await page.locator(".entry.assistant").get_by_text(
         "Would you like to allow that action once, for this session, or block it?", exact=True,
     ).count() == 1
+    browser_trace = [
+        frame for frame in frames
+        if frame.get("event") == "debug_trace"
+        and frame.get("data", {}).get("prompt_id") == "approval-race"
+    ]
+    assert [frame["name"] for frame in browser_trace] == [
+        "voice_prompt_waiting",
+        "voice_prompt_wait_complete",
+        "voice_prompt_injection_attempt",
+        "voice_prompt_injection_result",
+        "voice_prompt_wait_complete",
+        "voice_prompt_injection_attempt",
+        "voice_prompt_injection_result",
+    ]
+    assert browser_trace[1]["data"] == {
+        "prompt_id": "approval-race", "attempt": 1,
+        "outcome": "idle", "active_replies": 0,
+    }
+    assert browser_trace[3]["data"] == {
+        "prompt_id": "approval-race", "attempt": 1,
+        "accepted": False, "retryable": True,
+    }
+    assert browser_trace[6]["data"] == {
+        "prompt_id": "approval-race", "attempt": 2,
+        "accepted": True, "retryable": False,
+    }
+
+
+async def test_trace_captures_assistant_text_at_interruption(browser_page, browser_server):
+    page, _ = browser_page
+    _, _, frames = browser_server
+    await open_session(page)
+
+    await page.evaluate("""__fakeConverse.clients[0].emit({type:'turn',turn_id:'reply-1'});
+      __fakeConverse.clients[0].emit({
+        type:'text_delta',delta:'Would you like to allow that?',turn_id:'reply-1'
+      });
+      __fakeConverse.clients[0].emit({type:'interrupted',turn_id:'reply-1'});""")
+    await wait_for_frame(
+        frames,
+        lambda frame: frame.get("event") == "debug_trace"
+        and frame.get("name") == "voice_turn"
+        and frame.get("data", {}).get("type") == "interrupted",
+    )
+
+    terminal = next(
+        frame for frame in frames
+        if frame.get("event") == "debug_trace"
+        and frame.get("name") == "voice_turn"
+        and frame.get("data", {}).get("type") == "interrupted"
+    )
+    assert terminal["data"] == {
+        "type": "interrupted", "turn_id": "reply-1",
+        "text": "Would you like to allow that?",
+    }
 
 
 async def test_deferred_silent_partial_reply_partial_and_completion(browser_page, browser_server):
