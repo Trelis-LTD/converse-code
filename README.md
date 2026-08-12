@@ -52,6 +52,20 @@ converse-code --pi "pi --provider openai-codex --model gpt-5.6-codex"
 Run `converse-code login` to store a Converse API key. The persistent key remains in Python; the
 browser receives only a short-lived session credential.
 
+For a recording or a session you may need to diagnose later, append an opt-in local trace:
+
+```bash
+uvx converse-code --debug-log ./converse-session.jsonl
+```
+
+The JSONL trace timestamps browser voice turns, background-tool controls, approval injection
+attempts and acknowledgements, and Pi semantic events. It excludes audio and CLI arguments, uses
+owner-only permissions for new files, and applies targeted redaction to structured credential
+fields, Converse and common provider keys, bearer headers, inline secret assignments and flags,
+and local session tokens. It intentionally retains spoken transcripts, tool arguments, paths, and
+command summaries because those are needed to reconstruct a failure. Redaction cannot recognize
+every possible secret format, so treat the file as project-sensitive and share it deliberately.
+
 ## Reference architecture
 
 ```text

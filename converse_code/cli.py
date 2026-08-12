@@ -17,6 +17,7 @@ from .agent_tools import AgentToolRouter
 from .bridge import BrowserBridge
 from .localserver import LocalServer
 from .pi_tui import PiTUIBridge, PiTUIBridgeError
+from .session_trace import SessionTrace
 
 DEFAULT_PORT = 8737
 DEFAULT_PI_CMD = "pi --provider openai-codex"
@@ -58,6 +59,11 @@ def _pi_argv(command: str) -> list[str]:
 
 
 async def _run(args) -> int:
+    trace = args.session_trace
+    def trace_event(source: str, event: str, **data) -> None:
+        if trace is not None:
+            trace.record(source, event, **data)
+
     api_key = _ensure_api_key()
     if not api_key:
         print("Cannot start without an API key. Run: converse-code login", file=sys.stderr)
@@ -85,8 +91,14 @@ async def _run(args) -> int:
 
     stopped = asyncio.Event()
     tool_tasks: set[asyncio.Task] = set()
-    bridge = BrowserBridge(server.send_json_to_tab)
-    pi = PiTUIBridge(server.send_json_to_pi)
+    bridge = BrowserBridge(server.send_json_to_tab, trace=trace_event)
+    async def send_to_pi(frame: dict) -> bool:
+        trace_event("pi_bridge", "command_sent", frame=frame)
+        sent = await server.send_json_to_pi(frame)
+        trace_event("pi_bridge", "command_delivery", id=frame.get("id"), sent=sent)
+        return sent
+
+    pi = PiTUIBridge(send_to_pi)
     router = AgentToolRouter(pi, bridge, handle=_session_handle())
     pi.on_event = router.on_event
     async def end_session() -> None:
@@ -103,10 +115,23 @@ async def _run(args) -> int:
     server.on_session_credential = issue_credential
     server.on_tab_json = bridge.handle_browser_message
     server.on_tab_closed = bridge.on_browser_disconnected
-    server.on_pi_json = pi.handle_message
-    server.on_pi_connected = lambda: pi.set_connected(True)
-    server.on_pi_closed = lambda: pi.set_connected(False)
+    async def handle_pi_message(frame: dict) -> None:
+        trace_event("pi", "event_received", frame=frame)
+        await pi.handle_message(frame)
+
+    async def pi_connected() -> None:
+        trace_event("pi_bridge", "connected")
+        await pi.set_connected(True)
+
+    async def pi_disconnected() -> None:
+        trace_event("pi_bridge", "disconnected")
+        await pi.set_connected(False)
+
+    server.on_pi_json = handle_pi_message
+    server.on_pi_connected = pi_connected
+    server.on_pi_closed = pi_disconnected
     async def spawn_tool(call: dict) -> None:
+        trace_event("host", "tool_call_received", call=call)
         task = asyncio.create_task(router.handle_tool_call(call))
         tool_tasks.add(task)
         task.add_done_callback(tool_tasks.discard)
@@ -123,6 +148,8 @@ async def _run(args) -> int:
         return 1
 
     print(f"Converse voice control: {server.url}")
+    if trace is not None:
+        print(f"Debug trace: {trace.path}")
     if not args.no_browser:
         webbrowser.open(server.url)
     process_wait = asyncio.create_task(process.wait())
@@ -171,13 +198,30 @@ def main() -> None:
         "--api-url", default=os.environ.get("CONVERSE_API_URL", converse.DEFAULT_API_URL),
     )
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument(
+        "--debug-log", metavar="PATH",
+        help="append a sensitive, locally redacted JSONL session trace for debugging",
+    )
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("login", help="store and validate a Converse API key")
     args = parser.parse_args()
+    trace = SessionTrace(args.debug_log) if args.debug_log else None
+    args.session_trace = trace
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
-    if args.cmd == "login":
-        raise SystemExit(asyncio.run(_login(args.broker_url)))
-    raise SystemExit(asyncio.run(_run(args)))
+    exit_code = 1
+    try:
+        if trace is not None:
+            trace.record("host", "session_start", cwd=str(Path.cwd()))
+        if args.cmd == "login":
+            exit_code = asyncio.run(_login(args.broker_url))
+        else:
+            exit_code = asyncio.run(_run(args))
+        if trace is not None:
+            trace.record("host", "session_end", exit_code=exit_code)
+    finally:
+        if trace is not None:
+            trace.close()
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

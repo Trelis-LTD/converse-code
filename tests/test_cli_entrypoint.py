@@ -1,6 +1,7 @@
 """Exercise the installed console entry point and visible Pi launch contract."""
 
 import os
+import json
 import socket
 import subprocess
 import sys
@@ -28,6 +29,7 @@ def test_help_works():
     assert "voice control for the visible Pi terminal" in proc.stdout
     assert "--pi" in proc.stdout
     assert "--api-url" in proc.stdout
+    assert "--debug-log" in proc.stdout
 
 
 def test_pi_command_launches_visible_tui_with_semantic_extensions():
@@ -59,3 +61,17 @@ def test_port_in_use_reports_cleanly():
         assert "Traceback" not in proc.stderr
     finally:
         sock.close()
+
+
+def test_debug_log_retains_failed_startup_session_evidence(tmp_path):
+    path = tmp_path / "trace.jsonl"
+    proc = run([
+        "--debug-log", str(path), "--no-browser", "--port", "0",
+        "--broker-url", "ws://127.0.0.1:1",
+    ])
+
+    assert proc.returncode == 1
+    entries = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [entry["event"] for entry in entries] == ["session_start", "session_end"]
+    assert "argv" not in entries[0]["data"]
+    assert entries[-1]["data"]["exit_code"] == 1

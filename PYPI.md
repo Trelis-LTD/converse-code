@@ -15,3 +15,8 @@ and terminal results through Pi's official extension APIs—without terminal scr
 keystroke injection.
 
 Documentation: https://github.com/Trelis-LTD/converse-code
+
+Record an opt-in, locally redacted diagnostic trace with
+`converse-code --debug-log ./converse-session.jsonl`. The trace retains transcripts, paths, tool
+arguments, and command summaries. Redaction cannot recognize every possible secret format, so the
+file should be treated as project-sensitive.
