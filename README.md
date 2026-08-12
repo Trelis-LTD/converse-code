@@ -58,8 +58,8 @@ For a recording or a session you may need to diagnose later, append an opt-in lo
 uvx converse-code --debug-log ./converse-session.jsonl
 ```
 
-The JSONL trace timestamps browser voice turns, background-tool controls, approval injection
-attempts and acknowledgements, and Pi semantic events. It excludes audio and CLI arguments, uses
+The JSONL trace timestamps browser voice turns, background-tool controls and acknowledgements,
+and Pi semantic events. It excludes audio and CLI arguments, uses
 owner-only permissions for new files, and applies targeted redaction to structured credential
 fields, Converse and common provider keys, bearer headers, inline secret assignments and flags,
 and local session tokens. It intentionally retains spoken transcripts, tool arguments, paths, and
@@ -81,8 +81,13 @@ AgentToolRouter ── local semantic bridge ── visible Pi TUI ── Codex
 ```
 
 The model-facing surface is intentionally limited to `coding_task`, `continue_task`,
-`approval_decision`, and `end_session`. See [docs/DESIGN.md](docs/DESIGN.md) for the event mapping
-and evidence rules.
+`approval_decision`, and `pi_model`. Model reads and changes use Pi's semantic API
+and return its current/available state; they do not navigate the terminal UI. See
+[docs/DESIGN.md](docs/DESIGN.md) for the event mapping and evidence rules.
+
+Session ending follows Converse's native lifecycle. An intentional server close becomes the
+Browser SDK's structured `session_end` event, which gracefully shuts down Pi. Converse Code does
+not classify farewell phrases or expose a competing end tool.
 
 ## Test
 

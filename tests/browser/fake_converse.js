@@ -1,7 +1,6 @@
 const state = globalThis.__fakeConverse = Object.assign({
   clients: [],
   transportLive: true,
-  retryInjectionOnce: false,
 }, globalThis.__fakeConverse || {});
 
 export function createSessionId() {
@@ -14,7 +13,6 @@ export class ConverseClient extends EventTarget {
     this.options = options;
     this.sessionId = options.sessionId;
     this.bridgeCalls = [];
-    this.injections = [];
     this.stream = null;
     state.clients.push(this);
   }
@@ -22,24 +20,6 @@ export class ConverseClient extends EventTarget {
   async unlockAudio() {}
 
   async connect() {}
-
-  async injectContext(text, options) {
-    this.injections.push({text, options});
-    if (state.retryInjectionOnce) {
-      state.retryInjectionOnce = false;
-      const turnId = `raced-${options.messageId}`;
-      this.emit({type: "turn", turn_id: turnId});
-      setTimeout(() => this.emit({type: "done", turn_id: turnId}), 10);
-      return {accepted: false, retryable: true, message_id: options.messageId};
-    }
-    if (options.reply) setTimeout(() => {
-      const turnId = `injection-${options.messageId}`;
-      this.emit({type: "turn", turn_id: turnId});
-      this.emit({type: "text_delta", delta: "Would you like to allow that action once, for this session, or block it?", turn_id: turnId});
-      this.emit({type: "done", turn_id: turnId});
-    }, 0);
-    return {accepted: true, message_id: options.messageId};
-  }
 
   async startMic() {
     this.stream = await navigator.mediaDevices.getUserMedia({audio: true});

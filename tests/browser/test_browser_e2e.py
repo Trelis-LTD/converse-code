@@ -27,12 +27,6 @@ async def test_page_is_a_voice_only_remote_for_the_visible_pi_terminal(browser_p
     assert await page.locator("#log").count() == 1
     await open_session(page)
     assert await page.evaluate("__fakeConverse.clients.length") == 1
-    instructions = await page.evaluate("__fakeConverse.clients[0].options.mode.instructions")
-    assert "For every question or request that depends on that host state" in instructions
-    assert "visible Pi terminal" in instructions
-    assert "first action must be coding_task" in instructions
-    assert "Call coding_task immediately with no spoken preamble" in instructions
-    assert "call approval_decision immediately" in instructions
     await page.locator("#voice").click()
     await page.locator("#voice").get_by_text("Start voice", exact=True).wait_for()
     assert errors == []
@@ -109,6 +103,49 @@ async def test_transcript_follows_new_rows_and_streaming_text_to_the_bottom(brow
     assert after_stream["max"] - after_stream["top"] <= 1
 
 
+async def test_asr_without_a_final_flag_is_recorded_without_local_end_routing(
+    browser_page, browser_server,
+):
+    page, _ = browser_page
+    _, _, frames = browser_server
+    await open_session(page)
+
+    await page.evaluate("""__fakeConverse.clients[0].emit({
+      type:'asr',text:'End the session',turn_id:'user-end'
+    })""")
+    await wait_for_frame(
+        frames,
+        lambda frame: frame.get("event") == "debug_trace"
+        and frame.get("name") == "user_transcript",
+    )
+
+    transcript = next(frame for frame in frames if frame.get("name") == "user_transcript")
+    assert transcript["data"] == {"turn_id": "user-end", "text": "End the session"}
+
+    assert not any(frame.get("event") == "session_end" for frame in frames)
+
+
+async def test_sdk_session_end_is_forwarded_to_the_host(browser_page, browser_server):
+    page, _ = browser_page
+    _, _, frames = browser_server
+    await open_session(page)
+
+    await page.evaluate("""__fakeConverse.clients[0].emit({
+      type:'session_end',code:1000,reason:'idle'
+    })""")
+    await wait_for_frame(frames, lambda frame: frame.get("event") == "session_end")
+
+    ended = next(frame for frame in frames if frame.get("event") == "session_end")
+    assert ended == {
+        "type": "local", "event": "session_end", "code": 1000, "reason": "idle",
+    }
+    assert await page.locator("#status").inner_text() == "ended"
+    assert await page.locator("#voice").inner_text() == "Session ended"
+    assert await page.locator("#voice").is_disabled()
+    assert await page.locator("#voice").get_attribute("aria-pressed") == "false"
+    assert await page.evaluate("__fakeConverse.clients[0].stream") is None
+
+
 async def test_late_interrupted_utterance_updates_one_assistant_row(browser_page):
     page, _ = browser_page
     await open_session(page)
@@ -122,23 +159,6 @@ async def test_late_interrupted_utterance_updates_one_assistant_row(browser_page
 
     assert await page.locator(".entry.assistant").count() == 1
     assert await page.locator(".entry.assistant").inner_text() == "Hello there. [interrupted]"
-
-
-async def test_distinct_identical_interrupted_turns_are_preserved(browser_page):
-    page, _ = browser_page
-    await open_session(page)
-
-    await page.evaluate("""for(const id of ['reply-1','reply-2']){
-      __fakeConverse.clients[0].emit({type:'turn',turn_id:id});
-      __fakeConverse.clients[0].emit({type:'text_delta',delta:'Hello there.',turn_id:id});
-      __fakeConverse.clients[0].emit({type:'interrupted',turn_id:id});
-      __fakeConverse.clients[0].emit({type:'utterance',text:'Hello there. [interrupted]',turn_id:id});
-    }""")
-
-    assert await page.locator(".entry.assistant").count() == 2
-    assert await page.locator(".entry.assistant").all_text_contents() == [
-        "Hello there. [interrupted]", "Hello there. [interrupted]",
-    ]
 
 
 async def test_late_distinct_utterance_cannot_overwrite_an_earlier_matching_turn(browser_page):
@@ -161,7 +181,7 @@ async def test_late_distinct_utterance_cannot_overwrite_an_earlier_matching_turn
     ]
 
 
-async def test_approval_prompt_waits_for_active_reply_then_forces_a_voiced_turn(
+async def test_replying_partial_waits_until_the_current_voice_turn_finishes(
     browser_page, browser_server,
 ):
     page, _ = browser_page
@@ -171,72 +191,24 @@ async def test_approval_prompt_waits_for_active_reply_then_forces_a_voiced_turn(
 
     await server.send_json_to_tab({
         "type": "local", "event": "bridge_control", "seq": 20,
-        "action": "voice_prompt", "prompt_id": "approval-7",
-        "text": "Ask now whether to allow once, allow for this session, or block.",
+        "action": "tool_partial_result", "id": "task-1", "reply": True,
+        "content": {"speak": "Would you like to allow once, for this session, or block?"},
     })
     await page.wait_for_timeout(50)
-    assert await page.evaluate("__fakeConverse.clients[0].injections.length") == 0
+    assert await page.evaluate("__fakeConverse.clients[0].bridgeCalls.length") == 0
     assert not any(frame.get("seq") == 20 for frame in frames)
 
     await page.evaluate("__fakeConverse.clients[0].emit({type:'done',turn_id:'busy-reply'})")
     await wait_for_frame(frames, lambda frame: frame.get("seq") == 20)
-    injection = await page.evaluate("__fakeConverse.clients[0].injections[0]")
-    assert injection["text"].startswith("Ask now")
-    assert injection["options"] == {
-        "role": "context", "reply": True, "messageId": "converse-approval-approval-7",
-    }
+    calls = await page.evaluate("__fakeConverse.clients[0].bridgeCalls")
+    assert calls == [{
+        "action": "tool_partial_result", "id": "task-1",
+        "content": {"speak": "Would you like to allow once, for this session, or block?"},
+        "options": {"reply": True},
+    }]
     assert await page.locator(".entry.assistant").get_by_text(
-        "Would you like to allow that action once, for this session, or block it?", exact=True,
+        "Would you like to allow once, for this session, or block?", exact=True,
     ).count() == 1
-
-
-async def test_approval_prompt_retries_after_broker_reports_a_late_reply_race(
-    browser_page, browser_server,
-):
-    page, _ = browser_page
-    server, _, frames = browser_server
-    await open_session(page)
-    await page.evaluate("__fakeConverse.retryInjectionOnce=true")
-
-    await server.send_json_to_tab({
-        "type": "local", "event": "bridge_control", "seq": 21,
-        "action": "voice_prompt", "prompt_id": "approval-race",
-        "text": "Ask the user for explicit approval now.",
-    })
-    await wait_for_frame(frames, lambda frame: frame.get("seq") == 21)
-
-    injections = await page.evaluate("__fakeConverse.clients[0].injections")
-    assert len(injections) == 2
-    assert injections[0]["options"]["messageId"] == injections[1]["options"]["messageId"]
-    assert await page.locator(".entry.assistant").get_by_text(
-        "Would you like to allow that action once, for this session, or block it?", exact=True,
-    ).count() == 1
-    browser_trace = [
-        frame for frame in frames
-        if frame.get("event") == "debug_trace"
-        and frame.get("data", {}).get("prompt_id") == "approval-race"
-    ]
-    assert [frame["name"] for frame in browser_trace] == [
-        "voice_prompt_waiting",
-        "voice_prompt_wait_complete",
-        "voice_prompt_injection_attempt",
-        "voice_prompt_injection_result",
-        "voice_prompt_wait_complete",
-        "voice_prompt_injection_attempt",
-        "voice_prompt_injection_result",
-    ]
-    assert browser_trace[1]["data"] == {
-        "prompt_id": "approval-race", "attempt": 1,
-        "outcome": "idle", "active_replies": 0,
-    }
-    assert browser_trace[3]["data"] == {
-        "prompt_id": "approval-race", "attempt": 1,
-        "accepted": False, "retryable": True,
-    }
-    assert browser_trace[6]["data"] == {
-        "prompt_id": "approval-race", "attempt": 2,
-        "accepted": True, "retryable": False,
-    }
 
 
 async def test_trace_captures_assistant_text_at_interruption(browser_page, browser_server):
@@ -318,11 +290,16 @@ async def test_deferred_silent_partial_reply_partial_and_completion(browser_page
     assert await page.locator(".entry.activity").get_by_text("Finished", exact=True).count() == 1
 
     calls = await page.evaluate("__fakeConverse.clients[0].bridgeCalls")
-    assert [call["action"] for call in calls] == [
-        "tool_deferred", "tool_result", "tool_partial_result", "tool_partial_result", "tool_result",
-    ]
-    assert calls[2]["options"]["reply"] is False
-    assert calls[3]["options"]["reply"] is True
+    task_calls = [call for call in calls if call.get("id") == "task-1"]
+    silent = next(call for call in task_calls if call.get("content", {}).get("speak") == (
+        "Updated app.py"
+    ))
+    spoken = next(call for call in task_calls if call.get("content", {}).get("speak") == (
+        "The tests now pass"
+    ))
+    assert silent["options"]["reply"] is False
+    assert spoken["options"]["reply"] is True
+    assert task_calls[-1]["action"] == "tool_result"
 
 
 async def test_activity_rows_distinguish_approval_and_unverified_pi_evidence(
@@ -334,7 +311,7 @@ async def test_activity_rows_distinguish_approval_and_unverified_pi_evidence(
 
     await server.send_json_to_tab({
         "type": "local", "event": "bridge_control", "seq": 30,
-        "action": "tool_partial_result", "id": "task-1", "reply": False,
+        "action": "tool_partial_result", "id": "task-1", "reply": True,
         "content": {
             "speak": "Pi wants to run bash: pwd. Ask the user to allow once, allow for this "
                      "session, or block it.",

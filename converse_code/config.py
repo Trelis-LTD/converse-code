@@ -4,8 +4,9 @@ import json
 import os
 from pathlib import Path
 
-CONFIG_DIR = Path(os.environ.get("CONVERSE_CODE_CONFIG_DIR", "~/.config/converse-code")).expanduser()
-CONFIG_PATH = CONFIG_DIR / "config.json"
+CONFIG_PATH = Path(
+    os.environ.get("CONVERSE_CODE_CONFIG_DIR", "~/.config/converse-code")
+).expanduser() / "config.json"
 
 
 def get_api_key() -> str | None:
@@ -22,17 +23,10 @@ def get_api_key() -> str | None:
 
 
 def save_api_key(key: str) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    data = {}
-    try:
-        loaded = json.loads(CONFIG_PATH.read_text())
-        data = loaded if isinstance(loaded, dict) else {}
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
-    data["api_key"] = key
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Create with 0600 up front — writing first and chmod-ing after would leave
     # the key world-readable for a moment on a shared machine.
     fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
-        f.write(json.dumps(data, indent=2) + "\n")
+        f.write(json.dumps({"api_key": key}, indent=2) + "\n")
     CONFIG_PATH.chmod(0o600)

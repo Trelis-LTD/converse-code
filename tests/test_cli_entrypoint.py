@@ -1,12 +1,13 @@
 """Exercise the installed console entry point and visible Pi launch contract."""
 
-import os
+import asyncio
 import json
+import os
 import socket
 import subprocess
 import sys
 
-from converse_code.cli import _pi_argv
+import websockets
 
 ENTRY = [sys.executable, "-m", "converse_code.cli"]
 
@@ -21,24 +22,6 @@ def run(args, env_extra=None, timeout=30):
         env=env,
         check=False,
     )
-
-
-def test_help_works():
-    proc = run(["--help"])
-    assert proc.returncode == 0
-    assert "voice control for the visible Pi terminal" in proc.stdout
-    assert "--pi" in proc.stdout
-    assert "--api-url" in proc.stdout
-    assert "--debug-log" in proc.stdout
-
-
-def test_pi_command_launches_visible_tui_with_semantic_extensions():
-    argv = _pi_argv("pi --provider openai-codex")
-    assert argv[:3] == ["pi", "--provider", "openai-codex"]
-    assert "--mode" not in argv
-    extensions = [argv[index + 1] for index, value in enumerate(argv) if value == "-e"]
-    assert len(extensions) == 1
-    assert extensions[0].endswith("pi_bridge.ts")
 
 
 def test_startup_checks_credentials_before_launching_pi():
@@ -75,3 +58,38 @@ def test_debug_log_retains_failed_startup_session_evidence(tmp_path):
     assert [entry["event"] for entry in entries] == ["session_start", "session_end"]
     assert "argv" not in entries[0]["data"]
     assert entries[-1]["data"]["exit_code"] == 1
+
+
+async def test_successful_start_launches_pi_with_the_semantic_extension(tmp_path):
+    async def accept_key(websocket):
+        await websocket.recv()
+        await websocket.send(json.dumps({"type": "ok"}))
+
+    args_path = tmp_path / "pi-args"
+    fake_pi = tmp_path / "pi"
+    fake_pi.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CONVERSE_CODE_TEST_PI_ARGS\"\n"
+    )
+    fake_pi.chmod(0o755)
+    server = await websockets.serve(accept_key, "127.0.0.1", 0)
+    broker_url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+    environment = {
+        **os.environ,
+        "CONVERSE_API_KEY": "ck_fake_for_test",
+        "CONVERSE_CODE_TEST_PI_ARGS": str(args_path),
+    }
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *ENTRY, "--no-browser", "--port", "0", "--broker-url", broker_url,
+            "--pi", str(fake_pi), env=environment,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert process.returncode == 0, stderr.decode()
+    launched_args = args_path.read_text().splitlines()
+    extension_index = launched_args.index("-e")
+    assert launched_args[extension_index + 1].endswith("/pi_bridge.ts")

@@ -16,7 +16,6 @@ def test_non_object_or_non_string_config_never_becomes_an_api_key(monkeypatch, t
 def test_saving_over_non_object_config_produces_a_valid_private_config(monkeypatch, tmp_path):
     path = tmp_path / "config.json"
     path.write_text("[]")
-    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(config, "CONFIG_PATH", path)
 
     config.save_api_key("ck_valid")

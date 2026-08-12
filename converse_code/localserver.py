@@ -18,6 +18,7 @@ import logging
 import re
 import secrets
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 from urllib.parse import urlparse
@@ -27,38 +28,65 @@ from aiohttp import WSMsgType, web
 log = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).parent / "web"
 
+JsonHandler = Callable[[dict], Awaitable[None]]
+ClosedHandler = Callable[[], Awaitable[None]]
+CredentialHandler = Callable[[str], Awaitable[dict]]
+
+
+@dataclass(frozen=True)
+class ServerHandlers:
+    tab_message: JsonHandler
+    tab_closed: ClosedHandler
+    pi_message: JsonHandler
+    pi_connected: ClosedHandler
+    pi_closed: ClosedHandler
+    session_credential: CredentialHandler
+
+
+@dataclass(frozen=True)
+class StoppedServer:
+    pass
+
+
+@dataclass(frozen=True)
+class RunningServer:
+    runner: web.AppRunner
+    port: int
+
 
 class LocalServer:
     """One browser tab at a time (last authenticated connection wins)."""
 
-    def __init__(self, token: str | None = None) -> None:
-        self.token = token or secrets.token_urlsafe(24)
-        self.on_tab_json: Callable[[dict], Awaitable[None]] | None = None
-        self.on_tab_closed: Callable[[], Awaitable[None]] | None = None
-        self.on_pi_json: Callable[[dict], Awaitable[None]] | None = None
-        self.on_pi_connected: Callable[[], Awaitable[None]] | None = None
-        self.on_pi_closed: Callable[[], Awaitable[None]] | None = None
-        self.on_session_credential: Callable[[str], Awaitable[dict]] | None = None
+    def __init__(self, handlers: ServerHandlers) -> None:
+        self.token = secrets.token_urlsafe(24)
+        self.handlers = handlers
         self._tab: web.WebSocketResponse | None = None
         self._pi: web.WebSocketResponse | None = None
-        self._runner: web.AppRunner | None = None
         self._host = "127.0.0.1"
-        self.port: int | None = None
+        self._runtime: StoppedServer | RunningServer = StoppedServer()
 
-    async def start(self, port: int = 0, host: str = "127.0.0.1") -> int:
-        self._host = host
+    async def start(self, port: int = 0) -> int:
         app = web.Application()
         app.router.add_get("/", self._index)
         app.router.add_get("/ws", self._ws)
         app.router.add_get("/pi", self._pi_ws)
         app.router.add_post("/session-credential", self._session_credential)
         app.router.add_get("/vendor/converse/{name}", self._vendor)
-        self._runner = web.AppRunner(app)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, host, port)
+        if isinstance(self._runtime, RunningServer):
+            raise RuntimeError("local server is already running")
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, self._host, port)
         await site.start()
-        self.port = self._runner.addresses[0][1]
-        return self.port
+        runtime = RunningServer(runner, runner.addresses[0][1])
+        self._runtime = runtime
+        return runtime.port
+
+    @property
+    def port(self) -> int:
+        if isinstance(self._runtime, StoppedServer):
+            raise RuntimeError("local server is not running")
+        return self._runtime.port
 
     @property
     def url(self) -> str:
@@ -73,8 +101,9 @@ class LocalServer:
             await self._tab.close()
         if self._pi is not None and not self._pi.closed:
             await self._pi.close()
-        if self._runner:
-            await self._runner.cleanup()
+        if isinstance(self._runtime, RunningServer):
+            await self._runtime.runner.cleanup()
+            self._runtime = StoppedServer()
 
     # -- auth --------------------------------------------------------------
 
@@ -88,24 +117,29 @@ class LocalServer:
         origin = request.headers.get("Origin")
         if origin is None:
             return True
-        host = urlparse(origin).hostname
-        return host in ("127.0.0.1", "localhost", "::1")
+        try:
+            parsed = urlparse(origin)
+            return (
+                parsed.scheme == "http"
+                and parsed.hostname in {"127.0.0.1", "localhost"}
+                and parsed.port == self.port
+            )
+        except ValueError:
+            return False
 
     # -- outbound to the tab ---------------------------------------------
 
     async def send_json_to_tab(self, msg: dict) -> bool:
-        if self._tab is not None and not self._tab.closed:
-            try:
-                await self._tab.send_str(json.dumps(msg))
-                return True
-            except ConnectionError:
-                pass
-        return False
+        return await self._send(self._tab, msg)
 
     async def send_json_to_pi(self, msg: dict) -> bool:
-        if self._pi is not None and not self._pi.closed:
+        return await self._send(self._pi, msg)
+
+    @staticmethod
+    async def _send(socket: web.WebSocketResponse | None, msg: dict) -> bool:
+        if socket is not None and not socket.closed:
             try:
-                await self._pi.send_str(json.dumps(msg))
+                await socket.send_str(json.dumps(msg))
                 return True
             except ConnectionError:
                 pass
@@ -158,21 +192,10 @@ class LocalServer:
         if previous is not None and not previous.closed:
             await previous.close()
         log.info("browser tab connected")
-        async for msg in ws:
-            if msg.type == WSMsgType.TEXT and self.on_tab_json:
-                try:
-                    data = json.loads(msg.data)
-                except json.JSONDecodeError:
-                    log.warning("bad JSON from tab: %.100s", msg.data)
-                    continue
-                if not isinstance(data, dict):
-                    log.warning("non-object JSON from tab")
-                    continue
-                await self.on_tab_json(data)
+        await self._receive_json(ws, self.handlers.tab_message, "tab")
         if self._tab is ws:
             self._tab = None
-            if self.on_tab_closed:
-                await self.on_tab_closed()
+            await self.handlers.tab_closed()
         return ws
 
     async def _pi_ws(self, request: web.Request) -> web.StreamResponse:
@@ -184,23 +207,29 @@ class LocalServer:
         self._pi = ws
         if previous is not None and not previous.closed:
             await previous.close()
-        if self.on_pi_connected:
-            await self.on_pi_connected()
-        async for msg in ws:
-            if msg.type != WSMsgType.TEXT or self.on_pi_json is None:
-                continue
-            try:
-                data = json.loads(msg.data)
-            except json.JSONDecodeError:
-                log.warning("bad JSON from Pi extension: %.100s", msg.data)
-                continue
-            if isinstance(data, dict):
-                await self.on_pi_json(data)
+        await self.handlers.pi_connected()
+        await self._receive_json(ws, self.handlers.pi_message, "Pi extension")
         if self._pi is ws:
             self._pi = None
-            if self.on_pi_closed:
-                await self.on_pi_closed()
+            await self.handlers.pi_closed()
         return ws
+
+    @staticmethod
+    async def _receive_json(
+        socket: web.WebSocketResponse, handler: JsonHandler, source: str,
+    ) -> None:
+        async for message in socket:
+            if message.type != WSMsgType.TEXT:
+                continue
+            try:
+                parsed = json.loads(message.data)
+            except json.JSONDecodeError:
+                log.warning("bad JSON from %s: %.100s", source, message.data)
+                continue
+            if not isinstance(parsed, dict):
+                log.warning("non-object JSON from %s", source)
+                continue
+            await handler(parsed)
 
     async def _session_credential(self, request: web.Request) -> web.Response:
         if not self._authorized(request) or not self._same_origin(request):
@@ -216,10 +245,8 @@ class LocalServer:
             r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}", session_id,
         ):
             return web.json_response({"error": "invalid session_id"}, status=400)
-        if self.on_session_credential is None:
-            return web.json_response({"error": "credential service unavailable"}, status=503)
         try:
-            credential = await self.on_session_credential(session_id)
+            credential = await self.handlers.session_credential(session_id)
         except Exception:
             log.exception("could not mint browser session credential")
             return web.json_response({"error": "could not reach Converse"}, status=502)

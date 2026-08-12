@@ -8,7 +8,8 @@ visible coding session and terminal UI. Converse owns speech and the background-
 - `coding_task(request)` is deferred and starts work only while the bridge is idle.
 - `continue_task(request)` semantically steers active work.
 - `approval_decision(approval_id, decision)` resolves only a matching pending approval.
-- `end_session()` ends the voice session and gracefully shuts down Pi.
+- `pi_model(request)` reads authoritative model state and changes it only when the request uniquely
+  names an available model, using Pi's semantic `setModel()` API.
 - Tool cancellation calls Pi's documented extension `abort()` API.
 
 ## Boundary
@@ -27,9 +28,9 @@ Pi extension ── sendUserMessage / events ── visible Pi TUI ── Codex
 ```
 
 Pi is launched in its default interactive mode. The extension uses `sendUserMessage()` for a new
-task, `deliverAs: "steer"` for active guidance, `abort()` for cancellation, and `shutdown()` for
-graceful exit. It emits explicit message, tool, and settled events. It never reads terminal rows,
-types keys, or infers menu state.
+task, `deliverAs: "steer"` for active guidance, `setModel()` for model changes, `abort()` for
+cancellation, and `shutdown()` for graceful exit. It emits explicit message, tool, and settled
+events. It never reads terminal rows, types keys, or infers menu state.
 
 ## Event mapping
 
@@ -39,7 +40,7 @@ types keys, or infers menu state.
 | ordinary tool start | `tool_progress` |
 | `edit` or `write` start | silent `tool_partial_result` |
 | test command start | spoken `tool_partial_result`, `reply: true` |
-| approval request | silent structured partial + acknowledged queued voice prompt |
+| approval request | spoken structured `tool_partial_result`, `reply: true` |
 | `message_end` | authoritative final-text candidate |
 | `agent_settled` | one terminal `tool_result` |
 | cancellation | Pi extension `abort()` |
@@ -53,10 +54,10 @@ a voice task is active fails that Converse tool closed instead of attributing un
 ## Approvals
 
 The bridge extension intercepts `bash`, `edit`, and `write` before execution, creates a unique
-approval ID, and waits without opening a terminal menu. Converse receives the target as a silent
-structured partial. The browser waits for any active reply to finish, then uses an acknowledged
-context injection with `reply: true` to ask the user aloud to allow once, allow for the session, or
-block. Only an explicit `approval_decision` carrying the pending ID can resume the Pi hook. Stale
+approval ID, and waits without opening a terminal menu. Converse receives the target as a
+structured background-tool partial with `reply: true`, which asks the user aloud to allow once,
+allow for the session, or block. Only an explicit `approval_decision` carrying the pending ID can
+resume the Pi hook. Stale
 IDs, malformed decisions, disconnects, cancellation, and timeouts fail closed.
 
 ## Evidence and outcomes
@@ -66,6 +67,10 @@ will not continue automatically. It does not independently verify claims about f
 browsers, or external systems, so ordinary completion remains `verified: false`.
 
 ## Browser boundary
+
+Converse owns conversational ending. Its intentional transport close is exposed by the Browser SDK
+as `session_end`; the page forwards that structured lifecycle event and the host gracefully shuts
+down Pi. Converse Code does not duplicate end intent with a phrase matcher or tool.
 
 The page has microphone control but no text input. It mirrors Browser SDK speech, reply, and tool
 lifecycle events; Pi remains the canonical coding transcript. Python holds the persistent Converse

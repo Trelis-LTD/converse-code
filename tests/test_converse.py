@@ -54,7 +54,7 @@ async def test_mint_session_credential_keeps_persistent_key_server_side():
         "authorization": "Bearer ck_persistent",
         "body": {"session_id": "browser-session"},
     }
-    assert credential == {
+    assert credential.as_payload() == {
         "api_key": "csk_scoped", "session_id": "browser-session", "expires_in": 600,
     }
 

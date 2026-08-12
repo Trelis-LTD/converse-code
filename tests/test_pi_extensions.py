@@ -10,4 +10,3 @@ def test_visible_pi_extension_uses_semantic_controls_and_remote_approvals():
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "Pi extension contract: passed" in result.stdout

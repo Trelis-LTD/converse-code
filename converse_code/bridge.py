@@ -1,9 +1,18 @@
 """Acknowledged controls between the Converse Browser SDK and a local tool host."""
 
 import asyncio
-from collections import OrderedDict
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Any
+
+
+@dataclass
+class Connected:
+    sent: set[int] = field(default_factory=set)
+
+
+def _ignore_trace(_source: str, _event: str, **_data: Any) -> None:
+    pass
 
 
 class BrowserBridge:
@@ -12,37 +21,38 @@ class BrowserBridge:
     def __init__(
         self,
         send_to_tab: Callable[[dict], Awaitable[bool]],
-        trace: Callable[..., None] | None = None,
+        trace: Callable[..., None] = _ignore_trace,
     ) -> None:
         self._send_to_tab = send_to_tab
-        self._pending: OrderedDict[int, dict] = OrderedDict()
-        self._sent: set[int] = set()
+        self._pending: dict[int, dict] = {}
         self._next_seq = 1
-        self._ready = False
+        self._delivery: Connected | None = None
         self._lock = asyncio.Lock()
-        self.on_tool_call: Callable[[dict], Awaitable[None]] | None = None
-        self.on_tool_cancel: Callable[[dict], Awaitable[None]] | None = None
         self._trace_callback = trace
 
     def _trace(self, event: str, **data: Any) -> None:
-        if self._trace_callback is not None:
-            self._trace_callback("browser_bridge", event, **data)
+        self._trace_callback("browser_bridge", event, **data)
 
     async def on_browser_disconnected(self) -> None:
         self._trace("disconnected")
         async with self._lock:
-            self._ready = False
-            self._sent.clear()
+            self._delivery = None
 
-    async def handle_browser_message(self, message: dict) -> None:
+    async def handle_browser_message(
+        self,
+        message: dict,
+        *,
+        on_tool_call: Callable[[dict], Awaitable[None]],
+        on_tool_cancel: Callable[[dict], Awaitable[None]],
+        on_session_end: Callable[[dict], Awaitable[None]],
+    ) -> None:
         if message.get("type") != "local":
             return
         event = message.get("event")
         if event == "bridge_ready":
             self._trace("ready")
             async with self._lock:
-                self._ready = True
-                self._sent.clear()
+                self._delivery = Connected()
             await self._flush()
         elif event == "bridge_ack":
             seq = message.get("seq")
@@ -53,16 +63,27 @@ class BrowserBridge:
                 )
                 async with self._lock:
                     self._pending.pop(seq, None)
-                    self._sent.discard(seq)
-        elif event == "tool_call" and self.on_tool_call:
+                    if self._delivery is not None:
+                        self._delivery.sent.discard(seq)
+        elif event == "tool_call":
             call = message.get("call")
-            if isinstance(call, dict):
-                await self.on_tool_call(call)
-        elif event == "tool_cancel" and self.on_tool_cancel:
+            if (
+                isinstance(call, dict)
+                and isinstance(call.get("id"), str) and call["id"]
+                and isinstance(call.get("name"), str) and call["name"]
+                and isinstance(call.get("args"), dict)
+            ):
+                await on_tool_call(call)
+        elif event == "tool_cancel":
             call = message.get("call")
-            if isinstance(call, dict):
-                await self.on_tool_cancel(call)
-        elif event == "debug_trace" and self._trace_callback:
+            if isinstance(call, dict) and isinstance(call.get("id"), str) and call["id"]:
+                await on_tool_cancel(call)
+        elif event == "session_end":
+            code, reason = message.get("code"), message.get("reason")
+            if type(code) is int and code == 1000 and isinstance(reason, str):
+                self._trace("session_end", code=code, reason=reason)
+                await on_session_end({"code": code, "reason": reason})
+        elif event == "debug_trace":
             name = message.get("name")
             data = message.get("data")
             if isinstance(name, str) and isinstance(data, dict):
@@ -81,17 +102,17 @@ class BrowserBridge:
 
     async def _flush(self) -> None:
         async with self._lock:
-            if not self._ready:
+            delivery = self._delivery
+            if delivery is None:
                 return
             for seq, frame in self._pending.items():
-                if seq in self._sent:
+                if seq in delivery.sent:
                     continue
                 if not await self._send_to_tab(frame):
                     self._trace("control_send_failed", seq=seq, action=frame.get("action"))
-                    self._ready = False
-                    self._sent.clear()
+                    self._delivery = None
                     return
-                self._sent.add(seq)
+                delivery.sent.add(seq)
                 self._trace("control_sent", seq=seq, action=frame.get("action"))
 
     async def send_tool_result(
@@ -118,7 +139,3 @@ class BrowserBridge:
         self, call_id: str, content: dict, reply: bool = False,
     ) -> None:
         await self._control("tool_partial_result", id=call_id, content=content, reply=reply)
-
-    async def send_voice_prompt(self, prompt_id: str, text: str) -> None:
-        """Request one acknowledged browser-model reply, replaying until the browser accepts it."""
-        await self._control("voice_prompt", prompt_id=prompt_id, text=text[:1000])
