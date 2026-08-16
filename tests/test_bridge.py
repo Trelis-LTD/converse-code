@@ -3,15 +3,11 @@ import asyncio
 from converse_code.bridge import BrowserBridge
 
 
-def no_trace(_source, _event, **_data):
+async def ignore(_message):
     pass
 
 
-def make_bridge(send):
-    return BrowserBridge(send, trace=no_trace)
-
-
-async def ignore(_message):
+def ignore_trace(_source, _event, **_data):
     pass
 
 
@@ -78,7 +74,7 @@ async def test_controls_wait_for_ready_and_remain_until_browser_ack():
 
 
 async def test_browser_tool_calls_and_cancellation_reach_python_handlers():
-    bridge = make_bridge(lambda _frame: asyncio.sleep(0, result=True))
+    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True), ignore_trace)
     calls, cancels = [], []
 
     async def on_call(call):
@@ -89,18 +85,18 @@ async def test_browser_tool_calls_and_cancellation_reach_python_handlers():
 
     await handle(bridge, {
         "type": "local", "event": "tool_call",
-        "call": {"id": "c1", "name": "pi_message", "args": {"message": "fix it"}},
+        "call": {"id": "c1", "name": "pi_request", "args": {"user_request": "fix it"}},
     }, on_tool_call=on_call)
     await handle(bridge, {
         "type": "local", "event": "tool_cancel", "call": {"id": "c1"},
     }, on_tool_cancel=on_cancel)
 
-    assert calls[0]["name"] == "pi_message"
+    assert calls[0]["name"] == "pi_request"
     assert cancels == [{"id": "c1"}]
 
 
 async def test_native_sdk_session_end_reaches_python_handler():
-    bridge = make_bridge(lambda _frame: asyncio.sleep(0, result=True))
+    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True), ignore_trace)
     endings = []
 
     await handle(
@@ -113,7 +109,7 @@ async def test_native_sdk_session_end_reaches_python_handler():
 
 
 async def test_explicit_browser_end_session_reaches_python_handler():
-    bridge = make_bridge(lambda _frame: asyncio.sleep(0, result=True))
+    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True), ignore_trace)
     endings = []
 
     await handle(
@@ -126,7 +122,7 @@ async def test_explicit_browser_end_session_reaches_python_handler():
 
 
 async def test_malformed_or_abnormal_session_end_does_not_reach_domain():
-    bridge = make_bridge(lambda _frame: asyncio.sleep(0, result=True))
+    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True), ignore_trace)
     endings = []
 
     async def handler(event):
@@ -143,7 +139,7 @@ async def test_malformed_or_abnormal_session_end_does_not_reach_domain():
 
 
 async def test_malformed_browser_tool_messages_do_not_enter_the_domain():
-    bridge = make_bridge(lambda _frame: asyncio.sleep(0, result=True))
+    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True), ignore_trace)
     calls, cancels = [], []
 
     async def on_call(call):
@@ -153,9 +149,9 @@ async def test_malformed_browser_tool_messages_do_not_enter_the_domain():
         cancels.append(call)
 
     for call in (
-        {"name": "pi_message", "args": {"message": "fix it"}},
+        {"name": "pi_request", "args": {"user_request": "fix it"}},
         {"id": "c1", "name": 7, "args": {}},
-        {"id": "c1", "name": "pi_message", "args": []},
+        {"id": "c1", "name": "pi_request", "args": []},
     ):
         await handle(bridge, {
             "type": "local", "event": "tool_call", "call": call,

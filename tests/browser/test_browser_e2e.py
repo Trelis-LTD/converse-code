@@ -25,10 +25,6 @@ async def test_page_is_a_voice_only_remote_for_the_visible_pi_terminal(browser_p
     assert await page.locator("#log").count() == 1
     await open_session(page)
     assert await page.evaluate("__fakeConverse.clients.length") == 1
-    await page.locator("#voice").click()
-    await page.locator("#voice").get_by_text("Unmute microphone", exact=True).wait_for()
-    assert await page.evaluate("__fakeConverse.clients[0].stream.getTracks()[0].readyState") == "live"
-    assert await page.evaluate("__fakeConverse.clients[0].micEnabled") is False
     assert errors == []
 
 
@@ -338,7 +334,9 @@ async def test_trace_captures_assistant_text_at_interruption(browser_page, brows
     }
 
 
-async def test_deferred_silent_partial_reply_partial_and_completion(browser_page, browser_server):
+async def test_background_status_tracks_the_deferred_task_not_unrelated_results(
+    browser_page, browser_server,
+):
     page, _ = browser_page
     server, _, frames = browser_server
     await open_session(page)
@@ -378,21 +376,6 @@ async def test_deferred_silent_partial_reply_partial_and_completion(browser_page
     assert await page.locator(".entry.activity").get_by_text("edit", exact=True).count() == 1
 
     await server.send_json_to_tab({
-        "type": "local", "event": "bridge_control", "seq": 3,
-        "action": "tool_partial_result", "id": "task-1",
-        "content": {
-            "event": "pi_approval_required", "approval_id": "approval-2",
-            "tool": "bash", "summary": "uv run pytest",
-            "decisions": ["allow_once", "allow_session", "block"],
-        },
-        "interaction": {
-            "prompt": "Allow Pi to run bash: uv run pytest?",
-            "options": ["Allow once", "Allow for this session", "Block"],
-        },
-    })
-    await wait_for_frame(frames, lambda frame: frame.get("seq") == 3)
-
-    await server.send_json_to_tab({
         "type": "local", "event": "bridge_control", "seq": 4,
         "action": "tool_result", "id": "task-1",
         "content": {"event": "pi_settled", "message": "Finished"},
@@ -401,21 +384,6 @@ async def test_deferred_silent_partial_reply_partial_and_completion(browser_page
     await wait_for_frame(frames, lambda frame: frame.get("seq") == 4)
     assert await page.locator("#status").inner_text() == "idle"
     assert await page.locator(".entry.activity").get_by_text("Finished", exact=True).count() == 1
-
-    calls = await page.evaluate("__fakeConverse.clients[0].bridgeCalls")
-    task_calls = [call for call in calls if call.get("id") == "task-1"]
-    silent = next(call for call in task_calls if call.get("content", {}).get("event") == (
-        "pi_tool_started"
-    ))
-    spoken = next(call for call in task_calls if call.get("content", {}).get("event") == (
-        "pi_approval_required"
-    ))
-    assert silent["options"] == {}
-    assert spoken["options"]["interaction"] == {
-        "prompt": "Allow Pi to run bash: uv run pytest?",
-        "options": ["Allow once", "Allow for this session", "Block"],
-    }
-    assert task_calls[-1]["action"] == "tool_result"
 
 
 async def test_activity_rows_distinguish_approval_and_unverified_pi_evidence(

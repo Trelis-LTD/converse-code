@@ -59,7 +59,19 @@ For this repository, the durable behavioral inventory is:
 - HTTP, WebSocket, credential, origin, and token security boundaries;
 - Pi command acknowledgement, ownership attribution, fail-closed disconnects, cancellation, and approval decisions;
 - the public Converse background-tool manifest and lifecycle outcomes;
-- browser transcript provenance, interruption ordering, approval partial delivery, partial reply behavior, durable control replay, autoscroll, and user-visible activity state;
+- browser transcript provenance, interruption ordering, queued approval interactions, durable control replay, microphone mute/end lifecycle, autoscroll, and user-visible activity state;
 - session trace structure and redaction.
 
 Wholesale instruction-copy checks, CLI help snapshots, package-version self-comparisons, private-state router setup, exact internal callback lists, trace-emission sequence snapshots, page identity literals such as the title and heading, and tests already subsumed by the Chromium lifecycle do not earn permanent maintenance cost. A small prompt contract can still be justified when it protects a critical routing constraint that cannot be exercised deterministically at a stronger boundary.
+
+## Lessons from test audits
+
+- Do not retain response data merely because a test can inspect it. Pi command acknowledgements
+  carry extensible fields, but Converse Code only needs the correlated command ID. Snapshotting the
+  unused fields forced an otherwise meaningless `CommandReceipt` representation into production.
+- Fold protocol detail into the test that owns the behavior. Structured approval interactions now
+  ride the durable-control replay test instead of a second test that asserted the bridge's exact
+  trace callback sequence.
+- Give one layer ownership of each browser behavior. Microphone muting belongs to the microphone
+  lifecycle scenario; approval interaction options belong to the busy-floor interaction scenario.
+  Broad page and deferred-status tests should not repeat those assertions.

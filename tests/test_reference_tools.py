@@ -1,7 +1,6 @@
 import asyncio
 
 from converse_code.agent_tools import PiControlRouter, manifest
-from converse_code.pi_tui import CommandReceipt
 
 
 class FakePi:
@@ -14,7 +13,7 @@ class FakePi:
         self.commands.append((kind, fields))
         response = f"fake-{self.next_id}"
         self.next_id += 1
-        return CommandReceipt(response, {})
+        return response
 
     async def emit(self, event):
         await self.router.on_event(event)
@@ -259,7 +258,7 @@ async def test_events_racing_prompt_acknowledgement_are_delivered_after_deferred
                     },
                 })
                 await self.emit({"type": "agent_settled"})
-                return CommandReceipt("fake-1", {})
+                return "fake-1"
             return await super().command(kind, **fields)
 
     pi, sender = EagerPi(), FakeSender()
