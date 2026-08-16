@@ -8,6 +8,12 @@ npm install -g @earendil-works/pi-coding-agent
 uvx converse-code
 ```
 
+Resume Pi's most recent session in the current directory with:
+
+```bash
+uvx converse-code --continue
+```
+
 The browser is voice-only while mirroring live speech, replies, and coding activity; Pi retains
 the canonical coding transcript, model state, and tools. Three human-equivalent controls demonstrate
 deferred execution, structured partials, queued interactions, steering, ID-correlated voice approvals,

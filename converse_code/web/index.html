@@ -73,7 +73,7 @@ async function liveSession(){
     const response=await fetch(`/session-credential?t=${encodeURIComponent(token)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:sessionId})});
     if(!response.ok)throw new Error(`credential request failed: ${response.status}`);
     const credential=await response.json();
-    const instance=new sdk.ConverseClient({url:credential.ws_url,apiKey:credential.api_key,sessionId:credential.session_id,mode:{kind:"converse",voice:"classic",instructions,web_search:false,tools:credential.tools||[]}});
+    const instance=new sdk.ConverseClient({url:credential.ws_url,apiKey:credential.api_key,sessionId:credential.session_id,mode:{kind:"converse",voice:"classic",instructions,web_search:false,silence_nudge_s:30,silence_end_s:90,tools:credential.tools||[]}});
     opening.instance=instance;
     instance.addEventListener("event",event=>handleEvent(instance,event.detail||{}));
     if(session.kind==="ended"){instance.close();throw new Error("the session has ended")}
@@ -137,8 +137,8 @@ function handleEvent(client,event){
   if(event.type==="tool_cancel"){debugTrace("tool_cancel",{id:event.id});wireSend({type:"local",event:"tool_cancel",call:event})}
   if(event.type==="tool_job_narration"){
     debugTrace("tool_job_narration",{state:event.state,job_ids:event.job_ids||[],kind:event.kind||""});
-    const narrationLabels={queued:"Approval prompt queued",started:"Approval prompt started",superseded:"Approval prompt superseded",cancelled:"Approval prompt cancelled",failed:"Approval prompt failed"};
-    activity(narrationLabels[event.state]||`Approval prompt ${event.state||"updated"}`,"Approval");
+    const narrationLabels={queued:"Question narration queued",started:"Question narration started",superseded:"Question narration interrupted",cancelled:"Question narration cancelled",failed:"Question narration failed"};
+    activity(narrationLabels[event.state]||`Question narration ${event.state||"updated"}`,"Interaction");
   }
   if(event.type==="reconnecting"&&session.kind==="live")session.delivery=null;
   if(event.type==="reconnected"&&session.kind==="live"){session.delivery={client:session.client};wireSend({type:"local",event:"bridge_ready"});flush()}
