@@ -181,7 +181,9 @@ class CancellingTurn:
 
 @dataclass(frozen=True)
 class SettledTurn:
-    call_id: str
+    """The result is set; the owning pi_request coroutine has not yet returned to idle. New
+    requests are refused ("pi_turn_settling") and events are ignored. Deliberately carries no
+    data -- nothing may key off a settled turn's identity."""
 
 
 ActiveTurn = (
@@ -455,7 +457,7 @@ class PiControlRouter:
             return
         if not turn.result.done():
             turn.result.set_result(outcome)
-        self._turn = SettledTurn(turn.call_id)
+        self._turn = SettledTurn()
 
     async def _result(
         self, call_id: str, content: dict, *, outcome: str = "succeeded",
