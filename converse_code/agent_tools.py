@@ -4,17 +4,35 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Literal
+from enum import Enum, auto
+from typing import NamedTuple
 
+from .bridge import ToolCall
 from .pi_tui import PiTUIBridgeError
 
 TOOL_TIMEOUT_S = 30
 DEFERRED_TIMEOUT_S = 7200
-DECISIONS = {
-    "allow_once": "Allow once",
-    "allow_session": "Allow for this session",
-    "block": "Block",
+class Decision(Enum):
+    ALLOW_ONCE = "allow_once"
+    ALLOW_SESSION = "allow_session"
+    BLOCK = "block"
+
+
+DECISION_LABELS = {
+    Decision.ALLOW_ONCE: "Allow once",
+    Decision.ALLOW_SESSION: "Allow for this session",
+    Decision.BLOCK: "Block",
 }
+
+
+class Failure(Enum):
+    INVALID_EVENT = "invalid_pi_event"
+    SESSION_LOST = "pi_session_lost"
+    PROCESS_EXITED = "pi_process_exited"
+    INPUT_MISMATCH = "pi_input_mismatch"
+    UNRELATED_INPUT = "unrelated_pi_input"
+    MESSAGE_FAILED = "pi_message_failed"
+    OWNERSHIP_UNCONFIRMED = "pi_ownership_unconfirmed"
 
 
 def manifest() -> list[dict]:
@@ -59,7 +77,7 @@ def manifest() -> list[dict]:
             "Submit the user's explicit decision for a pending Pi approval using its supplied ID.",
             {
                 "approval_id": {"type": "string", "description": "The pending approval ID."},
-                "decision": {"type": "string", "enum": list(DECISIONS)},
+                "decision": {"type": "string", "enum": [item.value for item in Decision]},
             },
             ["approval_id", "decision"],
             timeout=15,
@@ -72,85 +90,80 @@ def manifest() -> list[dict]:
     ]
 
 
-@dataclass(frozen=True)
-class TaskResult:
-    outcome: Literal["succeeded", "failed", "cancelled"]
-    event: str
+class Succeeded(NamedTuple):
+    message: str
+
+
+class Failed(NamedTuple):
+    event: Failure
     message: str = ""
 
 
 @dataclass(frozen=True)
-class OwnedInput:
+class Cancelled:
+    pass
+
+
+TerminalResult = Succeeded | Failed | Cancelled
+
+
+class OwnedInput(NamedTuple):
     command_id: str
 
 
-@dataclass(frozen=True)
-class ForeignInput:
-    pass
+class Signal(Enum):
+    FOREIGN_INPUT = auto()
+    SESSION_LOST = auto()
+    AGENT_SETTLED = auto()
 
 
-@dataclass(frozen=True)
-class SessionLost:
-    pass
-
-
-@dataclass(frozen=True)
-class ProcessExited:
+class ProcessExited(NamedTuple):
     status: int
 
 
-@dataclass(frozen=True)
-class ToolStarted:
+class ToolStarted(NamedTuple):
     name: str
     arguments: dict
 
 
-@dataclass(frozen=True)
-class ApprovalRequested:
+class ApprovalRequested(NamedTuple):
     approval_id: str
     tool: str
     summary: str
 
 
-@dataclass(frozen=True)
-class AssistantMessage:
+class AssistantMessage(NamedTuple):
     text: str
 
 
-@dataclass(frozen=True)
-class MessageFailed:
+class MessageFailed(NamedTuple):
     error: str
 
 
-@dataclass(frozen=True)
-class AgentSettled:
-    pass
-
-
-@dataclass(frozen=True)
-class InvalidPiEvent:
-    reason: str
-
-
 PiEvent = (
-    OwnedInput | ForeignInput | SessionLost | ProcessExited | ToolStarted | ApprovalRequested
-    | AssistantMessage | MessageFailed | AgentSettled | InvalidPiEvent
+    OwnedInput | Signal | ProcessExited | ToolStarted | ApprovalRequested
+    | AssistantMessage | MessageFailed
 )
 
 
 @dataclass
-class PendingTurn:
+class AwaitingAcknowledgement:
     call_id: str
-    result: asyncio.Future[TaskResult]
+    result: asyncio.Future[TerminalResult]
     events: list[PiEvent] = field(default_factory=list)
+
+
+@dataclass
+class AwaitingOwnership:
+    call_id: str
+    result: asyncio.Future[TerminalResult]
+    command_id: str
 
 
 @dataclass
 class RunningTurn:
     call_id: str
-    result: asyncio.Future[TaskResult]
-    command_id: str
-    owned: bool = False
+    result: asyncio.Future[TerminalResult]
     assistant_text: str = ""
     approvals: set[str] = field(default_factory=set)
 
@@ -158,15 +171,17 @@ class RunningTurn:
 @dataclass(frozen=True)
 class CancellingTurn:
     call_id: str
-    result: asyncio.Future[TaskResult]
+    result: asyncio.Future[TerminalResult]
 
 
 @dataclass(frozen=True)
-class CompletedTurn:
+class SettledTurn:
     call_id: str
 
 
-ActiveTurn = PendingTurn | RunningTurn | CancellingTurn | CompletedTurn
+ActiveTurn = (
+    AwaitingAcknowledgement | AwaitingOwnership | RunningTurn | CancellingTurn | SettledTurn
+)
 
 
 class PiControlRouter:
@@ -180,51 +195,69 @@ class PiControlRouter:
 
     @property
     def active_call_id(self) -> str | None:
-        return self._turn.call_id if self._turn is not None else None
+        return (
+            self._turn.call_id
+            if isinstance(
+                self._turn,
+                (AwaitingAcknowledgement, AwaitingOwnership, RunningTurn, CancellingTurn),
+            )
+            else None
+        )
 
-    async def handle_tool_call(self, call: dict) -> None:
-        call_id = call.get("id")
-        if not isinstance(call_id, str) or not call_id:
-            return
-        name, args = call.get("name"), call.get("args")
-        if not isinstance(name, str) or not isinstance(args, dict):
-            await self._error(call_id, "malformed_tool_call")
-        elif name == "pi_request":
-            await self._pi_request(call_id, self._text(args.get("user_request")))
-        elif name == "pi_approval":
-            await self._pi_approval(call_id, args)
-        elif name == "pi_cancel":
-            await self._pi_cancel(call_id)
+    async def handle_tool_call(self, call: ToolCall) -> None:
+        if call.name == "pi_request":
+            request = self._text(call.arguments.get("user_request"))
+            if request is None:
+                await self._error(call.call_id, "user_request_required")
+                return
+            await self._pi_request(call.call_id, request)
+        elif call.name == "pi_approval":
+            approval_id = self._text(call.arguments.get("approval_id"))
+            try:
+                decision = Decision(call.arguments.get("decision"))
+            except ValueError:
+                decision = None
+            if approval_id is None or decision is None:
+                await self._error(call.call_id, "approval_not_pending")
+                return
+            await self._pi_approval(call.call_id, approval_id, decision)
+        elif call.name == "pi_cancel":
+            await self._pi_cancel(call.call_id)
         else:
-            await self._error(call_id, "unknown_tool")
+            await self._error(call.call_id, "unknown_tool")
 
-    async def handle_tool_cancel(self, call: dict) -> None:
-        if call.get("id") != self.active_call_id:
+    async def handle_tool_cancel(self, call_id: str) -> None:
+        if call_id != self.active_call_id:
             return
         await self._request_cancel()
 
     async def on_event(self, event: dict) -> None:
-        parsed = self._parse_event(event)
+        try:
+            parsed = self._parse_event(event)
+        except ValueError as exc:
+            if self._turn is not None:
+                self._complete(Failed(Failure.INVALID_EVENT, str(exc)))
+            return
         if parsed is None:
             return
-        if isinstance(self._turn, PendingTurn):
+        if isinstance(self._turn, AwaitingAcknowledgement):
             self._turn.events.append(parsed)
             return
         await self._handle_event(parsed)
 
-    async def _pi_request(self, call_id: str, request: str | None) -> None:
-        if request is None:
-            await self._error(call_id, "user_request_required")
-            return
-        if isinstance(self._turn, (PendingTurn, RunningTurn)):
+    async def _pi_request(self, call_id: str, request: str) -> None:
+        if isinstance(self._turn, RunningTurn):
             await self._steer(call_id, request)
+            return
+        if isinstance(self._turn, (AwaitingAcknowledgement, AwaitingOwnership)):
+            await self._error(call_id, "pi_turn_starting")
             return
         if self._turn is not None:
             await self._error(call_id, "pi_turn_settling")
             return
 
         result = asyncio.get_running_loop().create_future()
-        self._turn = PendingTurn(call_id, result)
+        self._turn = AwaitingAcknowledgement(call_id, result)
         try:
             command_id = await self.pi.command("prompt", message=request)
         except PiTUIBridgeError as exc:
@@ -233,17 +266,21 @@ class PiControlRouter:
             return
 
         await self.sender.send_tool_deferred(call_id, self.handle, status_label="Pi")
-        if isinstance(self._turn, PendingTurn):
+        if isinstance(self._turn, AwaitingAcknowledgement):
             early_events = tuple(self._turn.events)
-            self._turn = RunningTurn(call_id, result, command_id)
+            self._turn = AwaitingOwnership(call_id, result, command_id)
             for event in early_events:
                 await self._handle_event(event)
         outcome = await result
-        content = {
-            "event": outcome.event, "pi_response": outcome.message, "handle": self.handle,
-        }
+        if isinstance(outcome, Succeeded):
+            result_name, event, message = "succeeded", "pi_settled", outcome.message
+        elif isinstance(outcome, Failed):
+            result_name, event, message = "failed", outcome.event.value, outcome.message
+        else:
+            result_name, event, message = "cancelled", "pi_turn_cancelled", ""
+        content = {"event": event, "pi_response": message, "handle": self.handle}
         await self.sender.send_tool_result(
-            call_id, content, outcome=outcome.outcome, verified=False,
+            call_id, content, outcome=result_name, verified=False,
         )
         self._turn = None
 
@@ -272,35 +309,37 @@ class PiControlRouter:
             verified=True,
         )
 
-    async def _pi_approval(self, call_id: str, args: dict) -> None:
+    async def _pi_approval(
+        self, call_id: str, approval_id: str, decision: Decision,
+    ) -> None:
         turn = self._turn
-        approval_id, decision = args.get("approval_id"), args.get("decision")
-        if (
-            not isinstance(turn, RunningTurn)
-            or not isinstance(approval_id, str) or approval_id not in turn.approvals
-            or decision not in DECISIONS
-        ):
+        if not isinstance(turn, RunningTurn) or approval_id not in turn.approvals:
             await self._error(call_id, "approval_not_pending")
             return
         try:
             await self.pi.command(
-                "approval_response", approvalId=approval_id, decision=decision,
+                "approval_response", approvalId=approval_id, decision=decision.value,
             )
         except PiTUIBridgeError as exc:
             await self._error(call_id, "pi_rejected_approval", reason=str(exc))
             return
-        if decision == "allow_session":
+        if decision is Decision.ALLOW_SESSION:
             turn.approvals.clear()
         else:
             turn.approvals.remove(approval_id)
         await self._result(
             call_id,
-            {"event": "pi_approval_delivered", "decision": decision, "task_status": "running"},
+            {
+                "event": "pi_approval_delivered", "decision": decision.value,
+                "task_status": "running",
+            },
             verified=True,
         )
 
     async def _pi_cancel(self, call_id: str) -> None:
-        if not isinstance(self._turn, (PendingTurn, RunningTurn)):
+        if not isinstance(
+            self._turn, (AwaitingAcknowledgement, AwaitingOwnership, RunningTurn),
+        ):
             await self._error(call_id, "no_active_pi_turn")
             return
         await self._request_cancel()
@@ -312,37 +351,47 @@ class PiControlRouter:
 
     async def _request_cancel(self) -> None:
         turn = self._turn
-        if not isinstance(turn, (PendingTurn, RunningTurn)):
+        if not isinstance(turn, (AwaitingAcknowledgement, AwaitingOwnership, RunningTurn)):
             return
         self._turn = CancellingTurn(turn.call_id, turn.result)
         try:
             await self.pi.command("abort")
         except PiTUIBridgeError:
-            self._complete(TaskResult("cancelled", "pi_turn_cancelled"))
+            self._complete(Cancelled())
 
     async def _handle_event(self, event: PiEvent) -> None:
         turn = self._turn
-        if turn is None or isinstance(turn, CompletedTurn):
+        if turn is None or isinstance(turn, SettledTurn):
             return
         if isinstance(turn, CancellingTurn):
-            if isinstance(event, (AgentSettled, SessionLost, ProcessExited)):
-                self._complete(TaskResult("cancelled", "pi_turn_cancelled"))
+            if (
+                event is Signal.AGENT_SETTLED or event is Signal.SESSION_LOST
+                or isinstance(event, ProcessExited)
+            ):
+                self._complete(Cancelled())
             return
-        if isinstance(event, InvalidPiEvent):
-            self._complete(TaskResult("failed", "invalid_pi_event", event.reason))
-        elif isinstance(event, SessionLost):
-            self._complete(TaskResult("failed", "pi_session_lost"))
-        elif isinstance(event, ProcessExited):
-            self._complete(TaskResult("failed", "pi_process_exited", str(event.status)))
-        elif not isinstance(turn, RunningTurn):
+        if event is Signal.SESSION_LOST:
+            self._complete(Failed(Failure.SESSION_LOST))
             return
-        elif isinstance(event, OwnedInput):
-            if turn.owned or event.command_id == turn.command_id:
-                turn.owned = True
+        if isinstance(event, ProcessExited):
+            self._complete(Failed(Failure.PROCESS_EXITED, str(event.status)))
+            return
+        if isinstance(turn, AwaitingOwnership):
+            if isinstance(event, OwnedInput) and event.command_id == turn.command_id:
+                self._turn = RunningTurn(turn.call_id, turn.result)
+            elif isinstance(event, OwnedInput):
+                self._complete(Failed(Failure.INPUT_MISMATCH))
+            elif event is Signal.FOREIGN_INPUT:
+                self._complete(Failed(Failure.UNRELATED_INPUT))
             else:
-                self._complete(TaskResult("failed", "pi_input_mismatch"))
-        elif isinstance(event, ForeignInput):
-            self._complete(TaskResult("failed", "unrelated_pi_input"))
+                self._complete(Failed(Failure.OWNERSHIP_UNCONFIRMED))
+            return
+        if not isinstance(turn, RunningTurn):
+            return
+        if event is Signal.FOREIGN_INPUT:
+            self._complete(Failed(Failure.UNRELATED_INPUT))
+        elif isinstance(event, OwnedInput):
+            pass  # Pi emits another owned input when a later voice turn steers this episode.
         elif isinstance(event, ToolStarted):
             await self.sender.send_tool_partial_result(
                 turn.call_id,
@@ -360,31 +409,28 @@ class PiControlRouter:
                 {
                     "event": "pi_approval_required", "approval_id": event.approval_id,
                     "tool": event.tool, "summary": event.summary,
-                    "decisions": list(DECISIONS), "handle": self.handle,
+                    "decisions": [item.value for item in Decision], "handle": self.handle,
                 },
                 interaction={
                     "prompt": f"Allow Pi to run {event.tool}: {event.summary}?",
-                    "options": list(DECISIONS.values()),
+                    "options": list(DECISION_LABELS.values()),
                 },
             )
         elif isinstance(event, MessageFailed):
-            self._complete(TaskResult("failed", "pi_message_failed", event.error))
+            self._complete(Failed(Failure.MESSAGE_FAILED, event.error))
         elif isinstance(event, AssistantMessage):
-            if turn.owned and event.text:
+            if event.text:
                 turn.assistant_text = event.text
-        elif isinstance(event, AgentSettled):
-            if turn.owned:
-                self._complete(TaskResult("succeeded", "pi_settled", turn.assistant_text))
-            else:
-                self._complete(TaskResult("failed", "pi_ownership_unconfirmed"))
+        elif event is Signal.AGENT_SETTLED:
+            self._complete(Succeeded(turn.assistant_text))
 
-    def _complete(self, outcome: TaskResult) -> None:
+    def _complete(self, outcome: TerminalResult) -> None:
         turn = self._turn
-        if turn is None or isinstance(turn, CompletedTurn):
+        if turn is None or isinstance(turn, SettledTurn):
             return
         if not turn.result.done():
             turn.result.set_result(outcome)
-        self._turn = CompletedTurn(turn.call_id)
+        self._turn = SettledTurn(turn.call_id)
 
     async def _result(
         self, call_id: str, content: dict, *, outcome: str = "succeeded",
@@ -404,46 +450,47 @@ class PiControlRouter:
     @classmethod
     def _parse_event(cls, event) -> PiEvent | None:
         if not isinstance(event, dict) or not isinstance(event.get("type"), str):
-            return None
+            raise ValueError("malformed Pi event")
         kind = event["type"]
         if kind == "input_seen":
             owner, command_id = event.get("owner"), event.get("commandId")
-            if owner == "bridge" and not cls._text(command_id):
-                return InvalidPiEvent("malformed input ownership")
+            if owner == "bridge":
+                parsed_id = cls._text(command_id)
+                if parsed_id is None:
+                    raise ValueError("malformed input ownership")
+                return OwnedInput(parsed_id)
             if owner not in {"bridge", "interactive", "other"}:
-                return InvalidPiEvent("malformed input ownership")
-            return OwnedInput(command_id) if owner == "bridge" else ForeignInput()
+                raise ValueError("malformed input ownership")
+            return Signal.FOREIGN_INPUT
         if kind in {"session_shutdown", "bridge_disconnect", "bridge_replaced"}:
-            return SessionLost()
+            return Signal.SESSION_LOST
         if kind == "process_exit":
             status = event.get("status")
-            return ProcessExited(status) if type(status) is int else InvalidPiEvent("malformed exit")
+            if type(status) is not int:
+                raise ValueError("malformed process exit")
+            return ProcessExited(status)
         if kind == "tool_execution_start":
             name, arguments = cls._text(event.get("toolName")), event.get("args")
-            return (
-                ToolStarted(name, arguments)
-                if name is not None and isinstance(arguments, dict)
-                else InvalidPiEvent("malformed tool event")
-            )
+            if name is None or not isinstance(arguments, dict):
+                raise ValueError("malformed tool event")
+            return ToolStarted(name, arguments)
         if kind == "approval_request":
             values = tuple(cls._text(event.get(key)) for key in ("approvalId", "toolName", "summary"))
-            return (
-                ApprovalRequested(*values)
-                if all(value is not None for value in values)
-                else InvalidPiEvent("malformed approval request")
-            )
+            if not all(value is not None for value in values):
+                raise ValueError("malformed approval request")
+            return ApprovalRequested(*values)
         if kind == "message_end":
             message = event.get("message")
             if not isinstance(message, dict):
-                return InvalidPiEvent("malformed terminal message")
+                raise ValueError("malformed terminal message")
             if message.get("stopReason") in {"error", "aborted"}:
                 error = cls._text(message.get("errorMessage")) or "Pi stopped with an error."
                 return MessageFailed(error)
             return AssistantMessage(cls._message_text(message))
         if kind == "agent_settled":
-            return AgentSettled()
+            return Signal.AGENT_SETTLED
         if kind == "extension_error":
-            return InvalidPiEvent(cls._text(event.get("error")) or "unknown extension error")
+            raise ValueError(cls._text(event.get("error")) or "unknown extension error")
         return None
 
     @staticmethod

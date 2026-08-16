@@ -26,7 +26,7 @@ footer{display:flex;align-items:center;justify-content:center;gap:1rem;padding:1
 const token=new URLSearchParams(location.search).get("t")||"";
 const log=document.querySelector("#log"),empty=document.querySelector("#empty");
 const voice=document.querySelector("#voice"),endSession=document.querySelector("#end-session"),status=document.querySelector("#status"),notice=document.querySelector("#notice");
-let client=null,delivery=null,opening=null,mic=false,micEnabled=false,ended=false,flushing=false,seqs=new Map();
+let client=null,delivery=null,opening=null,voiceState="idle",flushing=false,seqs=new Map();
 const userRows=new Map(),assistantRows=new Map(),renderedControls=new Set();
 const deferredIds=new Set();
 const instructions=`You are Converse Code, the voice interface to the visible Pi coding agent. The user is speaking to Pi through you. Use pi_request for every actionable coding, repository, environment, or Pi question. Put the user's request in user_request; never replace it with your own narration, an inferred answer, or a claim that work already happened. Report outcomes only from Pi's returned evidence.`;
@@ -38,7 +38,7 @@ function activity(text,label="Activity"){if(text)row("activity",text,label)}
 function wireSend(frame){if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(frame))}
 function debugTrace(name,data={}){wireSend({type:"local",event:"debug_trace",name,data})}
 function showEnded(){
-  ended=true;mic=false;micEnabled=false;delivery=null;status.textContent="ended";
+  voiceState="ended";delivery=null;status.textContent="ended";
   voice.textContent="Session ended";voice.disabled=true;voice.setAttribute("aria-pressed","false");
   endSession.disabled=true;
 }
@@ -162,21 +162,22 @@ voice.onclick=async()=>{
   voice.disabled=true;notice.textContent="";
   try{
     const active=await openClient();
-    if(!mic){
+    if(voiceState==="idle"){
       await active.startMic({workletUrl:"./vendor/converse/mic-worklet.js"});
-      mic=true;micEnabled=true;voice.textContent="Mute microphone";
-    }else{
-      micEnabled=!micEnabled;active.setMicEnabled(micEnabled);
-      voice.textContent=micEnabled?"Mute microphone":"Unmute microphone";
-      status.textContent=micEnabled?"listening":"muted";
-      debugTrace("mic_state",{state:micEnabled?"listening":"muted"});
+      voiceState="listening";voice.textContent="Mute microphone";
+    }else if(voiceState==="listening"){
+      voiceState="muted";active.setMicEnabled(false);voice.textContent="Unmute microphone";
+      status.textContent="muted";debugTrace("mic_state",{state:"muted"});
+    }else if(voiceState==="muted"){
+      voiceState="listening";active.setMicEnabled(true);voice.textContent="Mute microphone";
+      status.textContent="listening";debugTrace("mic_state",{state:"listening"});
     }
-    voice.setAttribute("aria-pressed",String(micEnabled));
+    voice.setAttribute("aria-pressed",String(voiceState==="listening"));
   }catch(error){const message=String(error.message||error);notice.textContent=`Could not start voice: ${message}`;debugTrace("mic_start_failed",{error:message})}
-  finally{if(!ended)voice.disabled=false}
+  finally{if(voiceState!=="ended")voice.disabled=false}
 };
 endSession.onclick=async()=>{
-  if(ended)return;
+  if(voiceState==="ended")return;
   voice.disabled=true;endSession.disabled=true;notice.textContent="";
   wireSend({type:"local",event:"end_session"});
   const active=client;showEnded();
