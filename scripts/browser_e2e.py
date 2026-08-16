@@ -12,6 +12,9 @@ import tempfile
 import wave
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+from support import node_typescript_support  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 def write_microphone_fixture(path: Path) -> None:
     sample_rate = 48_000
@@ -30,6 +33,16 @@ def write_microphone_fixture(path: Path) -> None:
 
 
 def main() -> int:
+    capable, detail = node_typescript_support()
+    if not capable:
+        # The ladder is where the Pi extension contract is guaranteed to run red-on-failure --
+        # it must not silently degrade the way an underequipped `pytest` invocation may skip.
+        print(f"node >= 22.18 (or 23.6+) is required: the Pi extension contract check runs "
+              f"here; {detail}", file=sys.stderr)
+        return 1
+    contract = subprocess.run(["node", "tests/pi_extensions_check.mjs"], cwd=ROOT, check=False)
+    if contract.returncode != 0:
+        return contract.returncode
     with tempfile.TemporaryDirectory(prefix="converse-code-browser-") as directory:
         wav_path = Path(directory) / "microphone.wav"
         write_microphone_fixture(wav_path)

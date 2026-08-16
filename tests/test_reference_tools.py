@@ -1,5 +1,7 @@
 import asyncio
 
+from support import wait_until
+
 from converse_code.agent_tools import PiControlRouter, manifest
 from converse_code.bridge import ToolCall
 from converse_code.pi_tui import PiTUIBridgeError
@@ -54,7 +56,8 @@ def task_call(call_id="message-1", message="Fix it"):
 async def start_task(pi, sender, message="Fix it"):
     router = make_router(pi, sender)
     running = asyncio.create_task(router.handle_tool_call(task_call(message=message)))
-    await asyncio.sleep(0)
+    await wait_until(lambda: pi.commands,
+                     describe=lambda: "the prompt command never reached Pi")
     await pi.emit({"type": "input_seen", "owner": "bridge", "commandId": "fake-1"})
     return router, running
 
