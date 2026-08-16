@@ -1,4 +1,5 @@
 import json
+from contextlib import asynccontextmanager
 
 import pytest
 import websockets
@@ -9,6 +10,20 @@ from converse_code.converse import (
     mint_session_credential,
     validate_key,
 )
+
+
+@asynccontextmanager
+async def credential_endpoint(issue):
+    app = web.Application()
+    app.router.add_post("/api/v1/session-keys", issue)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    try:
+        yield f"http://127.0.0.1:{runner.addresses[0][1]}"
+    finally:
+        await runner.cleanup()
 
 
 async def test_validate_key_uses_non_billable_auth_frame():
@@ -38,17 +53,8 @@ async def test_mint_session_credential_keeps_persistent_key_server_side():
             "expires_in": 600,
         }, status=201)
 
-    app = web.Application()
-    app.router.add_post("/api/v1/session-keys", issue)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    base = f"http://127.0.0.1:{runner.addresses[0][1]}"
-    try:
+    async with credential_endpoint(issue) as base:
         credential = await mint_session_credential("ck_persistent", "browser-session", base)
-    finally:
-        await runner.cleanup()
 
     assert seen == {
         "authorization": "Bearer ck_persistent",
@@ -63,56 +69,23 @@ async def test_mint_session_credential_rejects_bad_upstream_response():
     async def issue(_request):
         return web.json_response({"error": "unauthorized"}, status=401)
 
-    app = web.Application()
-    app.router.add_post("/api/v1/session-keys", issue)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    base = f"http://127.0.0.1:{runner.addresses[0][1]}"
-    try:
+    async with credential_endpoint(issue) as base:
         with pytest.raises(CredentialError, match="401"):
             await mint_session_credential("bad", "browser-session", base)
-    finally:
-        await runner.cleanup()
 
 
-async def test_mint_session_credential_rejects_boolean_expiry():
+@pytest.mark.parametrize("invalid", [
+    {"expires_in": True},
+    {"expires_in": 0},
+    {"api_key": ""},
+    {"session_id": "someone-else"},
+])
+async def test_mint_session_credential_rejects_invalid_upstream_payloads(invalid):
+    valid = {"api_key": "csk_scoped", "session_id": "browser-session", "expires_in": 600}
+
     async def issue(_request):
-        return web.json_response({
-            "api_key": "csk_scoped", "session_id": "browser-session",
-            "expires_in": True,
-        }, status=201)
+        return web.json_response({**valid, **invalid}, status=201)
 
-    app = web.Application()
-    app.router.add_post("/api/v1/session-keys", issue)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    base = f"http://127.0.0.1:{runner.addresses[0][1]}"
-    try:
+    async with credential_endpoint(issue) as base:
         with pytest.raises(CredentialError, match="invalid response"):
             await mint_session_credential("key", "browser-session", base)
-    finally:
-        await runner.cleanup()
-
-
-async def test_mint_session_credential_rejects_empty_scoped_key():
-    async def issue(_request):
-        return web.json_response({
-            "api_key": "", "session_id": "browser-session", "expires_in": 600,
-        }, status=201)
-
-    app = web.Application()
-    app.router.add_post("/api/v1/session-keys", issue)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "127.0.0.1", 0)
-    await site.start()
-    base = f"http://127.0.0.1:{runner.addresses[0][1]}"
-    try:
-        with pytest.raises(CredentialError, match="invalid response"):
-            await mint_session_credential("key", "browser-session", base)
-    finally:
-        await runner.cleanup()
