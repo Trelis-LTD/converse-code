@@ -1,6 +1,7 @@
 import asyncio
 
 from converse_code.agent_tools import PiControlRouter, manifest
+from converse_code.bridge import ToolCall
 
 
 class FakePi:
@@ -46,7 +47,7 @@ def make_router(pi, sender):
 
 
 def task_call(call_id="message-1", message="Fix it"):
-    return {"id": call_id, "name": "pi_request", "args": {"user_request": message}}
+    return ToolCall(call_id, "pi_request", {"user_request": message})
 
 
 async def start_task(pi, sender, message="Fix it"):
@@ -90,7 +91,16 @@ async def test_idle_pi_message_owns_one_deferred_pi_episode_until_settlement():
 
 
 async def test_pi_request_while_working_is_immediate_steering_not_another_background_job():
-    pi, sender = FakePi(), FakeSender()
+    class InputEchoPi(FakePi):
+        async def command(self, kind, **fields):
+            command_id = await super().command(kind, **fields)
+            if kind == "steer":
+                await self.emit({
+                    "type": "input_seen", "owner": "bridge", "commandId": command_id,
+                })
+            return command_id
+
+    pi, sender = InputEchoPi(), FakeSender()
     router, running = await start_task(pi, sender, "Build the game")
 
     await router.handle_tool_call(task_call("message-2", "Make it an airplane game"))
@@ -105,6 +115,22 @@ async def test_pi_request_while_working_is_immediate_steering_not_another_backgr
     await pi.emit({"type": "message_end", "message": {
         "role": "assistant", "content": "Built the airplane game.",
     }})
+    await pi.emit({"type": "agent_settled"})
+    await running
+
+
+async def test_pi_request_before_initial_ownership_is_not_misrepresented_as_steering():
+    pi, sender = FakePi(), FakeSender()
+    router = make_router(pi, sender)
+    running = asyncio.create_task(router.handle_tool_call(task_call()))
+    await asyncio.sleep(0)
+
+    await router.handle_tool_call(task_call("message-2", "Change direction"))
+
+    assert pi.commands == [("prompt", {"message": "Fix it"})]
+    assert sender.results[-1][0] == "message-2"
+    assert sender.results[-1][1]["event"] == "pi_turn_starting"
+    await pi.emit({"type": "input_seen", "owner": "bridge", "commandId": "fake-1"})
     await pi.emit({"type": "agent_settled"})
     await running
 
@@ -133,10 +159,10 @@ async def test_approval_surfaces_as_a_queued_user_interaction():
     )
     assert "speak" not in sender.partials[-1][1]
 
-    await router.handle_tool_call({
-        "id": "approval-call", "name": "pi_approval",
-        "args": {"approval_id": "approval-7", "decision": "allow_once"},
-    })
+    await router.handle_tool_call(ToolCall(
+        "approval-call", "pi_approval",
+        {"approval_id": "approval-7", "decision": "allow_once"},
+    ))
     assert pi.commands[-1] == (
         "approval_response", {"approvalId": "approval-7", "decision": "allow_once"},
     )
@@ -164,10 +190,10 @@ async def test_change_of_course_blocks_pending_approval_before_steering():
         ("approval_response", {"approvalId": "approval-1", "decision": "block"}),
         ("steer", {"message": "Use a local server instead"}),
     ]
-    await router.handle_tool_call({
-        "id": "stale", "name": "pi_approval",
-        "args": {"approval_id": "approval-1", "decision": "allow_once"},
-    })
+    await router.handle_tool_call(ToolCall(
+        "stale", "pi_approval",
+        {"approval_id": "approval-1", "decision": "allow_once"},
+    ))
     assert sender.results[-1][2]["outcome"] == "failed"
     await pi.emit({"type": "message_end", "message": {"role": "assistant", "content": "Done"}})
     await pi.emit({"type": "agent_settled"})
@@ -178,7 +204,7 @@ async def test_pi_cancel_aborts_only_the_active_pi_turn():
     pi, sender = FakePi(), FakeSender()
     router, running = await start_task(pi, sender)
 
-    await router.handle_tool_call({"id": "cancel-1", "name": "pi_cancel", "args": {}})
+    await router.handle_tool_call(ToolCall("cancel-1", "pi_cancel", {}))
 
     assert pi.commands[-1] == ("abort", {})
     assert sender.results[-1] == (
@@ -217,13 +243,13 @@ async def test_malformed_arguments_and_stale_approvals_fail_before_side_effects(
     pi, sender = FakePi(), FakeSender()
     router = make_router(pi, sender)
 
-    await router.handle_tool_call({
-        "id": "bad-message", "name": "pi_request", "args": {"user_request": ["Fix it"]},
-    })
-    await router.handle_tool_call({
-        "id": "bad-approval", "name": "pi_approval",
-        "args": {"approval_id": "missing", "decision": "allow_once"},
-    })
+    await router.handle_tool_call(ToolCall(
+        "bad-message", "pi_request", {"user_request": ["Fix it"]},
+    ))
+    await router.handle_tool_call(ToolCall(
+        "bad-approval", "pi_approval",
+        {"approval_id": "missing", "decision": "allow_once"},
+    ))
 
     assert pi.commands == []
     assert [result[2]["outcome"] for result in sender.results] == ["failed", "failed"]
@@ -240,6 +266,22 @@ async def test_unrelated_terminal_input_and_disconnect_fail_the_owned_episode_cl
         await pi.emit(event)
         await running
         assert sender.results[-1][2]["outcome"] == "failed"
+
+
+async def test_pi_activity_before_input_ownership_fails_without_leaking_a_partial():
+    pi, sender = FakePi(), FakeSender()
+    router = make_router(pi, sender)
+    running = asyncio.create_task(router.handle_tool_call(task_call()))
+    await asyncio.sleep(0)
+
+    await pi.emit({
+        "type": "tool_execution_start", "toolName": "bash", "args": {"command": "pwd"},
+    })
+    await running
+
+    assert sender.partials == []
+    assert sender.results[-1][1]["event"] == "pi_ownership_unconfirmed"
+    assert sender.results[-1][2]["outcome"] == "failed"
 
 
 async def test_events_racing_prompt_acknowledgement_are_delivered_after_deferred():

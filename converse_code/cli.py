@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import agent_tools, config, converse
 from .agent_tools import PiControlRouter
-from .bridge import BrowserBridge
+from .bridge import BrowserBridge, ToolCall
 from .localserver import LocalServer, ServerHandlers
 from .pi_tui import PiTUIBridge, PiTUIBridgeError
 from .session_trace import SessionTrace
@@ -57,8 +57,7 @@ def _no_trace(source: str, event: str, **data) -> None:
     pass
 
 
-async def _run(args) -> int:
-    trace = args.session_trace
+async def _run(args, trace: SessionTrace | None) -> int:
     trace_event = trace.record if trace is not None else _no_trace
 
     api_key = _ensure_api_key()
@@ -79,8 +78,10 @@ async def _run(args) -> int:
             "tools": agent_tools.manifest(),
         }
 
-    async def spawn_tool(call: dict) -> None:
-        trace_event("host", "tool_call_received", call=call)
+    async def spawn_tool(call: ToolCall) -> None:
+        trace_event("host", "tool_call_received", call={
+            "id": call.call_id, "name": call.name, "args": call.arguments,
+        })
         task = asyncio.create_task(router.handle_tool_call(call))
         tool_tasks.add(task)
         task.add_done_callback(tool_tasks.discard)
@@ -126,8 +127,8 @@ async def _run(args) -> int:
         return sent
 
     pi = PiTUIBridge(send_to_pi)
-    async def handle_native_session_end(event: dict) -> None:
-        trace_event("host", "native_session_end", **event)
+    async def handle_native_session_end() -> None:
+        trace_event("host", "native_session_end")
         stopped.set()
 
     router = PiControlRouter(pi, bridge, handle=_session_handle())
@@ -181,7 +182,7 @@ async def _run(args) -> int:
         if process_wait in completed and router.active_call_id:
             await router.on_event({"type": "process_exit", "status": process.returncode})
         elif router.active_call_id:
-            await router.handle_tool_cancel({"id": router.active_call_id})
+            await router.handle_tool_cancel(router.active_call_id)
         if tool_tasks:
             await asyncio.wait(tool_tasks, timeout=2)
         if process.returncode is None:
@@ -226,7 +227,6 @@ def main() -> None:
     sub.add_parser("login", help="store and validate a Converse API key")
     args = parser.parse_args()
     trace = SessionTrace(args.debug_log) if args.debug_log else None
-    args.session_trace = trace
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
     exit_code = 1
     try:
@@ -235,7 +235,7 @@ def main() -> None:
         if args.cmd == "login":
             exit_code = asyncio.run(_login(args.broker_url))
         else:
-            exit_code = asyncio.run(_run(args))
+            exit_code = asyncio.run(_run(args, trace))
         if trace is not None:
             trace.record("host", "session_end", exit_code=exit_code)
     finally:

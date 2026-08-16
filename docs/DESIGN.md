@@ -25,6 +25,11 @@ Python lifecycle router
 Pi extension ── sendUserMessage / events ── visible Pi TUI ── Codex
 ```
 
+Decoded JSON remains boundary data until it is parsed. Browser tool calls become a `ToolCall`
+before reaching the lifecycle router; malformed calls never enter it. Pi events likewise become
+typed ownership, activity, approval, message, settlement, or loss events before state transitions
+run.
+
 Pi is launched in its default interactive mode. The extension uses `sendUserMessage()` for a new
 turn, `deliverAs: "steer"` for active guidance, `abort()` for cancellation, and `shutdown()` for
 graceful exit. Model questions and changes go through the same natural-language Pi message as any
@@ -38,7 +43,7 @@ infers menu state.
 | Visible Pi extension evidence | Converse control |
 | --- | --- |
 | acknowledged `sendUserMessage` command | `tool_deferred` |
-| ordinary tool start | silent structured `tool_partial_result` |
+| ordinary tool start | structured `tool_partial_result` without an interaction |
 | approval request | structured `tool_partial_result` with `interaction` prompt and choices |
 | `message_end` | authoritative final-text candidate |
 | `agent_settled` | one terminal `tool_result` |
@@ -49,6 +54,8 @@ active at a time because Pi's visible-TUI extension API does not attach a caller
 events. The extension therefore emits an ownership event for each matched `sendUserMessage()`
 input. Manual terminal input, another extension's input, session replacement, or bridge loss while
 a voice task is active fails that Converse tool closed instead of attributing unrelated output.
+The router represents acknowledgement, ownership, running, cancellation, and settlement as
+separate states; only the owned running state can carry assistant output or pending approvals.
 
 ## Approvals
 
@@ -72,7 +79,9 @@ Converse owns conversational ending. Its intentional transport close is exposed 
 as `session_end`; the page forwards that structured lifecycle event and the host gracefully shuts
 down Pi. Converse Code does not duplicate end intent with a phrase matcher or tool.
 
-The page has microphone control but no text input. It mirrors Browser SDK speech, reply, and tool
-lifecycle events; Pi remains the canonical coding transcript. Python holds the persistent Converse
+The page has microphone control but no text input. One tagged session state—idle, opening, live,
+or ended—drives its controls; the delivery epoch and microphone exist only while live, and events
+are accepted only from the instance the session owns. It mirrors Browser SDK speech, reply, and
+tool lifecycle events; Pi remains the canonical coding transcript. Python holds the persistent Converse
 key and mints a short-lived browser credential. Controls are sequenced, acknowledged, retained
 across disconnects, and replayed after reconnect.
