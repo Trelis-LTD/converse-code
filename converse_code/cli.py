@@ -13,7 +13,7 @@ import webbrowser
 from pathlib import Path
 
 from . import agent_tools, config, converse
-from .agent_tools import AgentToolRouter
+from .agent_tools import PiControlRouter
 from .bridge import BrowserBridge
 from .localserver import LocalServer, ServerHandlers
 from .pi_tui import PiTUIBridge, PiTUIBridgeError
@@ -128,7 +128,7 @@ async def _run(args) -> int:
         trace_event("host", "native_session_end", **event)
         stopped.set()
 
-    router = AgentToolRouter(pi, bridge, handle=_session_handle())
+    router = PiControlRouter(pi, bridge, handle=_session_handle())
 
     try:
         await server.start(port=args.port)
@@ -151,9 +151,10 @@ async def _run(args) -> int:
 
     environment = {**os.environ, "CONVERSE_CODE_PI_BRIDGE_URL": server.pi_url}
     try:
-        pi_command = [
-            *shlex.split(args.pi), "-e", str(Path(__file__).with_name("pi_bridge.ts")),
-        ]
+        pi_command = [*shlex.split(args.pi)]
+        if args.continue_session:
+            pi_command.append("--continue")
+        pi_command.extend(["-e", str(Path(__file__).with_name("pi_bridge.ts"))])
         process = await asyncio.create_subprocess_exec(*pi_command, env=environment)
     except FileNotFoundError:
         await server.stop()
@@ -211,6 +212,10 @@ def main() -> None:
         "--api-url", default=os.environ.get("CONVERSE_API_URL", converse.DEFAULT_API_URL),
     )
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument(
+        "--continue", dest="continue_session", action="store_true",
+        help="continue Pi's most recent session in the current directory",
+    )
     parser.add_argument(
         "--debug-log", metavar="PATH",
         help="append a sensitive, locally redacted JSONL session trace for debugging",

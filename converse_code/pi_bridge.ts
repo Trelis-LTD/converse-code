@@ -10,6 +10,58 @@ export default function (pi) {
   const expectedInputs = [];
   const pendingApprovals = new Map();
 
+  pi.registerTool({
+    name: "pi_session_model",
+    label: "Pi session model",
+    description: "Read or change the model hosting this Pi session. Omit provider and model to inspect current and available models; provide both to select an exact available model.",
+    promptSnippet: "Inspect or change the model hosting the current Pi session",
+    parameters: {
+      type: "object",
+      properties: {
+        provider: {type: "string", description: "Exact provider id from the available models"},
+        model: {type: "string", description: "Exact model id from the available models"},
+      },
+      additionalProperties: false,
+    },
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const availableModels = ctx.modelRegistry.getAvailable();
+      const available = availableModels.map((item) => `${item.provider}/${item.id}`);
+      const requested = params.provider && params.model
+        ? `${params.provider}/${params.model}`
+        : null;
+      if ((params.provider && !params.model) || (!params.provider && params.model)) {
+        return {
+          content: [{type: "text", text: JSON.stringify({error: "provider_and_model_required", available})}],
+          details: {error: "provider_and_model_required", available},
+          isError: true,
+        };
+      }
+      if (requested) {
+        const selected = availableModels.find(
+          (item) => item.provider === params.provider && item.id === params.model,
+        );
+        if (!selected) {
+          return {
+            content: [{type: "text", text: JSON.stringify({error: "model_unavailable", requested, available})}],
+            details: {error: "model_unavailable", requested, available},
+            isError: true,
+          };
+        }
+        const changed = await pi.setModel(selected);
+        if (!changed) {
+          return {
+            content: [{type: "text", text: JSON.stringify({error: "model_change_rejected", requested})}],
+            details: {error: "model_change_rejected", requested},
+            isError: true,
+          };
+        }
+      }
+      const current = requested || (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null);
+      const details = {current, available};
+      return {content: [{type: "text", text: JSON.stringify(details)}], details};
+    },
+  });
+
   const send = (frame) => {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(frame));
   };
@@ -77,49 +129,6 @@ export default function (pi) {
           resolvePendingApprovals("allow_session");
         }
         pending.resolve({decision: frame.decision});
-      } else if (frame.type === "model_state") {
-        if (typeof frame.request !== "string" || !frame.request.trim()) {
-          throw new Error("a model is required");
-        }
-        if (!context.isIdle()) throw new Error("Pi must be idle before changing model");
-        const normalize = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-        const requested = normalize(frame.request);
-        const scoped = Array.isArray(context.scopedModels) ? context.scopedModels : [];
-        const available = scoped.length
-          ? scoped.map((entry) => entry.model || entry)
-          : await context.modelRegistry.getAvailable();
-        const valid = available.filter((model) => (
-          typeof model?.provider === "string" && model.provider
-          && typeof model?.id === "string" && model.id
-        ));
-        const matches = valid.filter((model) => {
-          const id = normalize(model.id);
-          const qualified = normalize(`${model.provider}/${model.id}`);
-          return requested === id || requested === qualified
-            || requested.includes(qualified) || requested.includes(id)
-            || id.endsWith(requested);
-        });
-        if (matches.length > 1) {
-          throw new Error("the requested model is ambiguous");
-        }
-        const current = context.model;
-        if (typeof current?.provider !== "string" || typeof current?.id !== "string") {
-          throw new Error("Pi did not report its current model");
-        }
-        const names = valid.map((model) => `${model.provider}/${model.id}`);
-        if (!names.length) names.push(`${current.provider}/${current.id}`);
-        if (matches.length === 0) {
-          respond(frame.id, true, null, {
-            provider: current.provider, model: current.id, changed: false, available: names,
-          });
-          return;
-        }
-        const selected = matches[0];
-        if (!await pi.setModel(selected)) throw new Error("the requested model is unavailable");
-        respond(frame.id, true, null, {
-          provider: selected.provider, model: selected.id, changed: true, available: names,
-        });
-        return;
       } else if (frame.type === "shutdown") {
         respond(frame.id, true);
         setTimeout(() => context.shutdown(), 0);

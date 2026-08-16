@@ -23,13 +23,18 @@ function fakePi() {
   const handlers = new Map();
   return {
     handlers,
+    tools: new Map(),
     userMessages: [],
     on(name, callback) { handlers.set(name, callback); },
+    registerTool(tool) { this.tools.set(tool.name, tool); },
+    async setModel(model) {
+      this.selectedModel = model;
+      return true;
+    },
     sendUserMessage(message, options) {
       this.userMessages.push({message, options});
       handlers.get("input")?.({text: message, source: "extension", streamingBehavior: options?.deliverAs});
     },
-    async setModel(model) { this.selectedModel = model; return true; },
   };
 }
 
@@ -37,18 +42,35 @@ const pi = fakePi();
 let idle = true;
 const statuses = [];
 const context = {
-  model: {provider: "openai-codex", id: "gpt-5.6-luna"},
-  scopedModels: [],
-  modelRegistry: {getAvailable: async () => [
-    {provider: "openai-codex", id: "gpt-5.6-luna"},
-    {provider: "openai-codex", id: "gpt-5.6-sol"},
-  ]},
   isIdle: () => idle,
   abort: () => { context.aborted = true; },
   shutdown: () => { context.shutDown = true; },
+  model: {provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra"},
+  scopedModels: [],
+  modelRegistry: {
+    getAvailable: () => [
+      {provider: "openai-codex", id: "gpt-5.6-terra", name: "GPT-5.6 Terra"},
+      {provider: "openai-codex", id: "gpt-5.6-sol", name: "GPT-5.6 Sol"},
+    ],
+  },
   ui: {setStatus: (_id, text) => statuses.push(text)},
 };
 bridgeExtension(pi);
+const modelTool = pi.tools.get("pi_session_model");
+if (!modelTool) throw new Error("Pi cannot inspect or change its own session model");
+const modelState = await modelTool.execute("model-1", {}, undefined, undefined, context);
+if (modelState.details.current !== "openai-codex/gpt-5.6-terra") {
+  throw new Error("Pi model tool did not report the authoritative current model");
+}
+if (!modelState.details.available.includes("openai-codex/gpt-5.6-sol")) {
+  throw new Error("Pi model tool did not report available models");
+}
+const changedModel = await modelTool.execute(
+  "model-2", {provider: "openai-codex", model: "gpt-5.6-sol"}, undefined, undefined, context,
+);
+if (changedModel.isError || pi.selectedModel?.id !== "gpt-5.6-sol") {
+  throw new Error("Pi model tool did not change the host session model semantically");
+}
 pi.handlers.get("session_start")({}, context);
 const socket = FakeSocket.latest;
 socket.emit("open");
@@ -83,38 +105,6 @@ if (ownedInputs[0].commandId !== "p1" || ownedInputs[1].commandId !== "s1") {
   throw new Error("bridge input ownership was not command-correlated");
 }
 if (!statuses.includes("Converse voice: connected")) throw new Error("visible status was not set");
-
-idle = true;
-socket.emit("message", {data: JSON.stringify({
-  id: "m0", type: "model_state", request: "What model are we using?",
-})});
-await new Promise((resolve) => setTimeout(resolve, 10));
-const currentModelResponse = socket.frames.find((frame) => frame.id === "m0");
-if (currentModelResponse?.success !== true || currentModelResponse.model !== "gpt-5.6-luna"
-    || currentModelResponse.changed !== false || pi.selectedModel !== undefined) {
-  throw new Error("current model query was not authoritative and read-only");
-}
-
-socket.emit("message", {data: JSON.stringify({
-  id: "m1", type: "model_state", request: "Use GPT 5.6 Sol",
-})});
-await new Promise((resolve) => setTimeout(resolve, 10));
-const modelResponse = socket.frames.find((frame) => frame.id === "m1");
-if (modelResponse?.success !== true || modelResponse.model !== "gpt-5.6-sol") {
-  throw new Error(`model change did not return authoritative selected state: ${JSON.stringify(modelResponse)}`);
-}
-if (pi.selectedModel?.id !== "gpt-5.6-sol") throw new Error("Pi model was not changed semantically");
-
-pi.selectedModel = null;
-socket.emit("message", {data: JSON.stringify({
-  id: "m2", type: "model_state", request: "Use GPT 5.6 Luna or GPT 5.6 Sol",
-})});
-await new Promise((resolve) => setTimeout(resolve, 10));
-const ambiguousModelResponse = socket.frames.find((frame) => frame.id === "m2");
-if (ambiguousModelResponse?.success !== false || !ambiguousModelResponse.error?.includes("ambiguous")) {
-  throw new Error("ambiguous model request did not fail closed");
-}
-if (pi.selectedModel !== null) throw new Error("ambiguous model request changed Pi state");
 
 const approval = pi.handlers.get("tool_call")({
   toolCallId: "tool-approval-1", toolName: "bash", input: {command: "uv run pytest -q"},

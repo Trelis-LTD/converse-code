@@ -5,12 +5,10 @@ visible coding session and terminal UI. Converse owns speech and the background-
 
 ## Public surface
 
-- `coding_task(request)` is deferred and starts work only while the bridge is idle.
-- `continue_task(request)` semantically steers active work.
-- `approval_decision(approval_id, decision)` resolves only a matching pending approval.
-- `pi_model(request)` reads authoritative model state and changes it only when the request uniquely
-  names an available model, using Pi's semantic `setModel()` API.
-- Tool cancellation calls Pi's documented extension `abort()` API.
+- `pi_request(user_request)` starts one deferred Pi turn while idle and semantically steers it while
+  working.
+- `pi_approval(approval_id, decision)` resolves only a matching pending approval.
+- `pi_cancel()` calls Pi's documented extension `abort()` API without ending voice.
 
 ## Boundary
 
@@ -28,19 +26,20 @@ Pi extension ── sendUserMessage / events ── visible Pi TUI ── Codex
 ```
 
 Pi is launched in its default interactive mode. The extension uses `sendUserMessage()` for a new
-task, `deliverAs: "steer"` for active guidance, `setModel()` for model changes, `abort()` for
-cancellation, and `shutdown()` for graceful exit. It emits explicit message, tool, and settled
-events. It never reads terminal rows, types keys, or infers menu state.
+turn, `deliverAs: "steer"` for active guidance, `abort()` for cancellation, and `shutdown()` for
+graceful exit. Model questions and changes go through the same natural-language Pi message as any
+other request. A Pi-internal `pi_session_model` capability reads `ctx.model`/`modelRegistry` and
+changes the session through `setModel()`; it is not a Converse tool or a menu driver. The extension
+emits explicit message, tool, and settled events. It never reads terminal rows, types keys, or
+infers menu state.
 
 ## Event mapping
 
 | Visible Pi extension evidence | Converse control |
 | --- | --- |
 | acknowledged `sendUserMessage` command | `tool_deferred` |
-| ordinary tool start | `tool_progress` |
-| `edit` or `write` start | silent `tool_partial_result` |
-| test command start | spoken `tool_partial_result`, `reply: true` |
-| approval request | spoken structured `tool_partial_result`, `reply: true` |
+| ordinary tool start | structured `tool_partial_result`, `reply: false` |
+| approval request | structured `tool_partial_result` with `interaction` prompt and choices |
 | `message_end` | authoritative final-text candidate |
 | `agent_settled` | one terminal `tool_result` |
 | cancellation | Pi extension `abort()` |
@@ -54,11 +53,12 @@ a voice task is active fails that Converse tool closed instead of attributing un
 ## Approvals
 
 The bridge extension intercepts `bash`, `edit`, and `write` before execution, creates a unique
-approval ID, and waits without opening a terminal menu. Converse receives the target as a
-structured background-tool partial with `reply: true`, which asks the user aloud to allow once,
-allow for the session, or block. Only an explicit `approval_decision` carrying the pending ID can
-resume the Pi hook. Stale
-IDs, malformed decisions, disconnects, cancellation, and timeouts fail closed.
+approval ID, and waits without opening a terminal menu. Converse receives the ID, tool, target, and
+valid decisions as a structured background-tool interaction. Converse queues its narration when
+the voice floor is busy and exposes the narration lifecycle. Only an explicit
+`pi_approval` carrying the pending ID can resume the Pi hook. A new `pi_request` first blocks any
+pending approval and then steers the change of course. Stale IDs, malformed decisions, disconnects,
+cancellation, and timeouts fail closed.
 
 ## Evidence and outcomes
 

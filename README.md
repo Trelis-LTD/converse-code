@@ -4,14 +4,15 @@ A deliberately small voice remote for a normal, visible Pi terminal, and a refer
 implementation for [Converse](https://converse.trelis.com) background tools and the Browser SDK.
 Pi uses the user's ChatGPT Plus/Pro Codex subscription.
 
-The example demonstrates the complete deferred-tool lifecycle:
+The example exposes the same small controls a person has over Pi:
 
-1. `coding_task` accepts work and immediately backgrounds it.
-2. Pi tool events become progress and partial results.
-3. Routine edits use silent partials; meaningful milestones use `reply: true`.
-4. `continue_task` steers the running task from a later voice turn.
-5. Pi's `agent_settled` event resolves the deferred tool exactly once.
-6. Converse cancellation maps directly to Pi's extension `abort()` API.
+1. `pi_request` sends the user's request to Pi. An idle Pi starts one deferred turn; a working Pi
+   receives immediate steering.
+2. `pi_approval` delivers an explicit decision for a pending approval ID.
+3. `pi_cancel` aborts Pi's current turn without ending the voice session.
+4. Pi tool events become structured, silent partials. A blocking approval becomes a queued Converse
+   `interaction` with a question and explicit choices.
+5. Pi's `agent_settled` event resolves the one deferred turn exactly once.
 
 The browser remains voice-only but mirrors the live speech transcript, assistant replies, and
 coding activity. Pi retains the canonical coding transcript and model state. A bundled extension
@@ -20,10 +21,10 @@ lifecycle events. There is no terminal emulation, screen scraping, key injection
 shell bypass, or hidden Pi process.
 
 That same extension gates `bash`, `edit`, and `write` with ID-correlated semantic approval
-requests. Converse asks the user to allow once, allow for the session, or block, and Pi accepts
-only an explicit response for the pending ID. Approval narration is queued until any active voice
-reply finishes and is acknowledged by the Browser SDK. No terminal selection menu is opened or
-navigated.
+requests. Converse receives the approval ID, tool, target, and valid decisions as structured facts;
+Pi accepts only an explicit response for the pending ID. Converse owns the interaction's queued,
+started, superseded, cancelled, or failed narration lifecycle, including when the voice floor is
+busy. No terminal selection menu is opened or navigated.
 
 ## Install
 
@@ -48,6 +49,8 @@ Override that command when testing another Pi configuration:
 ```bash
 converse-code --pi "pi --provider openai-codex --model gpt-5.6-codex"
 ```
+
+Pass `--continue` to resume Pi's most recent session in the current directory.
 
 Run `converse-code login` to store a Converse API key. The persistent key remains in Python; the
 browser receives only a short-lived session credential.
@@ -75,14 +78,13 @@ Converse voice model
 Voice-only Browser SDK page
         │ acknowledged localhost controls
         ▼
-AgentToolRouter ── local semantic bridge ── visible Pi TUI ── Codex
+PiControlRouter ── local semantic bridge ── visible Pi TUI ── Codex
         │
-        └─ deferred / progress / partial(reply) / terminal result
+        └─ deferred / partial(interaction) / terminal result
 ```
 
-The model-facing surface is intentionally limited to `coding_task`, `continue_task`,
-`approval_decision`, and `pi_model`. Model reads and changes use Pi's semantic API
-and return its current/available state; they do not navigate the terminal UI. See
+The model-facing surface is limited to `pi_request`, `pi_approval`, and `pi_cancel`. Questions and
+requests about Pi—including model changes—are ordinary messages interpreted by Pi itself. See
 [docs/DESIGN.md](docs/DESIGN.md) for the event mapping and evidence rules.
 
 Session ending follows Converse's native lifecycle. An intentional server close becomes the
@@ -100,9 +102,9 @@ uv run scripts/browser_e2e.py
 
 The deterministic suite exercises the Python bridge and the real TypeScript Pi extensions. The
 browser suite drives the shipped voice-only page in Chromium and checks transcript streaming,
-activity indicators, backgrounding, silent and spoken partials, completion, cancellation, and
-reconnect replay. Release testing also launches a real visible Pi TUI and injects a bounded task
-through the semantic extension bridge.
+activity indicators, backgrounding, structured partials, completion, cancellation, native session
+ending, and reconnect replay. Release testing also launches a real visible Pi TUI and injects a
+bounded task through the semantic extension bridge.
 
 ## License
 
