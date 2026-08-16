@@ -26,7 +26,11 @@ Delete or rewrite tests that:
 - assert the absence of fields or features production no longer writes;
 - depend on runtime scheduling internals, such as a fixed number of event-loop ticks before an outcome appears.
 
-Delete absence assertions together with the feature they once guarded. Replace tick counting by awaiting the observable frame or result within a bounded timeout, so the test passes on every supported runtime. Rejection cases for one boundary parser belong together: drive one fake through each invalid shape, named per case, rather than duplicating a bespoke server per shape.
+Delete absence assertions together with the feature they once guarded. Replace tick counting by awaiting the observable frame or result within a bounded timeout, so the test passes on every supported runtime; the wait must name the missing condition on expiry rather than raise an anonymous timeout. Rejection cases for one boundary parser belong together: drive one fake through each invalid shape, named per case, rather than duplicating a bespoke server per shape.
+
+A check that cannot run at all in an environment (a runtime too old for the file format, a missing browser) must skip with the requirement named, not fail as though the contract broke — a red that means "wrong machine" trains readers to ignore red. But a skip is only acceptable while at least one mandated verification path still runs the check red-on-failure; a check that skips everywhere has been deleted in disguise.
+
+A periodic sweep that finds nothing to delete is a result, not a failure — record it and stop. Do not manufacture deletions to make a sweep look productive; the durable inventory below is the standard, and matching it is the goal. When a sweep does find something, prefer the smallest honest change: consolidate scaffolding, fix determinism, and only then delete.
 
 Exact values remain appropriate when they are the external contract itself, such as a tool manifest, wire encoding, security permission, or documented protocol limit. Assert them where the consumer observes them. Keep one canonical package version and derive runtime metadata from it instead of testing duplicated declarations for equality.
 

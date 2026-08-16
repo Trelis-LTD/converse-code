@@ -2,6 +2,8 @@ import asyncio
 
 import pytest
 
+from support import wait_until
+
 from converse_code.pi_tui import PiTUIBridge, PiTUIBridgeError
 
 
@@ -14,9 +16,10 @@ class FakeWire:
         return True
 
     async def sent(self, count=1):
-        async with asyncio.timeout(2):
-            while len(self.frames) < count:
-                await asyncio.sleep(0)
+        await wait_until(
+            lambda: len(self.frames) >= count,
+            describe=lambda: f"{len(self.frames)} frame(s) on the wire, wanted {count}",
+        )
         return self.frames[-1]
 
 
