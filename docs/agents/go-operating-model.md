@@ -23,10 +23,10 @@ Delete or rewrite tests that:
 - duplicate a stronger integration or boundary test without adding a distinct failure signal;
 - manufacture impossible collaborators or mutate private state;
 - merely call a function without asserting an observable result;
-- assert the absence of fields or features production no longer writes — delete those assertions with the feature;
-- depend on runtime scheduling internals, such as a fixed number of event-loop ticks before an outcome appears; await the observable frame or result with a bounded timeout so the test passes on every supported runtime.
+- assert the absence of fields or features production no longer writes;
+- depend on runtime scheduling internals, such as a fixed number of event-loop ticks before an outcome appears.
 
-Rejection cases for one boundary parser belong together: drive one fake through each invalid shape in a single test rather than duplicating a bespoke server per shape.
+Delete absence assertions together with the feature they once guarded. Replace tick counting by awaiting the observable frame or result within a bounded timeout, so the test passes on every supported runtime. Rejection cases for one boundary parser belong together: drive one fake through each invalid shape, named per case, rather than duplicating a bespoke server per shape.
 
 Exact values remain appropriate when they are the external contract itself, such as a tool manifest, wire encoding, security permission, or documented protocol limit. Assert them where the consumer observes them. Keep one canonical package version and derive runtime metadata from it instead of testing duplicated declarations for equality.
 

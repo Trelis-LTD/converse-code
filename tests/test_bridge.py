@@ -38,7 +38,10 @@ class FakeTab:
 
 async def test_controls_wait_for_ready_and_remain_until_browser_ack():
     tab = FakeTab()
-    bridge = make_bridge(tab.send)
+    records = []
+    bridge = BrowserBridge(
+        tab.send, trace=lambda source, event, **data: records.append((source, event, data)),
+    )
 
     await bridge.send_tool_deferred("c1", "code-c1", status_label="Pi")
     await bridge.send_tool_partial_result(
@@ -62,6 +65,11 @@ async def test_controls_wait_for_ready_and_remain_until_browser_ack():
     await handle(bridge, {
         "type": "local", "event": "bridge_ack", "seq": tab.frames[0]["seq"],
     })
+    acknowledged = [
+        data for source, event, data in records
+        if source == "browser_bridge" and event == "control_acknowledged"
+    ]
+    assert [record["seq"] for record in acknowledged] == [tab.frames[0]["seq"]]
     await bridge.on_browser_disconnected()
     await handle(bridge, {"type": "local", "event": "bridge_ready"})
     assert [frame["action"] for frame in tab.frames] == [

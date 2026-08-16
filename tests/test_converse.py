@@ -74,21 +74,18 @@ async def test_mint_session_credential_rejects_bad_upstream_response():
             await mint_session_credential("bad", "browser-session", base)
 
 
-async def test_mint_session_credential_rejects_invalid_upstream_payloads():
+@pytest.mark.parametrize("invalid", [
+    {"expires_in": True},
+    {"expires_in": 0},
+    {"api_key": ""},
+    {"session_id": "someone-else"},
+])
+async def test_mint_session_credential_rejects_invalid_upstream_payloads(invalid):
     valid = {"api_key": "csk_scoped", "session_id": "browser-session", "expires_in": 600}
-    payload = {}
 
     async def issue(_request):
-        return web.json_response(payload, status=201)
+        return web.json_response({**valid, **invalid}, status=201)
 
     async with credential_endpoint(issue) as base:
-        for invalid in (
-            {**valid, "expires_in": True},
-            {**valid, "expires_in": 0},
-            {**valid, "api_key": ""},
-            {**valid, "session_id": "someone-else"},
-        ):
-            payload.clear()
-            payload.update(invalid)
-            with pytest.raises(CredentialError, match="invalid response"):
-                await mint_session_credential("key", "browser-session", base)
+        with pytest.raises(CredentialError, match="invalid response"):
+            await mint_session_credential("key", "browser-session", base)
