@@ -4,17 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 
 
 class PiTUIBridgeError(RuntimeError):
     pass
-
-
-@dataclass(frozen=True)
-class CommandReceipt:
-    command_id: str
-    data: dict[str, object]
 
 
 FrameSender = Callable[[dict], Awaitable[bool]]
@@ -46,7 +39,7 @@ class PiTUIBridge:
             if not future.done():
                 future.set_exception(error)
 
-    async def command(self, kind: str, **fields) -> CommandReceipt:
+    async def command(self, kind: str, **fields) -> str:
         try:
             await asyncio.wait_for(self.connected.wait(), timeout=CONNECT_TIMEOUT)
         except TimeoutError as exc:
@@ -59,12 +52,12 @@ class PiTUIBridge:
             if not await self.send({"id": request_id, "type": kind, **fields}):
                 raise PiTUIBridgeError("the visible Pi terminal disconnected")
             try:
-                data = await asyncio.wait_for(future, timeout=ACK_TIMEOUT)
+                await asyncio.wait_for(future, timeout=ACK_TIMEOUT)
             except TimeoutError as exc:
                 raise PiTUIBridgeError(f"Pi did not acknowledge {kind}") from exc
         finally:
             self._pending.pop(request_id, None)
-        return CommandReceipt(request_id, data)
+        return request_id
 
     async def handle_message(self, frame: dict) -> dict | None:
         if (
@@ -75,10 +68,7 @@ class PiTUIBridge:
             future = self._pending.get(frame["id"])
             if future is not None and not future.done():
                 if frame["success"]:
-                    future.set_result({
-                        key: value for key, value in frame.items()
-                        if key not in {"type", "id", "success"}
-                    })
+                    future.set_result(None)
                 else:
                     error = frame.get("error")
                     future.set_exception(PiTUIBridgeError(
