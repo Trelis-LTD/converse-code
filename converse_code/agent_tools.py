@@ -62,7 +62,8 @@ def manifest() -> list[dict]:
             (
                 "Hand an actionable coding, repository, environment, or Pi question to Pi. "
                 "Forward the user's request faithfully and let Pi inspect or act; never substitute "
-                "your own progress narration or unsupported answer."
+                "your own progress narration or unsupported answer. While Pi is working, this "
+                "steers that same turn and supersedes any pending approval."
             ),
             request,
             ["user_request"],

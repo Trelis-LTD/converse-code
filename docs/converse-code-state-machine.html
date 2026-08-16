@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Converse Code — lifecycle explorer</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background: #f7f7f4;
+      --foreground: #242421;
+      --muted: #e9e9e4;
+      --muted-foreground: #66665f;
+      --card: #ffffff;
+      --card-foreground: #242421;
+      --border: #d5d5ce;
+      --primary: #176b5b;
+      --primary-foreground: #ffffff;
+      --accent: #dceee8;
+      --accent-foreground: #164c42;
+      --warning: #9a5d00;
+      --warning-soft: #fff0cf;
+      --danger: #a33535;
+      --danger-soft: #f8dddd;
+      --success: #26734d;
+      --success-soft: #dff0e7;
+      --line: #92928b;
+      --shadow: 0 10px 30px rgba(35, 35, 28, .08);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #171816;
+        --foreground: #eeeeea;
+        --muted: #292b28;
+        --muted-foreground: #b0b1aa;
+        --card: #20221f;
+        --card-foreground: #eeeeea;
+        --border: #3d403b;
+        --primary: #79c7b5;
+        --primary-foreground: #10251f;
+        --accent: #23463e;
+        --accent-foreground: #d8f4ec;
+        --warning: #f1bc62;
+        --warning-soft: #46371e;
+        --danger: #ef9292;
+        --danger-soft: #4d2929;
+        --success: #89d2aa;
+        --success-soft: #244532;
+        --line: #767a72;
+        --shadow: 0 12px 36px rgba(0, 0, 0, .25);
+      }
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--foreground);
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.45;
+    }
+    button { font: inherit; }
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .9em;
+    }
+    .page { max-width: 1180px; margin: 0 auto; padding: 32px 24px 56px; }
+    header { display: flex; gap: 24px; align-items: end; justify-content: space-between; }
+    h1 { margin: 0; font-size: clamp(1.8rem, 4vw, 3.2rem); line-height: 1.05; font-weight: 500; }
+    .lede { max-width: 620px; margin: 10px 0 0; color: var(--muted-foreground); }
+    .truth {
+      max-width: 290px;
+      padding: 12px 14px;
+      border-left: 3px solid var(--primary);
+      color: var(--muted-foreground);
+    }
+
+    .architecture {
+      display: grid;
+      grid-template-columns: repeat(7, auto);
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      margin: 32px 0;
+      padding: 18px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+    }
+    .actor { text-align: center; min-width: 110px; }
+    .actor strong { display: block; font-weight: 500; }
+    .actor span { color: var(--muted-foreground); font-size: .82rem; }
+    .arrow { color: var(--line); font-size: 1.3rem; }
+
+    .scenario-bar { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 18px; }
+    .scenario {
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--foreground);
+      border-radius: 999px;
+      padding: 8px 13px;
+      cursor: pointer;
+    }
+    .scenario:hover { background: var(--muted); }
+    .scenario[aria-pressed="true"] {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: var(--primary-foreground);
+    }
+
+    .explorer {
+      background: var(--card);
+      color: var(--card-foreground);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .explorer-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 18px 20px 0;
+    }
+    .explorer-head h2 { margin: 0; font-size: 1.15rem; font-weight: 500; }
+    .explorer-head p { margin: 0; color: var(--muted-foreground); font-size: .9rem; }
+
+    .state-map { width: 100%; height: auto; display: block; padding: 12px 10px 0; }
+    .state-map .edge { fill: none; stroke: var(--line); stroke-width: 2; opacity: .32; }
+    .state-map .edge.active { stroke: var(--primary); stroke-width: 4; opacity: 1; }
+    .state-map .node rect { fill: var(--muted); stroke: var(--border); stroke-width: 2; }
+    .state-map .node text { fill: var(--foreground); text-anchor: middle; font-size: 15px; }
+    .state-map .node .sub { fill: var(--muted-foreground); font-size: 11px; }
+    .state-map .node.active rect { fill: var(--accent); stroke: var(--primary); stroke-width: 4; }
+    .state-map .node.current rect { fill: var(--primary); }
+    .state-map .node.current text { fill: var(--primary-foreground); }
+    .state-map .node.current .sub { fill: var(--primary-foreground); opacity: .82; }
+    .state-map .node.failure rect { fill: var(--danger-soft); }
+    .state-map .node.failure.active rect { stroke: var(--danger); }
+    .state-map .node.terminal rect { fill: var(--success-soft); }
+    .state-map .node.terminal.active rect { stroke: var(--success); }
+
+    .timeline { padding: 6px 20px 20px; }
+    .timeline-track { display: grid; grid-template-columns: repeat(var(--steps), minmax(64px, 1fr)); gap: 6px; }
+    .tick {
+      border: 0;
+      border-top: 4px solid var(--border);
+      padding: 8px 4px 0;
+      background: transparent;
+      color: var(--muted-foreground);
+      text-align: left;
+      cursor: pointer;
+      min-width: 0;
+    }
+    .tick.done { border-color: var(--primary); color: var(--foreground); }
+    .tick.current { border-color: var(--primary); color: var(--primary); }
+    .tick span { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .tick small { display: block; margin-top: 2px; color: var(--muted-foreground); }
+
+    .step-panel {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 20px;
+      align-items: center;
+      min-height: 124px;
+      padding: 18px 20px;
+      background: var(--muted);
+      border-top: 1px solid var(--border);
+    }
+    .step-kicker { margin: 0 0 5px; color: var(--primary); font-size: .82rem; font-weight: 500; text-transform: uppercase; letter-spacing: .08em; }
+    .step-panel h3 { margin: 0 0 5px; font-size: 1.12rem; font-weight: 500; }
+    .step-panel p { margin: 0; color: var(--muted-foreground); max-width: 760px; }
+    .step-controls { display: flex; gap: 8px; }
+    .step-controls button {
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--foreground);
+      border-radius: 8px;
+      padding: 8px 11px;
+      cursor: pointer;
+    }
+    .step-controls button:disabled { opacity: .4; cursor: default; }
+
+    .notes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 22px; }
+    .note { padding: 16px 0; border-top: 2px solid var(--border); }
+    .note h3 { margin: 0 0 6px; font-size: 1rem; font-weight: 500; }
+    .note p { margin: 0; color: var(--muted-foreground); font-size: .9rem; }
+    .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 18px; color: var(--muted-foreground); font-size: .85rem; }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { width: 11px; height: 11px; border-radius: 3px; background: var(--muted); border: 2px solid var(--border); }
+    .swatch.active { background: var(--accent); border-color: var(--primary); }
+    .swatch.fail { background: var(--danger-soft); border-color: var(--danger); }
+    .swatch.ok { background: var(--success-soft); border-color: var(--success); }
+
+    @media (max-width: 760px) {
+      .page { padding: 22px 14px 40px; }
+      header { display: block; }
+      .truth { margin-top: 18px; max-width: none; }
+      .architecture { grid-template-columns: 1fr; gap: 4px; }
+      .arrow { transform: rotate(90deg); }
+      .state-map { min-width: 680px; }
+      .map-scroll { overflow-x: auto; }
+      .timeline-track { grid-template-columns: 1fr; }
+      .tick { border-top: 0; border-left: 4px solid var(--border); padding: 5px 8px; }
+      .step-panel { grid-template-columns: 1fr; }
+      .notes { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <div>
+        <h1>Converse Code lifecycle</h1>
+        <p class="lede">Choose a case, then step through how a spoken request crosses Converse, the local bridge, and one visible Pi turn.</p>
+      </div>
+      <div class="truth"><strong>Core invariant:</strong> Pi output belongs to a voice request only after its command ID proves ownership.</div>
+    </header>
+
+    <section class="architecture" aria-label="System architecture">
+      <div class="actor"><strong>User</strong><span>speaks and decides</span></div><div class="arrow">→</div>
+      <div class="actor"><strong>Converse</strong><span>voice + tool lifecycle</span></div><div class="arrow">→</div>
+      <div class="actor"><strong>Converse Code</strong><span>typed state router</span></div><div class="arrow">→</div>
+      <div class="actor"><strong>Pi</strong><span>visible coding session</span></div>
+    </section>
+
+    <nav class="scenario-bar" aria-label="Choose a scenario" id="scenarioBar"></nav>
+
+    <section class="explorer" aria-labelledby="scenarioTitle">
+      <div class="explorer-head">
+        <h2 id="scenarioTitle"></h2>
+        <p id="scenarioSummary"></p>
+      </div>
+      <div class="map-scroll">
+        <svg class="state-map" viewBox="0 0 1000 360" role="img" aria-labelledby="mapTitle mapDesc">
+          <title id="mapTitle">Converse Code Pi turn state machine</title>
+          <desc id="mapDesc">An interactive diagram showing idle, acknowledgement, ownership, running, cancelling, settled, and failed states.</desc>
+          <defs>
+            <marker id="arrowhead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+              <path d="M0,0 L10,4 L0,8 Z" fill="var(--line)"></path>
+            </marker>
+          </defs>
+          <path id="e-idle-ack" class="edge" marker-end="url(#arrowhead)" d="M145 175 C180 175 190 88 230 88"></path>
+          <path id="e-ack-own" class="edge" marker-end="url(#arrowhead)" d="M380 88 L430 88"></path>
+          <path id="e-own-run" class="edge" marker-end="url(#arrowhead)" d="M580 88 L630 88"></path>
+          <path id="e-run-set" class="edge" marker-end="url(#arrowhead)" d="M780 88 C830 88 830 175 855 175"></path>
+          <path id="e-set-idle" class="edge" marker-end="url(#arrowhead)" d="M855 205 C760 315 260 315 145 205"></path>
+          <path id="e-run-cancel" class="edge" marker-end="url(#arrowhead)" d="M705 120 L705 228"></path>
+          <path id="e-cancel-set" class="edge" marker-end="url(#arrowhead)" d="M780 265 C835 265 845 218 865 210"></path>
+          <path id="e-ack-fail" class="edge" marker-end="url(#arrowhead)" d="M305 120 C305 220 390 260 430 260"></path>
+          <path id="e-own-fail" class="edge" marker-end="url(#arrowhead)" d="M505 120 L505 228"></path>
+          <path id="e-run-fail" class="edge" marker-end="url(#arrowhead)" d="M650 112 C610 165 570 215 550 238"></path>
+
+          <g id="n-idle" class="node" transform="translate(25 145)"><rect width="120" height="60" rx="12"></rect><text x="60" y="26">Idle</text><text class="sub" x="60" y="44">no active call</text></g>
+          <g id="n-ack" class="node" transform="translate(230 58)"><rect width="150" height="60" rx="12"></rect><text x="75" y="25">Awaiting ack</text><text class="sub" x="75" y="44">buffers early events</text></g>
+          <g id="n-own" class="node" transform="translate(430 58)"><rect width="150" height="60" rx="12"></rect><text x="75" y="25">Awaiting ownership</text><text class="sub" x="75" y="44">match command ID</text></g>
+          <g id="n-run" class="node" transform="translate(630 58)"><rect width="150" height="60" rx="12"></rect><text x="75" y="25">Running</text><text class="sub" x="75" y="44">partials + approvals</text></g>
+          <g id="n-set" class="node terminal" transform="translate(855 145)"><rect width="120" height="60" rx="12"></rect><text x="60" y="26">Settled</text><text class="sub" x="60" y="44">one final result</text></g>
+          <g id="n-cancel" class="node" transform="translate(630 235)"><rect width="150" height="60" rx="12"></rect><text x="75" y="25">Cancelling</text><text class="sub" x="75" y="44">await terminal signal</text></g>
+          <g id="n-fail" class="node failure" transform="translate(430 235)"><rect width="150" height="60" rx="12"></rect><text x="75" y="25">Failed closed</text><text class="sub" x="75" y="44">no guessed ownership</text></g>
+        </svg>
+      </div>
+
+      <div class="timeline">
+        <div class="timeline-track" id="timeline"></div>
+      </div>
+
+      <div class="step-panel" aria-live="polite">
+        <div>
+          <p class="step-kicker" id="stepKicker"></p>
+          <h3 id="stepTitle"></h3>
+          <p id="stepBody"></p>
+        </div>
+        <div class="step-controls">
+          <button type="button" id="prev">← Previous</button>
+          <button type="button" id="next">Next →</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="legend" aria-label="Diagram legend">
+      <span><i class="swatch active"></i> current path</span>
+      <span><i class="swatch ok"></i> terminal result</span>
+      <span><i class="swatch fail"></i> failed closed</span>
+    </div>
+
+    <section class="notes" aria-label="Important distinctions">
+      <article class="note"><h3>Deferred is not completed</h3><p><code>tool_deferred</code> means Pi accepted a long-running call. Only <code>agent_settled</code> produces its terminal result.</p></article>
+      <article class="note"><h3>Two different queues</h3><p>Early Pi events are briefly buffered until deferred delivery. Browser control frames persist across reconnects. A second request before ownership is rejected, not silently queued.</p></article>
+      <article class="note"><h3>Evidence stays honest</h3><p>Pi’s final text is reported, but ordinary completion remains <code>verified: false</code>; settlement does not independently prove an external effect.</p></article>
+    </section>
+  </main>
+
+  <script>
+    const scenarios = {
+      normal: {
+        label: "Normal turn", summary: "request → attributable Pi result",
+        steps: [
+          ["idle", "User request", "Converse calls pi_request with the user’s instruction.", "idle", "e-idle-ack"],
+          ["ack", "Pi acknowledges the command", "Converse Code sends prompt; events arriving during acknowledgement are buffered.", "ack", "e-idle-ack"],
+          ["ownership", "Deferred, then ownership", "tool_deferred is sent first. A matching input_seen command ID proves this is our Pi turn.", "own", "e-ack-own"],
+          ["running", "Pi works visibly", "Tool starts become partial results. The latest assistant message is retained as the final-text candidate.", "run", "e-own-run"],
+          ["settled", "One terminal result", "agent_settled completes the original deferred call; the router returns to idle.", "set", "e-run-set"]
+        ]
+      },
+      approval: {
+        label: "Approval", summary: "a real decision pauses Pi without opening a TUI menu",
+        steps: [
+          ["running", "Protected action appears", "Pi’s extension emits approval_request with a unique approval ID, tool, and summary.", "run", "e-own-run"],
+          ["interaction", "Converse asks aloud", "A partial result carries a structured interaction: allow once, allow for session, or block.", "run", ""],
+          ["decision", "User decides explicitly", "Converse calls pi_approval with the same pending ID. Stale or malformed decisions fail closed.", "run", ""],
+          ["resume", "Pi resumes", "The approval response is delivered and the original pi_request remains active until Pi settles.", "run", "e-run-set"],
+          ["settled", "Final Pi result", "The deferred turn completes only after agent_settled.", "set", "e-run-set"]
+        ]
+      },
+      interruptedApproval: {
+        label: "Interrupt approval", summary: "the approval cannot survive a change of course",
+        steps: [
+          ["running", "Pi reaches a protected action", "Pi pauses inside its hook and emits approval_request with a unique pending ID.", "run", "e-own-run"],
+          ["voice", "Converse starts asking", "A partial interaction tells Converse exactly what needs approval and which decisions are valid.", "run", ""],
+          ["interrupt", "User interrupts with new intent", "For example: “Actually, don’t edit that—inspect the tests instead.” Converse treats this as a new pi_request, not as approval.", "run", ""],
+          ["block", "Obsolete approval is blocked first", "Before steering, Converse Code sends block for every pending approval ID. The protected action cannot accidentally continue.", "run", ""],
+          ["retract", "The stale question is retracted", "A pi_approval_superseded partial on the original deferred call carries the same approval ID, closing its queued narration and model context.", "run", ""],
+          ["steer", "The new direction reaches Pi", "Pi receives the interruption through steer mode while the original deferred turn remains active.", "run", ""],
+          ["settled", "Revised turn settles", "Pi completes under the new direction, and the original pi_request receives one terminal result.", "set", "e-run-set"]
+        ]
+      },
+      expiredApproval: {
+        label: "Approval expires", summary: "an unanswered question cannot brick later steering",
+        steps: [
+          ["running", "Pi waits for a decision", "The protected tool remains blocked while its approval interaction is pending.", "run", "e-own-run"],
+          ["expiry", "The extension timeout expires", "Pi resolves the protected action as blocked and emits approval_expired with the original approval ID.", "run", ""],
+          ["retract", "Converse Code retracts it", "A pi_approval_expired partial closes the matching interaction so it cannot be narrated or answered later.", "run", ""],
+          ["late", "Late decisions fail safely", "A later pi_approval for that ID returns approval_not_pending and causes no Pi side effect.", "run", ""],
+          ["steer", "New intent still works", "A new pi_request can steer the active Pi turn; an already-resolved approval never prevents delivery.", "run", ""],
+          ["settled", "The turn settles normally", "The original deferred task remains the owner and eventually receives one terminal result.", "set", "e-run-set"]
+        ]
+      },
+      steering: {
+        label: "Change course", summary: "new speech steers the owned turn",
+        steps: [
+          ["running", "A Pi turn is already running", "The original pi_request remains the one long-lived deferred call.", "run", "e-own-run"],
+          ["interrupt", "User changes direction", "A new pi_request arrives while Running. Any pending approvals are blocked first.", "run", ""],
+          ["steer", "Guidance is delivered", "Converse Code uses Pi’s steer mode. The steering call returns immediately as delivered.", "run", ""],
+          ["continue", "Original turn continues", "Pi may emit another owned input for the steer; ownership remains with the same episode.", "run", ""],
+          ["settled", "Updated work settles", "The original deferred call returns Pi’s eventual final response.", "set", "e-run-set"]
+        ]
+      },
+      starting: {
+        label: "Too-early request", summary: "starting is explicit; requests are not ambiguously queued",
+        steps: [
+          ["ack", "First request is starting", "The prompt command is awaiting acknowledgement or its ownership event.", "ack", "e-idle-ack"],
+          ["second", "A second request arrives", "There is not yet enough evidence to call it steering.", "own", "e-ack-own"],
+          ["reject", "Second call gets pi_turn_starting", "It fails immediately and honestly. The first request is not replaced or silently queued.", "own", ""],
+          ["continue", "First request continues", "Once its command ID matches, it can enter Running normally.", "run", "e-own-run"]
+        ]
+      },
+      cancel: {
+        label: "Cancel", summary: "stop Pi’s turn without ending voice",
+        steps: [
+          ["active", "Cancellation requested", "pi_cancel or a matching tool cancellation is accepted only for an active turn.", "run", "e-run-cancel"],
+          ["abort", "Pi abort is sent", "The router enters Cancelling before calling abort, so later events cannot look like normal completion.", "cancel", "e-run-cancel"],
+          ["wait", "Await terminal evidence", "agent_settled, session loss, or process exit resolves the turn as cancelled.", "cancel", "e-cancel-set"],
+          ["done", "Cancelled result", "The original call receives pi_turn_cancelled; the voice session itself remains open.", "set", "e-cancel-set"]
+        ]
+      },
+      ownership: {
+        label: "Ownership failure", summary: "unrelated terminal activity is never claimed",
+        steps: [
+          ["wait", "Waiting for matching input", "Converse Code expects input_seen with the command ID returned by its prompt command.", "own", "e-ack-own"],
+          ["wrong", "Unexpected activity arrives", "A different command ID, foreign input, or Pi activity before ownership cannot be attributed safely.", "own", "e-own-fail"],
+          ["fail", "Fail closed", "The tool returns input mismatch, unrelated input, or ownership unconfirmed—without leaking a partial or guessed answer.", "fail", "e-own-fail"]
+        ]
+      },
+      fault: {
+        label: "Fault / disconnect", summary: "bad evidence terminates rather than corrupting state",
+        steps: [
+          ["active", "A turn is active", "The router may be awaiting acknowledgement, ownership, or running.", "run", "e-own-run"],
+          ["fault", "A terminal fault arrives", "Malformed typed event, Pi session loss, process exit, or message failure is classified explicitly.", "fail", "e-run-fail"],
+          ["result", "Failed terminal result", "The deferred call completes once with the specific failure event; no success is invented.", "fail", "e-run-fail"],
+          ["recovery", "Next call starts fresh", "After result delivery, state returns to idle. Pending browser controls separately survive browser reconnects.", "idle", "e-set-idle"]
+        ]
+      },
+      end: {
+        label: "End session", summary: "voice ending is separate from turn cancellation",
+        steps: [
+          ["signal", "Converse ends intentionally", "The Browser SDK emits session_end, or the user presses End session.", "idle", ""],
+          ["shutdown", "Host shuts down Pi", "The page changes to ended state and Converse Code requests graceful Pi shutdown.", "cancel", ""],
+          ["closed", "Both surfaces agree", "Voice controls show ended and the visible Pi process exits; this is not inferred from a phrase.", "set", "e-cancel-set"]
+        ]
+      }
+    };
+
+    const stateNodes = ["idle", "ack", "own", "run", "cancel", "set", "fail"];
+    const edgeIds = ["e-idle-ack", "e-ack-own", "e-own-run", "e-run-set", "e-set-idle", "e-run-cancel", "e-cancel-set", "e-ack-fail", "e-own-fail", "e-run-fail"];
+    let selected = "normal";
+    let stepIndex = 0;
+
+    const bar = document.getElementById("scenarioBar");
+    const timeline = document.getElementById("timeline");
+
+    Object.entries(scenarios).forEach(([key, scenario]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "scenario";
+      button.textContent = scenario.label;
+      button.dataset.scenario = key;
+      button.setAttribute("aria-pressed", key === selected ? "true" : "false");
+      button.addEventListener("click", () => { selected = key; stepIndex = 0; render(); });
+      bar.appendChild(button);
+    });
+
+    function render() {
+      const scenario = scenarios[selected];
+      const step = scenario.steps[stepIndex];
+      document.getElementById("scenarioTitle").textContent = scenario.label;
+      document.getElementById("scenarioSummary").textContent = scenario.summary;
+      document.getElementById("stepKicker").textContent = `Step ${stepIndex + 1} of ${scenario.steps.length}`;
+      document.getElementById("stepTitle").textContent = step[1];
+      document.getElementById("stepBody").textContent = step[2];
+      document.getElementById("prev").disabled = stepIndex === 0;
+      document.getElementById("next").disabled = stepIndex === scenario.steps.length - 1;
+
+      document.querySelectorAll(".scenario").forEach(button => {
+        button.setAttribute("aria-pressed", button.dataset.scenario === selected ? "true" : "false");
+      });
+
+      stateNodes.forEach(id => document.getElementById(`n-${id}`).classList.remove("active", "current"));
+      edgeIds.forEach(id => document.getElementById(id).classList.remove("active"));
+      scenario.steps.slice(0, stepIndex + 1).forEach(item => {
+        document.getElementById(`n-${item[3]}`).classList.add("active");
+        if (item[4]) document.getElementById(item[4]).classList.add("active");
+      });
+      document.getElementById(`n-${step[3]}`).classList.add("current");
+
+      timeline.innerHTML = "";
+      timeline.style.setProperty("--steps", scenario.steps.length);
+      scenario.steps.forEach((item, index) => {
+        const tick = document.createElement("button");
+        tick.type = "button";
+        tick.className = `tick${index <= stepIndex ? " done" : ""}${index === stepIndex ? " current" : ""}`;
+        tick.innerHTML = `<span>${item[1]}</span><small>${index + 1}</small>`;
+        tick.setAttribute("aria-label", `Go to step ${index + 1}: ${item[1]}`);
+        tick.addEventListener("click", () => { stepIndex = index; render(); });
+        timeline.appendChild(tick);
+      });
+    }
+
+    document.getElementById("prev").addEventListener("click", () => { if (stepIndex > 0) { stepIndex -= 1; render(); } });
+    document.getElementById("next").addEventListener("click", () => { if (stepIndex < scenarios[selected].steps.length - 1) { stepIndex += 1; render(); } });
+    render();
+  </script>
+</body>
+</html>

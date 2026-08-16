@@ -3,6 +3,9 @@
 Converse Code is a voice remote and reference implementation, not an agent framework. Pi owns the
 visible coding session and terminal UI. Converse owns speech and the background-tool lifecycle.
 
+The [interactive lifecycle explorer](converse-code-state-machine.html) steps through normal turns,
+approvals, interruptions, steering, cancellation, ownership failures, and session ending.
+
 ## Public surface
 
 - `pi_request(user_request)` starts one deferred Pi turn while idle and semantically steers it while
