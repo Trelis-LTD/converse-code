@@ -67,6 +67,14 @@ the voice floor is busy and exposes the narration lifecycle. Only an explicit
 pending approval and then steers the change of course. Stale IDs, malformed decisions, disconnects,
 cancellation, and timeouts fail closed.
 
+An approval that closes without a user decision is retracted, not abandoned: the extension reports
+its own timeout (`approval_expired`), and the router sends a structured partial on the parent
+deferred call (`pi_approval_expired`, or `pi_approval_superseded` on a change of course) carrying
+the same `approval_id`. That partial reaches the model's context and supersedes any queued
+narration for that job, so a dead question is never asked or answered. A decision arriving for a
+closed approval fails deterministically with `approval_not_pending`, and an extension-side
+rejection of a blocking command never blocks the steer it was clearing the way for.
+
 ## Evidence and outcomes
 
 Prompt acknowledgement proves only that Pi accepted the user message. `agent_settled` proves Pi

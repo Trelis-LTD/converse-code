@@ -132,6 +132,10 @@ class ApprovalRequested(NamedTuple):
     summary: str
 
 
+class ApprovalExpired(NamedTuple):
+    approval_id: str
+
+
 class AssistantMessage(NamedTuple):
     text: str
 
@@ -141,7 +145,7 @@ class MessageFailed(NamedTuple):
 
 
 PiEvent = (
-    OwnedInput | Signal | ProcessExited | ToolStarted | ApprovalRequested
+    OwnedInput | Signal | ProcessExited | ToolStarted | ApprovalRequested | ApprovalExpired
     | AssistantMessage | MessageFailed
 )
 
@@ -292,12 +296,14 @@ class PiControlRouter:
                     await self.pi.command(
                         "approval_response", approvalId=approval_id, decision="block",
                     )
-                except PiTUIBridgeError as exc:
-                    await self._error(
-                        call_id, "pi_rejected_approval", reason=str(exc),
-                    )
-                    return
-                turn.approvals.remove(approval_id)
+                except PiTUIBridgeError:
+                    # The extension already resolved it (timeout, session grant, loss).
+                    # Either way it no longer gates Pi; the steer decides the outcome.
+                    pass
+                turn.approvals.discard(approval_id)
+                await self._close_interaction(
+                    turn.call_id, "pi_approval_superseded", approval_id,
+                )
         try:
             await self.pi.command("steer", message=message)
         except PiTUIBridgeError as exc:
@@ -321,6 +327,7 @@ class PiControlRouter:
                 "approval_response", approvalId=approval_id, decision=decision.value,
             )
         except PiTUIBridgeError as exc:
+            turn.approvals.discard(approval_id)
             await self._error(call_id, "pi_rejected_approval", reason=str(exc))
             return
         if decision is Decision.ALLOW_SESSION:
@@ -330,8 +337,8 @@ class PiControlRouter:
         await self._result(
             call_id,
             {
-                "event": "pi_approval_delivered", "decision": decision.value,
-                "task_status": "running",
+                "event": "pi_approval_delivered", "approval_id": approval_id,
+                "decision": decision.value, "task_status": "running",
             },
             verified=True,
         )
@@ -416,6 +423,12 @@ class PiControlRouter:
                     "options": list(DECISION_LABELS.values()),
                 },
             )
+        elif isinstance(event, ApprovalExpired):
+            if event.approval_id in turn.approvals:
+                turn.approvals.remove(event.approval_id)
+                await self._close_interaction(
+                    turn.call_id, "pi_approval_expired", event.approval_id,
+                )
         elif isinstance(event, MessageFailed):
             self._complete(Failed(Failure.MESSAGE_FAILED, event.error))
         elif isinstance(event, AssistantMessage):
@@ -423,6 +436,17 @@ class PiControlRouter:
                 turn.assistant_text = event.text
         elif event is Signal.AGENT_SETTLED:
             self._complete(Succeeded(turn.assistant_text))
+
+    async def _close_interaction(self, task_call_id: str, event: str, approval_id: str) -> None:
+        """Retract a still-open approval interaction on its parent deferred call.
+
+        A partial on the same call ID reaches the model's context and supersedes any
+        queued narration for that job, so a stale question is never asked or acted on.
+        """
+        await self.sender.send_tool_partial_result(
+            task_call_id,
+            {"event": event, "approval_id": approval_id, "handle": self.handle},
+        )
 
     def _complete(self, outcome: TerminalResult) -> None:
         turn = self._turn
@@ -479,6 +503,11 @@ class PiControlRouter:
             if not all(value is not None for value in values):
                 raise ValueError("malformed approval request")
             return ApprovalRequested(*values)
+        if kind == "approval_expired":
+            approval_id = cls._text(event.get("approvalId"))
+            if approval_id is None:
+                raise ValueError("malformed approval expiry")
+            return ApprovalExpired(approval_id)
         if kind == "message_end":
             message = event.get("message")
             if not isinstance(message, dict):

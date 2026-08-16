@@ -2,6 +2,7 @@ import asyncio
 
 from converse_code.agent_tools import PiControlRouter, manifest
 from converse_code.bridge import ToolCall
+from converse_code.pi_tui import PiTUIBridgeError
 
 
 class FakePi:
@@ -168,7 +169,10 @@ async def test_approval_surfaces_as_a_queued_user_interaction():
     )
     assert sender.results[-1] == (
         "approval-call",
-        {"event": "pi_approval_delivered", "decision": "allow_once", "task_status": "running"},
+        {
+            "event": "pi_approval_delivered", "approval_id": "approval-7",
+            "decision": "allow_once", "task_status": "running",
+        },
         {"outcome": "succeeded", "verified": True},
     )
     await pi.emit({"type": "message_end", "message": {"role": "assistant", "content": "Done"}})
@@ -190,11 +194,78 @@ async def test_change_of_course_blocks_pending_approval_before_steering():
         ("approval_response", {"approvalId": "approval-1", "decision": "block"}),
         ("steer", {"message": "Use a local server instead"}),
     ]
+    assert sender.partials[-1] == (
+        "message-1",
+        {
+            "event": "pi_approval_superseded", "approval_id": "approval-1",
+            "handle": "pi-turn",
+        },
+        None,
+    )
     await router.handle_tool_call(ToolCall(
         "stale", "pi_approval",
         {"approval_id": "approval-1", "decision": "allow_once"},
     ))
     assert sender.results[-1][2]["outcome"] == "failed"
+    await pi.emit({"type": "message_end", "message": {"role": "assistant", "content": "Done"}})
+    await pi.emit({"type": "agent_settled"})
+    await running
+
+
+async def test_steer_survives_an_approval_the_extension_already_resolved():
+    class StaleApprovalPi(FakePi):
+        async def command(self, kind, **fields):
+            if kind == "approval_response":
+                raise PiTUIBridgeError("approval is no longer pending")
+            return await super().command(kind, **fields)
+
+    pi, sender = StaleApprovalPi(), FakeSender()
+    router, running = await start_task(pi, sender, "Open the game")
+    await pi.emit({
+        "type": "approval_request", "approvalId": "approval-1",
+        "toolName": "bash", "summary": "open index.html",
+    })
+
+    await router.handle_tool_call(task_call("message-2", "Use a local server instead"))
+
+    assert pi.commands[-1] == ("steer", {"message": "Use a local server instead"})
+    assert sender.partials[-1][1]["event"] == "pi_approval_superseded"
+    assert sender.results[-1] == (
+        "message-2",
+        {"event": "pi_message_delivered", "mode": "steer", "task_status": "running"},
+        {"outcome": "succeeded", "verified": True},
+    )
+    await pi.emit({"type": "message_end", "message": {"role": "assistant", "content": "Done"}})
+    await pi.emit({"type": "agent_settled"})
+    await running
+
+
+async def test_expired_approval_is_retracted_and_cannot_be_answered():
+    pi, sender = FakePi(), FakeSender()
+    router, running = await start_task(pi, sender)
+    await pi.emit({
+        "type": "approval_request", "approvalId": "approval-1",
+        "toolName": "bash", "summary": "uv run pytest -q",
+    })
+
+    await pi.emit({"type": "approval_expired", "approvalId": "approval-1"})
+
+    assert sender.partials[-1] == (
+        "message-1",
+        {"event": "pi_approval_expired", "approval_id": "approval-1", "handle": "pi-turn"},
+        None,
+    )
+
+    await router.handle_tool_call(ToolCall(
+        "late-answer", "pi_approval",
+        {"approval_id": "approval-1", "decision": "allow_once"},
+    ))
+    assert sender.results[-1][0] == "late-answer"
+    assert sender.results[-1][1]["event"] == "approval_not_pending"
+    assert not any(kind == "approval_response" for kind, _ in pi.commands)
+
+    await router.handle_tool_call(task_call("message-2", "Try lint instead"))
+    assert pi.commands[-1] == ("steer", {"message": "Try lint instead"})
     await pi.emit({"type": "message_end", "message": {"role": "assistant", "content": "Done"}})
     await pi.emit({"type": "agent_settled"})
     await running
