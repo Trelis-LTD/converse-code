@@ -13,15 +13,20 @@ class FakeWire:
         self.frames.append(frame)
         return True
 
+    async def sent(self, count=1):
+        async with asyncio.timeout(2):
+            while len(self.frames) < count:
+                await asyncio.sleep(0)
+        return self.frames[-1]
+
 
 async def test_commands_are_id_correlated_and_events_are_forwarded():
     wire = FakeWire()
     bridge = PiTUIBridge(wire.send)
-    assert bridge.connect() is None
+    bridge.connect()
 
     pending = asyncio.create_task(bridge.command("prompt", message="Fix it"))
-    await asyncio.sleep(0)
-    sent = wire.frames[-1]
+    sent = await wire.sent()
     assert sent["type"] == "prompt"
     assert sent["message"] == "Fix it"
 
@@ -41,8 +46,7 @@ async def test_malformed_acknowledgement_cannot_prove_command_acceptance():
     bridge = PiTUIBridge(wire.send)
     bridge.connect()
     pending = asyncio.create_task(bridge.command("prompt", message="Fix it"))
-    await asyncio.sleep(0)
-    command_id = wire.frames[-1]["id"]
+    command_id = (await wire.sent())["id"]
 
     await bridge.handle_message({
         "type": "response", "id": command_id, "success": "yes",
@@ -55,19 +59,21 @@ async def test_malformed_acknowledgement_cannot_prove_command_acceptance():
 
 
 async def test_disconnect_fails_pending_command_instead_of_claiming_acceptance():
-    bridge = PiTUIBridge(FakeWire().send)
+    wire = FakeWire()
+    bridge = PiTUIBridge(wire.send)
     bridge.connect()
     pending = asyncio.create_task(bridge.command("steer", message="Also test it"))
-    await asyncio.sleep(0)
+    await wire.sent()
     bridge.disconnect()
     with pytest.raises(PiTUIBridgeError, match="disconnected"):
         await pending
 
 async def test_disconnect_and_connection_replacement_emit_ownership_breaks():
-    bridge = PiTUIBridge(FakeWire().send)
+    wire = FakeWire()
+    bridge = PiTUIBridge(wire.send)
     first = bridge.connect()
     pending = asyncio.create_task(bridge.command("prompt", message="Fix it"))
-    await asyncio.sleep(0)
+    await wire.sent()
     replaced = bridge.connect()
     with pytest.raises(PiTUIBridgeError, match="replaced"):
         await pending

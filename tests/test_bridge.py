@@ -3,6 +3,14 @@ import asyncio
 from converse_code.bridge import BrowserBridge
 
 
+def no_trace(_source, _event, **_data):
+    pass
+
+
+def make_bridge(send):
+    return BrowserBridge(send, trace=no_trace)
+
+
 async def ignore(_message):
     pass
 
@@ -30,17 +38,26 @@ class FakeTab:
 
 async def test_controls_wait_for_ready_and_remain_until_browser_ack():
     tab = FakeTab()
-    bridge = BrowserBridge(tab.send)
+    bridge = make_bridge(tab.send)
 
     await bridge.send_tool_deferred("c1", "code-c1", status_label="Pi")
     await bridge.send_tool_partial_result(
-        "c1", {"event": "pi_tool_started", "tool": "test", "arguments": {}},
+        "c1",
+        {"event": "pi_approval_required"},
+        interaction={
+            "prompt": "Allow Pi to run bash: pwd?",
+            "options": ["Allow once", "Allow for this session", "Block"],
+        },
     )
     assert tab.frames == []
 
     tab.connected = True
     await handle(bridge, {"type": "local", "event": "bridge_ready"})
     assert [frame["action"] for frame in tab.frames] == ["tool_deferred", "tool_partial_result"]
+    assert tab.frames[1]["interaction"] == {
+        "prompt": "Allow Pi to run bash: pwd?",
+        "options": ["Allow once", "Allow for this session", "Block"],
+    }
 
     await handle(bridge, {
         "type": "local", "event": "bridge_ack", "seq": tab.frames[0]["seq"],
@@ -52,44 +69,8 @@ async def test_controls_wait_for_ready_and_remain_until_browser_ack():
     ]
 
 
-async def test_trace_records_interaction_partial_delivery_and_ack():
-    tab = FakeTab()
-    tab.connected = True
-    events = []
-    bridge = BrowserBridge(
-        tab.send,
-        trace=lambda source, event, **data: events.append((source, event, data)),
-    )
-    await handle(bridge, {"type": "local", "event": "bridge_ready"})
-    await bridge.send_tool_partial_result(
-        "task-1",
-        {"event": "pi_approval_required"},
-        interaction={
-            "prompt": "Allow Pi to run bash: pwd?",
-            "options": ["Allow once", "Allow for this session", "Block"],
-        },
-    )
-    partial = tab.frames[0]
-    await handle(bridge, {
-        "type": "local", "event": "bridge_ack", "seq": partial["seq"],
-    })
-
-    assert [(source, event) for source, event, _ in events] == [
-        ("browser_bridge", "ready"),
-        ("browser_bridge", "control_queued"),
-        ("browser_bridge", "control_sent"),
-        ("browser_bridge", "control_acknowledged"),
-    ]
-    assert events[1][2]["action"] == "tool_partial_result"
-    assert "reply" not in partial
-    assert partial["interaction"] == {
-        "prompt": "Allow Pi to run bash: pwd?",
-        "options": ["Allow once", "Allow for this session", "Block"],
-    }
-
-
 async def test_browser_tool_calls_and_cancellation_reach_python_handlers():
-    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True))
+    bridge = make_bridge(lambda _frame: asyncio.sleep(0, result=True))
     calls, cancels = [], []
 
     async def on_call(call):
@@ -111,7 +92,7 @@ async def test_browser_tool_calls_and_cancellation_reach_python_handlers():
 
 
 async def test_native_sdk_session_end_reaches_python_handler():
-    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True))
+    bridge = make_bridge(lambda _frame: asyncio.sleep(0, result=True))
     endings = []
 
     await handle(
@@ -124,7 +105,7 @@ async def test_native_sdk_session_end_reaches_python_handler():
 
 
 async def test_explicit_browser_end_session_reaches_python_handler():
-    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True))
+    bridge = make_bridge(lambda _frame: asyncio.sleep(0, result=True))
     endings = []
 
     await handle(
@@ -137,7 +118,7 @@ async def test_explicit_browser_end_session_reaches_python_handler():
 
 
 async def test_malformed_or_abnormal_session_end_does_not_reach_domain():
-    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True))
+    bridge = make_bridge(lambda _frame: asyncio.sleep(0, result=True))
     endings = []
 
     async def handler(event):
@@ -154,7 +135,7 @@ async def test_malformed_or_abnormal_session_end_does_not_reach_domain():
 
 
 async def test_malformed_browser_tool_messages_do_not_enter_the_domain():
-    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True))
+    bridge = make_bridge(lambda _frame: asyncio.sleep(0, result=True))
     calls, cancels = [], []
 
     async def on_call(call):

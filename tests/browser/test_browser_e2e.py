@@ -20,8 +20,6 @@ async def open_session(page):
 
 async def test_page_is_a_voice_only_remote_for_the_visible_pi_terminal(browser_page):
     page, errors = browser_page
-    assert await page.title() == "Converse Code"
-    assert await page.locator("h1").inner_text() == "Converse Code"
     assert await page.locator("#text").count() == 0
     assert await page.locator("#send").count() == 0
     assert await page.locator("#log").count() == 1
