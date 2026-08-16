@@ -28,6 +28,16 @@ async def test_page_is_a_voice_only_remote_for_the_visible_pi_terminal(browser_p
     assert errors == []
 
 
+async def test_voice_session_uses_coding_friendly_idle_timing(browser_page):
+    page, _ = browser_page
+    await open_session(page)
+
+    mode = await page.evaluate("__fakeConverse.clients[0].options.mode")
+
+    assert mode["silence_nudge_s"] == 30
+    assert mode["silence_end_s"] == 90
+
+
 async def test_end_session_closes_voice_and_requests_host_shutdown(
     browser_page, browser_server,
 ):
@@ -323,7 +333,7 @@ async def test_interaction_narration_lifecycle_is_visible_and_traced(
         and frame.get("data", {}).get("state") == "started",
     )
     assert await page.locator(".entry.activity").all_text_contents() == [
-        "Approval prompt queued", "Approval prompt started",
+        "Question narration queued", "Question narration started",
     ]
 
 
@@ -528,7 +538,7 @@ async def test_superseded_interaction_closes_without_completing_the_deferred_tas
         "Approval superseded by a new request", exact=True,
     ).count() == 1
     assert await page.locator(".entry.activity").get_by_text(
-        "Approval prompt superseded", exact=True,
+        "Question narration interrupted", exact=True,
     ).count() == 1
     assert await page.locator("#status").inner_text() == "working"
 

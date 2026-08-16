@@ -50,7 +50,14 @@ Override that command when testing another Pi configuration:
 converse-code --pi "pi --provider openai-codex --model gpt-5.6-codex"
 ```
 
-Pass `--continue` to resume Pi's most recent session in the current directory.
+To resume Pi's most recent session in the current directory, return to that directory and run:
+
+```bash
+uvx converse-code --continue
+```
+
+Converse Code passes Pi's native `--continue` flag through, so Pi retains ownership of the coding
+session and transcript.
 
 Run `converse-code login` to store a Converse API key. The persistent key remains in Python; the
 browser receives only a short-lived session credential.
