@@ -5,7 +5,7 @@ import {
 } from './audio.js';
 import { StreamingPlayer } from './player.js';
 import { EchoCanceller, needsSdkAec } from './aec.js';
-import { MicCapture } from './mic.js';
+import { CaptureAbortedError, CaptureStalledError, MicCapture } from './mic.js';
 import { TrackFeeder, WebRtcSession } from './webrtc.js';
 
 export {
@@ -15,15 +15,15 @@ export {
 } from './audio.js';
 export { StreamingPlayer } from './player.js';
 export { EchoCanceller, needsSdkAec } from './aec.js';
-export { MicCapture } from './mic.js';
+export { CaptureAbortedError, CaptureStalledError, MicCapture } from './mic.js';
 export { TrackFeeder, WebRtcSession } from './webrtc.js';
 
 // NO OUTPUT-ROUTING CODE, BY EXPERIMENT (2026-07-30): never touch navigator.audioSession —
 // 'playback' breaks getUserMedia on real iPhones (a mic outage), and an 11-configuration
 // on-device test showed modern iOS gives web pages no earpiece/speaker control at all (see
 // StreamingPlayer's header + docs/user-feedback.md). A regression test pins this.
+const LISTENING_WARMUP_FRAMES = 16; // Custom capture readiness; startMic uses its first-frame gate.
 
-const LISTENING_WARMUP_FRAMES = 16; // 512 ms at 16 kHz/512-frame mic chunks; lets browser AEC adapt.
 // Barge hard-clear fade (server sends `interrupted` with clear:true): long enough to read as a
 // yield rather than a glitch, short enough that silence lands ~immediately vs the old drain.
 const BARGE_CLEAR_FADE_S = 0.15;
@@ -95,6 +95,9 @@ export function sendFeedback({ url, sessionId, rating, text, device, browser, ap
 // invisible server-side — the session log just shows a start with 0s of mic audio. The server
 // journals it and, when the session's recording dir exists, files it alongside as
 // client_errors.jsonl. sessionId is optional (some failures predate any session).
+//
+// `detail` and `context` are JOURNALED, and the journal is shipped off-box to a log backend. Send
+// failure diagnostics only — never transcripts, replies, or anything the user typed or said.
 export function sendClientError({ url, sessionId, detail, context, apiKey,
   WebSocketImpl, timeoutMs } = {}) {
   if (!url || !detail) return Promise.reject(new Error('url and detail are required'));
@@ -187,13 +190,23 @@ function resumeTokenFromState(state) {
   return state.resumeToken;
 }
 
+// Shared by _openOnce/_openOnceWebRtc: marks(ms since this connect attempt began), dispatched as
+// `connect_timing` once `ready` lands so an app/playground can see where connect() time went.
+function connectMarks() {
+  const t0 = globalThis.performance?.now?.() ?? 0;
+  const marks = {};
+  const mark = (name) => { marks[name] = Math.round((globalThis.performance?.now?.() ?? 0) - t0); };
+  return { marks, mark };
+}
+
 export class ConverseClient extends EventTarget {
   constructor({ url, sessionId = createSessionId(), player, apiKey,
     mode = { kind: 'converse' }, user, timezone, rawAssist = false,
     playAcknowledgements = true, WebSocketImpl = globalThis.WebSocket,
     echoCancellerFactory = () => new EchoCanceller(),
     autoReconnect = true, reconnectBaseMs = 500, reconnectMaxMs = 5000,
-    maxReconnectAttempts = 12, listeningWarmupFrames = LISTENING_WARMUP_FRAMES,
+    maxReconnectAttempts = 12, captureStartupTimeoutMs = 2000, inputDeviceId = null,
+    listeningWarmupFrames = LISTENING_WARMUP_FRAMES,
     injectionAckTimeoutMs = 10000, resumeState = null,
     transport = 'ws', RTCPeerConnectionImpl = globalThis.RTCPeerConnection } = {}) {
     super();
@@ -238,6 +251,10 @@ export class ConverseClient extends EventTarget {
     this.reconnectBaseMs = reconnectBaseMs;
     this.reconnectMaxMs = reconnectMaxMs;
     this.maxReconnectAttempts = maxReconnectAttempts;
+    if (!Number.isFinite(captureStartupTimeoutMs) || captureStartupTimeoutMs <= 0) {
+      throw new RangeError('captureStartupTimeoutMs must be a positive finite number');
+    }
+    this.captureStartupTimeoutMs = captureStartupTimeoutMs;
     if (!Number.isFinite(injectionAckTimeoutMs) || injectionAckTimeoutMs <= 0) {
       throw new RangeError('injectionAckTimeoutMs must be a positive finite number');
     }
@@ -251,19 +268,31 @@ export class ConverseClient extends EventTarget {
     this._playbackPauseSeq = null; // reversible hold; sequence rejects late resume events
     this._pendingInjections = new Map(); // message_id -> authoritative broker ack promise
     this._injectionSeq = 0;
+    this._narrationStates = new Map();   // job_id -> last known tool_job_narration state
+    this._narrationWaiters = new Map();  // job_id -> [{ states, resolve, reject, timer }]
     this._live = false;         // true only while a socket is open AND past `ready`
     this._closedByUser = false; // set by close() so a clean shutdown doesn't trigger reconnect
     this._resumeToken = resumeTokenFromState(resumeState);
     // Latest server token (possibly imported above); sent on the next continuation attempt.
     this._temperature = undefined;
     this._noGreeting = false;
-    this._listeningFired = false; // one `listening` event per live session, after mic warmup frames
+    this._listeningFired = false;
     this._listeningFrames = 0;
     this.listeningWarmupFrames = Math.max(1, listeningWarmupFrames | 0);
+    this._micGeneration = 0;   // invalidates every async stage when stop/restart supersedes it
     this._mic = null;          // SDK-owned capture (startMic); apps with custom capture never set it
     this._rawMic = null;       // desktop-only second capture; WebKit tees the primary raw capture
     this._aec = null;          // SDK-side AEC3, only on WebKit (see startMic)
     this._micStarting = null;  // in-flight/settled startMic() promise (idempotence + stop race)
+    this._micDesired = false;
+    this._micOptions = null;
+    this._pendingMicCaptures = new Set();
+    this._inputDeviceId = inputDeviceId || null;
+    this._activeInputDeviceId = null;
+    this._knownInputDevices = null;
+    this._deviceChangeListening = false;
+    this._deviceRestart = null;
+    this._handleDeviceChangeBound = () => this._handleDeviceChange().catch(() => {});
     this._uplinkSeq = [0, 0];
     this._rawAssistActive = false;
     this._audioFrontend = null;  // actual SDK-owned mic/AEC path, persisted across reconnects
@@ -280,6 +309,43 @@ export class ConverseClient extends EventTarget {
     this._remoteAudioEl = null;
   }
 
+  _setCaptureState(state, detail = {}) {
+    this._dispatch({ type: state, state, ...detail });
+  }
+
+  _dispatchConnectTiming(transport, marks) {
+    this._dispatch({ type: 'connect_timing', transport, total_ms: marks.ready, marks });
+  }
+
+  async _acquireHealthyMic(options, isCurrent = () => true) {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if (!isCurrent()) throw new CaptureAbortedError();
+      const capture = new MicCapture(options);
+      this._pendingMicCaptures.add(capture);
+      try {
+        await capture.start({ firstFrameTimeoutMs: this.captureStartupTimeoutMs });
+        capture.recovered = attempt > 1;
+        return capture;
+      } catch (error) {
+        await capture.stop().catch(() => {});
+        // stopMic() may win while a stalled capture is being torn down. Do not reopen the
+        // device after cancellation merely to have the stale-generation path close it again.
+        if (!isCurrent()) throw new CaptureAbortedError();
+        if (error?.code === 'capture_stalled' && attempt === 1) {
+          this._setCaptureState('recovering', {
+            code: 'capture_stalled', attempt, next_attempt: attempt + 1,
+          });
+          continue;
+        }
+        if (error?.code === 'capture_stalled') error.retryable = false;
+        throw error;
+      } finally {
+        this._pendingMicCaptures.delete(capture);
+      }
+    }
+
+    throw new CaptureStalledError();
+  }
   // The default mic path: owns getUserMedia under the locked AEC-only front-end spec (AEC on,
   // NS+AGC OFF — browser defaults enable both, measurably hurting ASR) and picks the AEC engine
   // per platform. Desktop Chrome/Firefox keep their native per-stream canceller; WebKit (all iOS
@@ -293,8 +359,18 @@ export class ConverseClient extends EventTarget {
   // AEC-only (WebKit/iOS, see needsSdkAec); true = force the SDK canceller everywhere
   // (desktop rollout of the ONE tuned AEC — gate on run_frontend.py before flipping
   // any default); false = force platform AEC.
-  startMic({ workletUrl, sdkAec: sdkAecMode = 'auto' } = {}) {
+  startMic({ workletUrl, sdkAec: sdkAecMode = 'auto', deviceId = this._inputDeviceId } = {}) {
+    if (deviceId != null && (typeof deviceId !== 'string' || !deviceId)) {
+      throw new TypeError('deviceId must be a non-empty string or null');
+    }
     if (this._micStarting) return this._micStarting;
+    this._micDesired = true;
+    this._inputDeviceId = deviceId || null;
+    this._micOptions = { workletUrl, sdkAec: sdkAecMode, deviceId: this._inputDeviceId };
+    this._setCaptureState('warming_up', { attempt: 1, device_id: this._inputDeviceId });
+    const generation = ++this._micGeneration;
+    this._watchDeviceChanges();
+    this.getInputDevices().then((devices) => { this._knownInputDevices = devices; }).catch(() => {});
     const starting = (async () => {
       const webkit = needsSdkAec();
       let sdkAec = sdkAecMode === 'auto' ? webkit : !!sdkAecMode;
@@ -313,42 +389,60 @@ export class ConverseClient extends EventTarget {
           aecFallback = true;
         }
       }
+      if (this._micGeneration !== generation) {
+        aec?.close();
+        return { sdkAec, aecFallback, rawAssist, stopped: true };
+      }
       // A second WebKit capture mutates device-wide processing and stripped AEC in production.
       // Raw assist there is valid only when this single raw capture feeds both WASM and raw uplink.
       if (rawAssist && webkit && !sdkAec) rawAssist = false;
-      const mic = new MicCapture({
-        processing: !sdkAec,   // platform AEC unless the SDK is cancelling
-        workletUrl,
-        onFrame: (frame, captureMs) => {
-          this.pushMicFrame(aec ? aec.processCapture(frame) : frame, { captureMs });
-          if (rawAssist && sdkAec) this.sendRawFrame(frame, { captureMs });
-        },
-      });
+      let mic = null;
       let rawMic = null;
       try {
-        await mic.start();
+        mic = await this._acquireHealthyMic({
+          processing: !sdkAec,   // platform AEC unless the SDK is cancelling
+          workletUrl, deviceId: this._inputDeviceId,
+          onFrame: (frame, captureMs) => {
+            this.pushMicFrame(aec ? aec.processCapture(frame) : frame, { captureMs });
+            if (rawAssist && sdkAec) this.sendRawFrame(frame, { captureMs });
+          },
+        }, () => this._micGeneration === generation && this._micDesired);
         if (rawAssist && !sdkAec) {
           rawMic = new MicCapture({
             processing: false,
-            workletUrl,
+            workletUrl, deviceId: this._inputDeviceId,
             onFrame: (frame, captureMs) => this.sendRawFrame(frame, { captureMs }),
           });
+          const pendingRawMic = rawMic;
+          this._pendingMicCaptures.add(pendingRawMic);
           try {
-            await rawMic.start();
+            await rawMic.start({ firstFrameTimeoutMs: this.captureStartupTimeoutMs });
           } catch {
+            await rawMic.stop().catch(() => {});
             rawMic = null;
             rawAssist = false;       // primary uplink remains healthy; server uses AEC-only gate
+          } finally {
+            this._pendingMicCaptures.delete(pendingRawMic);
           }
         }
       } catch (err) {
         aec?.close();
+        await mic?.stop().catch(() => {});
         await rawMic?.stop();
+        if (this._micGeneration !== generation) {
+          return { sdkAec, aecFallback, rawAssist, stopped: true };
+        }
+        this._micDesired = false;
+        this._unwatchDeviceChanges();
+        this._setCaptureState('failed', {
+          code: err?.code || 'capture_failed', error: err,
+        });
         throw err;
       }
-      if (this._micStarting !== starting) {   // stopMic()/close() raced the start — don't leak the device
+      if (this._micGeneration !== generation) {
         aec?.close();
         await Promise.allSettled([mic.stop(), rawMic?.stop()]);
-        return { sdkAec, aecFallback, rawAssist };
+        return { sdkAec, aecFallback, rawAssist, stopped: true };
       }
       this._mic = mic;
       this._rawMic = rawMic;
@@ -356,6 +450,8 @@ export class ConverseClient extends EventTarget {
       this._rawAssistActive = rawAssist;
       this._audioFrontend = sdkAec ? 'sdk-aec3' : 'platform-aec';
       this._audioFrontendFallback = aecFallback;
+      const activeTrack = mic.stream?.getAudioTracks?.()[0] || mic.stream?.getTracks?.()[0];
+      this._activeInputDeviceId = activeTrack?.getSettings?.().deviceId || this._inputDeviceId;
       // The normal webrtc path: swap the getUserMedia track straight into the RTCPeerConnection's
       // sender instead of leaving the JS TrackFeeder re-injection in the loop. webrtc only ever
       // runs on non-WebKit platforms (WebKit forces ws — see needsSdkAec() above this class), so
@@ -368,15 +464,33 @@ export class ConverseClient extends EventTarget {
       if (this.transport === 'webrtc' && !sdkAec && this._micSender) {
         const rawTrack = mic.stream?.getAudioTracks?.()[0];
         if (rawTrack) {
-          this._micSender.replaceTrack(rawTrack)
-            .then(() => { this._directMicTrackEngaged = true; })
-            .catch((err) => console.warn(
-              '[voice-loop] webrtc direct mic track swap failed; staying on the feeder', err));
+          try {
+            await this._micSender.replaceTrack(rawTrack);
+            if (this._micGeneration === generation) this._directMicTrackEngaged = true;
+            else await this._micSender.replaceTrack(this._trackFeeder?.track || null).catch(() => {});
+          } catch (err) {
+            console.warn('[voice-loop] webrtc direct mic track swap failed; staying on the feeder', err);
+          }
         }
+      }
+      // stopMic/device switching may have won while replaceTrack was pending. Restore the feeder
+      // before releasing the now-stale capture so the sender never retains an ended device track.
+      if (this._micGeneration !== generation) {
+        this._directMicTrackEngaged = false;
+        aec?.close();
+        await Promise.allSettled([
+          this._micSender?.replaceTrack(this._trackFeeder?.track || null),
+          mic.stop(), rawMic?.stop(),
+        ]);
+        return { sdkAec, aecFallback, rawAssist, stopped: true };
       }
       this._sendRawAssistStatus(rawAssist);
       this._sendAudioFrontendStatus();
-      return { sdkAec, aecFallback, rawAssist };
+      this._listeningFired = true;
+      this._setCaptureState('listening', {
+        device_id: this._activeInputDeviceId, recovered: !!mic.recovered,
+      });
+      return { sdkAec, aecFallback, rawAssist, deviceId: this._activeInputDeviceId };
     })();
     this._micStarting = starting;
     starting.catch(() => { if (this._micStarting === starting) this._micStarting = null; });
@@ -398,8 +512,17 @@ export class ConverseClient extends EventTarget {
 
   // Release the SDK-owned mic + AEC (no-op if startMic was never used). Safe to call repeatedly;
   // does not touch the socket, so a session can drop the mic and still receive/play audio.
-  stopMic() {
+  async stopMic() {
+    this._micDesired = false;
+    this._unwatchDeviceChanges();
+    await this._releaseMic();
+  }
+
+  async _releaseMic() {
+    const starting = this._micStarting;
+    this._micGeneration += 1;
     this._micStarting = null;
+    const pendingCaptures = [...this._pendingMicCaptures];
     const mic = this._mic;
     const rawMic = this._rawMic;
     this._mic = null;
@@ -407,6 +530,7 @@ export class ConverseClient extends EventTarget {
     this._rawAssistActive = false;
     this._audioFrontend = null;
     this._audioFrontendFallback = false;
+    this._activeInputDeviceId = null;
     this._sendRawAssistStatus(false);
     this._sendAudioFrontendStatus();
     this._aec?.close();
@@ -419,7 +543,117 @@ export class ConverseClient extends EventTarget {
       this._directMicTrackEngaged = false;
       handoff = this._micSender.replaceTrack(this._trackFeeder?.track || null).catch(() => {});
     }
-    return handoff.then(() => Promise.allSettled([mic?.stop(), rawMic?.stop()]));
+    await handoff;
+    await Promise.allSettled([
+      mic?.stop(), rawMic?.stop(), ...pendingCaptures.map((capture) => capture.stop()),
+    ]);
+    // getUserMedia is not abortable. Await the invalidated start so stopMic is a true barrier:
+    // any late grant is released by the stale-generation path before this method resolves.
+    if (starting) await starting.catch(() => {});
+  }
+
+  get inputDeviceId() { return this._inputDeviceId; }
+
+  async getInputDevices() {
+    const enumerate = navigator.mediaDevices?.enumerateDevices;
+    if (typeof enumerate !== 'function') return [];
+    const devices = await enumerate.call(navigator.mediaDevices);
+    return devices.filter((device) => device.kind === 'audioinput');
+  }
+
+  async setInputDevice(deviceId) {
+    if (deviceId != null && (typeof deviceId !== 'string' || !deviceId)) {
+      throw new TypeError('deviceId must be a non-empty string or null');
+    }
+    const normalized = deviceId || null;
+    if (normalized === this._inputDeviceId && this._activeInputDeviceId) {
+      return { deviceId: this._activeInputDeviceId };
+    }
+    const previousDeviceId = this._inputDeviceId;
+    this._inputDeviceId = normalized;
+    this._dispatch({
+      type: 'input_device_changed', device_id: normalized, previous_device_id: previousDeviceId,
+    });
+    if (!this._micDesired) return { deviceId: normalized };
+    return this._restartMic('manual_device_switch');
+  }
+
+  _watchDeviceChanges() {
+    const mediaDevices = navigator.mediaDevices;
+    if (this._deviceChangeListening || !mediaDevices?.addEventListener) return;
+    mediaDevices.addEventListener('devicechange', this._handleDeviceChangeBound);
+    this._deviceChangeListening = true;
+  }
+
+  _unwatchDeviceChanges() {
+    if (!this._deviceChangeListening) return;
+    navigator.mediaDevices?.removeEventListener?.('devicechange', this._handleDeviceChangeBound);
+    this._deviceChangeListening = false;
+  }
+
+  _defaultInput(devices) {
+    return devices.find((device) => device.deviceId === 'default') || devices[0] || null;
+  }
+
+  async _handleDeviceChange() {
+    const previous = this._knownInputDevices;
+    const devices = await this.getInputDevices();
+    this._knownInputDevices = devices;
+    this._dispatch({
+      type: 'devices_changed', devices, device_id: this._inputDeviceId,
+      active_device_id: this._activeInputDeviceId,
+    });
+    if (!this._micDesired || !previous) return;
+
+    const explicitStillAvailable = !this._inputDeviceId
+      || devices.some((device) => device.deviceId === this._inputDeviceId);
+    const activeStillAvailable = !this._activeInputDeviceId
+      || this._activeInputDeviceId === 'default'
+      || devices.some((device) => device.deviceId === this._activeInputDeviceId);
+    const oldDefault = this._defaultInput(previous);
+    const newDefault = this._defaultInput(devices);
+    const defaultChanged = !this._inputDeviceId && (
+      oldDefault?.deviceId !== newDefault?.deviceId
+      || oldDefault?.groupId !== newDefault?.groupId
+      || oldDefault?.label !== newDefault?.label
+    );
+    if (explicitStillAvailable && activeStillAvailable && !defaultChanged) return;
+
+    if (!explicitStillAvailable) {
+      const unavailableDeviceId = this._inputDeviceId;
+      this._inputDeviceId = null;
+      this._dispatch({
+        type: 'input_device_changed', device_id: null,
+        previous_device_id: unavailableDeviceId, reason: 'unavailable',
+      });
+    }
+    await this._restartMic('devicechange');
+  }
+
+  _restartMic(reason) {
+    if (!this._micDesired) return Promise.resolve(null);
+    if (this._deviceRestart) return this._deviceRestart;
+    const restarting = (async () => {
+      let info = null;
+      do {
+        const releasingDeviceId = this._inputDeviceId;
+        this._setCaptureState('recovering', { code: reason, device_id: releasingDeviceId });
+        await this._releaseMic();
+        if (!this._micDesired) return null;
+        // Selection is authoritative and may have changed while release awaited a pending start.
+        const targetDeviceId = this._inputDeviceId;
+        const options = { ...(this._micOptions || {}), deviceId: targetDeviceId };
+        info = await this.startMic(options);
+        // Converge on a newer selection made while this reacquisition was in flight.
+        if (targetDeviceId === this._inputDeviceId) return info;
+      } while (this._micDesired);
+      return info;
+    })();
+    this._deviceRestart = restarting;
+    restarting.finally(() => {
+      if (this._deviceRestart === restarting) this._deviceRestart = null;
+    }).catch(() => {});
+    return restarting;
   }
 
   /** Temporarily gate live microphone tracks without reopening the device. This is a transport
@@ -525,6 +759,7 @@ export class ConverseClient extends EventTarget {
     // Validate and serialize before opening a network resource. A circular/custom tool schema must
     // fail locally without leaking a connecting WebSocket.
     const startPayload = JSON.stringify(start);
+    const { marks, mark } = connectMarks();
     const ws = new this.WebSocketImpl(this.url);
     this.ws = ws;
     ws.binaryType = 'arraybuffer';
@@ -542,7 +777,7 @@ export class ConverseClient extends EventTarget {
           reject(err instanceof Error ? err : new Error(String(err)));
         }
       };
-      ws.addEventListener('open', () => { ws.send(startPayload); }, { once: true });
+      ws.addEventListener('open', () => { mark('ws_open'); ws.send(startPayload); }, { once: true });
       ws.addEventListener('error', () => fail(new Error('Converse WebSocket failed')), { once: true });
       ws.addEventListener('close', (ev) => {
         const ownsSocket = this.ws === ws;
@@ -585,6 +820,7 @@ export class ConverseClient extends EventTarget {
               return;
             }
             if (typeof detail.resume_token === 'string') this._setResumeToken(detail.resume_token);
+            mark('ready');
             settled = true;
             liveReady = true;
             this._live = true;
@@ -593,6 +829,7 @@ export class ConverseClient extends EventTarget {
             this._uplinkSeq = [0, 0];
             if (this.rawAssist) this._sendRawAssistStatus(this._rawAssistActive);
             this._sendAudioFrontendStatus();
+            this._dispatchConnectTiming('ws', marks);
             resolve(this);
           } else if (!settled && detail?.type === 'error') {
             fail(brokerError(detail, 'Converse WebSocket rejected connection'));
@@ -621,6 +858,11 @@ export class ConverseClient extends EventTarget {
     this._teardownWebRtc();   // a stale peer connection/feeder from a previous failed attempt
 
     const startPayload = JSON.stringify(start);
+    // WebRTC has several sequential steps _openOnce doesn't (two-step signaling, ICE gathering,
+    // feeder setup) that dispatching only a single total would hide; each is marked individually
+    // (see connectMarks()) so a slow connect can be attributed to a specific step instead of
+    // guessed at.
+    const { marks, mark } = connectMarks();
     const ws = new this.WebSocketImpl(this.url);   // signaling only — closed once the answer lands
     this.ws = ws;
 
@@ -642,7 +884,7 @@ export class ConverseClient extends EventTarget {
         }
       };
 
-      ws.addEventListener('open', () => { ws.send(startPayload); }, { once: true });
+      ws.addEventListener('open', () => { mark('ws_open'); ws.send(startPayload); }, { once: true });
       ws.addEventListener('error', () => fail(new Error('Converse signaling WebSocket failed')), { once: true });
       ws.addEventListener('close', () => {
         if (this.ws === ws) this.ws = null;
@@ -660,6 +902,7 @@ export class ConverseClient extends EventTarget {
           // note. Building the RTCPeerConnection any earlier would gather before TURN creds
           // exist, making TURN permanently unusable.
           if (session) return;   // duplicate webrtc_ice — ignore, first one wins
+          mark('ice_recv');
           session = new WebRtcSession({
             RTCPeerConnectionImpl: this._RTCPeerConnectionImpl,
             iceServers: Array.isArray(msg.ice_servers) && msg.ice_servers.length
@@ -674,6 +917,7 @@ export class ConverseClient extends EventTarget {
           this._trackFeeder = feeder;
           try {
             await feeder.start();
+            mark('feeder_ready');
             channel = session.createControlChannel();
             // This feeder track is what negotiates the offer's audio m-line (startMic() hasn't
             // necessarily run yet — connect() resolves before the app calls it). Keep the sender
@@ -681,7 +925,9 @@ export class ConverseClient extends EventTarget {
             // with no renegotiation needed (see startMic()).
             this._micSender = session.addAudioTrack(feeder.track);
             const sdp = await session.createOfferWithGatheredIce();
+            mark('offer_ready');   // includes createOffer/setLocalDescription + ICE gather wait
             ws.send(JSON.stringify({ type: 'webrtc_offer', sdp }));
+            mark('offer_sent');
           } catch (err) { fail(err); return; }
           channel.addEventListener('message', async (chEv) => {
             let detail;
@@ -695,6 +941,7 @@ export class ConverseClient extends EventTarget {
             }
             if (!settled && detail?.type === 'ready') {
               if (typeof detail.resume_token === 'string') this._setResumeToken(detail.resume_token);
+              mark('ready');
               settled = true;
               this._channel = channel;
               this._live = true;
@@ -703,6 +950,7 @@ export class ConverseClient extends EventTarget {
               this._uplinkSeq = [0, 0];
               if (this.rawAssist) this._sendRawAssistStatus(this._rawAssistActive);
               this._sendAudioFrontendStatus();
+              this._dispatchConnectTiming('webrtc', marks);
               resolve(this);
             } else if (!settled && detail?.type === 'error') {
               fail(brokerError(detail, 'Converse webrtc session rejected'));
@@ -714,9 +962,11 @@ export class ConverseClient extends EventTarget {
           });
         } else if (msg.type === 'webrtc_answer') {
           if (!session) { fail(new Error('webrtc_answer before webrtc_ice')); return; }
+          mark('answer_recv');
           try {
             await session.applyAnswer(msg.sdp);
           } catch (err) { fail(err); return; }
+          mark('answer_applied');
           signalingDone = true;
           try { ws.close(1000); } catch { /* noop */ }   // signaling's job is done
         } else if (msg.type === 'error') {
@@ -916,14 +1166,12 @@ export class ConverseClient extends EventTarget {
     // Not connected (initial connect still pending, or mid-reconnect) — drop the frame rather than
     // buffer it. Buffered mic audio would flush as a stale burst into the fresh session on reconnect.
     if (!this._live) return;
-    // After a short run of uploaded frames, the mic is truly capturing and Chrome's AEC has had an
-    // adaptation beat. Emit `listening` then so the app does not invite speech into a cold AEC path
-    // that can suppress opening syllables.
-    if (!this._listeningFired) {
+    // Caller-owned capture has no startMic() promise, so retain its established warmup signal.
+    if (!this._micDesired && !this._listeningFired) {
       this._listeningFrames += 1;
       if (this._listeningFrames >= this.listeningWarmupFrames) {
         this._listeningFired = true;
-        this._dispatch({ type: 'listening' });
+        this._dispatch({ type: 'listening', state: 'listening', custom_capture: true });
       }
     }
     // This path is already live, so send synchronously. Besides avoiding a needless microtask,
@@ -1037,10 +1285,47 @@ export class ConverseClient extends EventTarget {
 
   /** Deliver a structured segment of an in-flight call's eventual answer
    *  (docs/client-tool-protocol.md §3a): capped like a result envelope, and `reply: true` asks
-   *  the broker to proactively narrate it now. Never resolves the call — the terminal
-   *  sendToolResult is still required exactly once. */
-  sendToolPartialResult(id, content, { reply = false } = {}) {
-    return this._sendControl({ type: 'tool_partial_result', id, content, ...(reply ? { reply: true } : {}) });
+   *  the broker to proactively narrate it now. `interaction: { prompt, options }` marks this
+   *  partial as needing a user decision rather than a routine milestone: unlike `reply: true`
+   *  alone, it is never silently dropped when the floor is busy — it falls back to the same job
+   *  queue tool completions use, preempting them, and gets a far more persistent delivery retry.
+   *  Track its lifecycle with `narrationState`/`waitForNarrationState`. Never resolves the call —
+   *  the terminal sendToolResult is still required exactly once. */
+  sendToolPartialResult(id, content, { reply = false, interaction } = {}) {
+    return this._sendControl({
+      type: 'tool_partial_result', id, content,
+      ...(reply ? { reply: true } : {}),
+      ...(interaction ? { interaction } : {}),
+    });
+  }
+
+  /** Last known `tool_job_narration` state ("queued"/"started"/"superseded"/"cancelled"/"failed")
+   *  for `jobId`, or undefined if no narration ack has arrived for it yet. */
+  narrationState(jobId) {
+    return this._narrationStates.get(jobId);
+  }
+
+  /** Resolve once `jobId`'s tool_job_narration state reaches one of `states`, or reject on
+   *  `timeoutMs`. Unlike injectContext's one-shot ack, a queued interaction's state evolves
+   *  (queued -> started -> superseded/cancelled), so this is a repeatable wait keyed by jobId
+   *  rather than a single resolve-once promise. */
+  waitForNarrationState(jobId, states, { timeoutMs = 30000 } = {}) {
+    const wanted = new Set(states);
+    const current = this._narrationStates.get(jobId);
+    if (wanted.has(current)) return Promise.resolve(current);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const waiters = this._narrationWaiters.get(jobId);
+        if (!waiters) return;
+        const remaining = waiters.filter((w) => w.resolve !== resolve);
+        if (remaining.length) this._narrationWaiters.set(jobId, remaining);
+        else this._narrationWaiters.delete(jobId);
+        reject(new Error(`narration state wait timed out for ${jobId}`));
+      }, timeoutMs);
+      const waiters = this._narrationWaiters.get(jobId) || [];
+      waiters.push({ states: wanted, resolve, reject, timer });
+      this._narrationWaiters.set(jobId, waiters);
+    });
   }
 
   /** Cancel an in-flight tool call. */
@@ -1105,6 +1390,33 @@ export class ConverseClient extends EventTarget {
       pending.reject(error);
     }
     this._pendingInjections.clear();
+    for (const waiters of this._narrationWaiters.values()) {
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timer);
+        waiter.reject(error);
+      }
+    }
+    this._narrationWaiters.clear();
+  }
+
+  _applyNarrationAck(event) {
+    const jobIds = Array.isArray(event.job_ids) ? event.job_ids : [];
+    for (const jobId of jobIds) {
+      this._narrationStates.set(jobId, event.state);
+      const waiters = this._narrationWaiters.get(jobId);
+      if (!waiters) continue;
+      const remaining = [];
+      for (const waiter of waiters) {
+        if (waiter.states.has(event.state)) {
+          clearTimeout(waiter.timer);
+          waiter.resolve(event.state);
+        } else {
+          remaining.push(waiter);
+        }
+      }
+      if (remaining.length) this._narrationWaiters.set(jobId, remaining);
+      else this._narrationWaiters.delete(jobId);
+    }
   }
 
   // Drive playback state off each server event, before re-dispatching it.
@@ -1240,6 +1552,7 @@ export class ConverseClient extends EventTarget {
           pending.resolve(event);
         }
       }
+      if (event.type === 'tool_job_narration') this._applyNarrationAck(event);
       this._applyReflex(event);
       this.dispatchEvent(new CustomEvent(event.type, { detail: event }));
       this.dispatchEvent(new CustomEvent('event', { detail: event }));

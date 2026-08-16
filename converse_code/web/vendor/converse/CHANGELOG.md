@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.13.1 - 2026-08-15
+
+- `sendToolPartialResult(id, content, { interaction })` marks a partial as needing a user decision
+  (docs/client-tool-protocol.md §3a): unlike `reply: true` alone, it is never silently dropped when
+  the floor is busy — it queues and preempts pending completion narration, with a far more
+  persistent delivery retry. Add `narrationState(jobId)` and `waitForNarrationState(jobId, states,
+  { timeoutMs })` to track its queued/started/superseded/cancelled lifecycle via the new
+  `tool_job_narration` server frame.
+
+## 0.13.0 - 2026-08-13
+
+- `startMic()` now resolves only after the first AudioWorklet frame. If an opened capture produces
+  no frames within the bounded startup window, the SDK fully releases it and reacquires once; a
+  repeated stall rejects with the structured `capture_stalled` error. Silent frames remain valid.
+- Add `warming_up`, `listening`, `recovering`, and `failed` capture lifecycle events so host apps can
+  render status without implementing their own retry or readiness fallback.
+- Add audio-input enumeration and selection with `getInputDevices()`, `setInputDevice(deviceId)`,
+  the `inputDeviceId` option/property, `devices_changed`, and `input_device_changed`. Active capture
+  follows relevant `devicechange` events through guarded track restart.
+- Make `stopMic()` a cancellation barrier and harden stop/retry, overlapping device-switch, and
+  delayed WebRTC track-replacement races without leaking tracks, worklets, or AudioContexts.
+
 ## 0.12.3 - 2026-08-11
 
 - Tool result, progress, deferred, partial-result, and cancellation methods now return whether a

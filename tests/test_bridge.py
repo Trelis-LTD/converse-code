@@ -32,13 +32,15 @@ async def test_controls_wait_for_ready_and_remain_until_browser_ack():
     tab = FakeTab()
     bridge = BrowserBridge(tab.send)
 
-    await bridge.send_tool_deferred("c1", "code-c1", status_label="Coding task")
-    await bridge.send_tool_progress("c1", "running tests")
+    await bridge.send_tool_deferred("c1", "code-c1", status_label="Pi")
+    await bridge.send_tool_partial_result(
+        "c1", {"event": "pi_tool_started", "tool": "test", "arguments": {}},
+    )
     assert tab.frames == []
 
     tab.connected = True
     await handle(bridge, {"type": "local", "event": "bridge_ready"})
-    assert [frame["action"] for frame in tab.frames] == ["tool_deferred", "tool_progress"]
+    assert [frame["action"] for frame in tab.frames] == ["tool_deferred", "tool_partial_result"]
 
     await handle(bridge, {
         "type": "local", "event": "bridge_ack", "seq": tab.frames[0]["seq"],
@@ -46,11 +48,11 @@ async def test_controls_wait_for_ready_and_remain_until_browser_ack():
     await bridge.on_browser_disconnected()
     await handle(bridge, {"type": "local", "event": "bridge_ready"})
     assert [frame["action"] for frame in tab.frames] == [
-        "tool_deferred", "tool_progress", "tool_progress",
+        "tool_deferred", "tool_partial_result", "tool_partial_result",
     ]
 
 
-async def test_trace_records_replying_partial_delivery_and_ack():
+async def test_trace_records_interaction_partial_delivery_and_ack():
     tab = FakeTab()
     tab.connected = True
     events = []
@@ -60,7 +62,12 @@ async def test_trace_records_replying_partial_delivery_and_ack():
     )
     await handle(bridge, {"type": "local", "event": "bridge_ready"})
     await bridge.send_tool_partial_result(
-        "task-1", {"speak": "Ask for approval"}, reply=True,
+        "task-1",
+        {"event": "pi_approval_required"},
+        interaction={
+            "prompt": "Allow Pi to run bash: pwd?",
+            "options": ["Allow once", "Allow for this session", "Block"],
+        },
     )
     partial = tab.frames[0]
     await handle(bridge, {
@@ -74,7 +81,11 @@ async def test_trace_records_replying_partial_delivery_and_ack():
         ("browser_bridge", "control_acknowledged"),
     ]
     assert events[1][2]["action"] == "tool_partial_result"
-    assert partial["reply"] is True
+    assert "reply" not in partial
+    assert partial["interaction"] == {
+        "prompt": "Allow Pi to run bash: pwd?",
+        "options": ["Allow once", "Allow for this session", "Block"],
+    }
 
 
 async def test_browser_tool_calls_and_cancellation_reach_python_handlers():
@@ -89,13 +100,13 @@ async def test_browser_tool_calls_and_cancellation_reach_python_handlers():
 
     await handle(bridge, {
         "type": "local", "event": "tool_call",
-        "call": {"id": "c1", "name": "coding_task", "args": {"request": "fix it"}},
+        "call": {"id": "c1", "name": "pi_message", "args": {"message": "fix it"}},
     }, on_tool_call=on_call)
     await handle(bridge, {
         "type": "local", "event": "tool_cancel", "call": {"id": "c1"},
     }, on_tool_cancel=on_cancel)
 
-    assert calls[0]["name"] == "coding_task"
+    assert calls[0]["name"] == "pi_message"
     assert cancels == [{"id": "c1"}]
 
 
@@ -110,6 +121,19 @@ async def test_native_sdk_session_end_reaches_python_handler():
     )
 
     assert endings == [{"code": 1000, "reason": "idle"}]
+
+
+async def test_explicit_browser_end_session_reaches_python_handler():
+    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True))
+    endings = []
+
+    await handle(
+        bridge,
+        {"type": "local", "event": "end_session"},
+        on_session_end=lambda event: endings.append(event) or asyncio.sleep(0),
+    )
+
+    assert endings == [{"source": "user"}]
 
 
 async def test_malformed_or_abnormal_session_end_does_not_reach_domain():
@@ -140,9 +164,9 @@ async def test_malformed_browser_tool_messages_do_not_enter_the_domain():
         cancels.append(call)
 
     for call in (
-        {"name": "coding_task", "args": {"request": "fix it"}},
+        {"name": "pi_message", "args": {"message": "fix it"}},
         {"id": "c1", "name": 7, "args": {}},
-        {"id": "c1", "name": "coding_task", "args": []},
+        {"id": "c1", "name": "pi_message", "args": []},
     ):
         await handle(bridge, {
             "type": "local", "event": "tool_call", "call": call,

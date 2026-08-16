@@ -1,9 +1,8 @@
-"""Converse background tools controlling a visible Pi TUI semantically."""
+"""Minimal Converse controls for one visible Pi session."""
 
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -11,32 +10,11 @@ from .pi_tui import PiTUIBridgeError
 
 TOOL_TIMEOUT_S = 30
 DEFERRED_TIMEOUT_S = 7200
-
-CODING_TASK_DESCRIPTION = (
-    "Default handoff for every actionable user request or question to the visible Pi coding agent. "
-    "Pi owns the coding environment and its runtime configuration, including its active model. "
-    "Only pure social chat, an explicit session end, or a response to a pending approval is not a "
-    "new coding_task. Preserve the complete wording; never ask whether to pass it. The task runs "
-    "in the background, with progress, partial results, and completion delivered automatically. "
-    "For an already-active task, use continue_task instead."
-)
-CONTINUE_TASK_DESCRIPTION = (
-    "Send guidance or a requested answer to the coding task already in progress. Preserve the "
-    "user's wording. Use this for refinements and corrections while Pi is still working."
-)
-PI_MODEL_DESCRIPTION = (
-    "Authoritative interface to the visible Pi coding agent's model state. Always call for any "
-    "question about Pi's current or available model and for any request to change or switch it. "
-    "Pass the user's complete exact words unchanged. Never infer, choose, or insert a model the "
-    "user did not name. With no uniquely named available model, this reads Pi's current and "
-    "available models without changing state; with one, it changes Pi semantically and reports "
-    "the acknowledged selection."
-)
-APPROVAL_DECISION_DESCRIPTION = (
-    "Answer a pending Pi approval only after the user explicitly chooses. Use the exact "
-    "approval_id from the approval request. Call immediately without a spoken preamble. Never "
-    "infer approval from the coding task itself."
-)
+DECISIONS = {
+    "allow_once": "Allow once",
+    "allow_session": "Allow for this session",
+    "block": "Block",
+}
 
 
 def manifest() -> list[dict]:
@@ -50,35 +28,46 @@ def manifest() -> list[dict]:
             **flags,
         }
 
-    request = {"request": {"type": "string", "description": "The user's instruction."}}
-    model_request = {
-        "request": {
+    request = {
+        "user_request": {
             "type": "string",
-            "description": "The user's requested Pi provider, model, or alias.",
+            "description": (
+                "The user's request or question for Pi, preserving their intent. This must be "
+                "an instruction or question for Pi—not assistant narration, an inferred answer, "
+                "or a claim that the requested work already happened."
+            ),
         },
     }
     return [
         tool(
-            "coding_task", CODING_TASK_DESCRIPTION, request, ["request"],
-            timeout=TOOL_TIMEOUT_S, deferred=True, deferred_timeout=DEFERRED_TIMEOUT_S,
-            notify_on_complete=True, status_label="Coding task",
+            "pi_request",
+            (
+                "Hand an actionable coding, repository, environment, or Pi question to Pi. "
+                "Forward the user's request faithfully and let Pi inspect or act; never substitute "
+                "your own progress narration or unsupported answer."
+            ),
+            request,
+            ["user_request"],
+            timeout=TOOL_TIMEOUT_S,
+            deferred=True,
+            deferred_timeout=DEFERRED_TIMEOUT_S,
+            notify_on_complete=True,
+            status_label="Pi",
         ),
-        tool("continue_task", CONTINUE_TASK_DESCRIPTION, request, ["request"], timeout=15),
         tool(
-            "approval_decision",
-            APPROVAL_DECISION_DESCRIPTION,
+            "pi_approval",
+            "Submit the user's explicit decision for a pending Pi approval using its supplied ID.",
             {
-                "approval_id": {"type": "string", "description": "Pending approval ID."},
-                "decision": {
-                    "type": "string",
-                    "enum": ["allow_once", "allow_session", "block"],
-                },
+                "approval_id": {"type": "string", "description": "The pending approval ID."},
+                "decision": {"type": "string", "enum": list(DECISIONS)},
             },
             ["approval_id", "decision"],
             timeout=15,
         ),
         tool(
-            "pi_model", PI_MODEL_DESCRIPTION, model_request, ["request"], timeout=30,
+            "pi_cancel",
+            "Cancel Pi's current turn without ending the voice session.",
+            timeout=15,
         ),
     ]
 
@@ -86,7 +75,8 @@ def manifest() -> list[dict]:
 @dataclass(frozen=True)
 class TaskResult:
     outcome: Literal["succeeded", "failed", "cancelled"]
-    speak: str
+    event: str
+    message: str = ""
 
 
 @dataclass(frozen=True)
@@ -112,13 +102,13 @@ class ProcessExited:
 @dataclass(frozen=True)
 class ToolStarted:
     name: str
-    args: dict
+    arguments: dict
 
 
 @dataclass(frozen=True)
 class ApprovalRequested:
     approval_id: str
-    tool_name: str
+    tool: str
     summary: str
 
 
@@ -149,371 +139,267 @@ PiEvent = (
 
 
 @dataclass
-class PendingTask:
+class PendingTurn:
     call_id: str
     result: asyncio.Future[TaskResult]
     events: list[PiEvent] = field(default_factory=list)
 
 
 @dataclass
-class RunningTask:
+class RunningTurn:
     call_id: str
     result: asyncio.Future[TaskResult]
     command_id: str
-    ownership_confirmed: bool = False
+    owned: bool = False
     assistant_text: str = ""
-    routine_partials: int = 0
-    progress_updates: int = 0
     approvals: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
-class EndingTask:
+class CancellingTurn:
     call_id: str
     result: asyncio.Future[TaskResult]
-    outcome: TaskResult
 
 
 @dataclass(frozen=True)
-class CompletedTask:
+class CompletedTurn:
     call_id: str
 
 
-ActiveTask = PendingTask | RunningTask | EndingTask | CompletedTask
+ActiveTurn = PendingTurn | RunningTurn | CancellingTurn | CompletedTurn
 
 
-class AgentToolRouter:
-    """Translate one parsed Pi episode into one Converse background-tool lifecycle."""
-
-    MAX_ROUTINE_PARTIALS = 3
-    MAX_PROGRESS = 12
+class PiControlRouter:
+    """Map Converse's human-like controls onto one attributable Pi turn."""
 
     def __init__(self, pi, sender, *, handle: str) -> None:
         self.pi = pi
         self.sender = sender
         self.handle = handle
-        self._task: ActiveTask | None = None
+        self._turn: ActiveTurn | None = None
 
     @property
     def active_call_id(self) -> str | None:
-        return self._task.call_id if self._task is not None else None
+        return self._turn.call_id if self._turn is not None else None
 
     async def handle_tool_call(self, call: dict) -> None:
         call_id = call.get("id")
         if not isinstance(call_id, str) or not call_id:
             return
-        name = call.get("name")
-        args = call.get("args")
+        name, args = call.get("name"), call.get("args")
         if not isinstance(name, str) or not isinstance(args, dict):
-            await self._result(call_id, "The tool request was malformed.", outcome="failed")
-        elif name == "coding_task":
-            await self._coding_task(call_id, self._request(args))
-        elif name == "continue_task":
-            await self._continue_task(call_id, self._request(args))
-        elif name == "approval_decision":
-            await self._approval_decision(call_id, args)
-        elif name == "pi_model":
-            await self._pi_model(call_id, self._request(args))
+            await self._error(call_id, "malformed_tool_call")
+        elif name == "pi_request":
+            await self._pi_request(call_id, self._text(args.get("user_request")))
+        elif name == "pi_approval":
+            await self._pi_approval(call_id, args)
+        elif name == "pi_cancel":
+            await self._pi_cancel(call_id)
         else:
-            await self._result(call_id, f"Unknown tool: {name}", outcome="failed")
+            await self._error(call_id, "unknown_tool")
 
     async def handle_tool_cancel(self, call: dict) -> None:
-        task = self._task
-        if not isinstance(call.get("id"), str) or call["id"] != self.active_call_id:
+        if call.get("id") != self.active_call_id:
             return
-        if not isinstance(task, (PendingTask, RunningTask)):
-            return
-        cancelled = TaskResult("cancelled", "The coding task was cancelled.")
-        self._task = EndingTask(task.call_id, task.result, cancelled)
-        try:
-            await self.pi.command("abort")
-        except PiTUIBridgeError:
-            self._complete(cancelled)
+        await self._request_cancel()
 
     async def on_event(self, event: dict) -> None:
         parsed = self._parse_event(event)
         if parsed is None:
             return
-        if isinstance(self._task, PendingTask):
-            self._task.events.append(parsed)
+        if isinstance(self._turn, PendingTurn):
+            self._turn.events.append(parsed)
             return
         await self._handle_event(parsed)
 
-    async def _handle_event(self, event: PiEvent) -> None:
-        task = self._task
-        if task is None or isinstance(task, CompletedTask):
-            return
-        if isinstance(task, EndingTask):
-            if isinstance(event, (AgentSettled, SessionLost, ProcessExited)):
-                self._complete(task.outcome)
-            return
-        if isinstance(event, InvalidPiEvent):
-            self._complete(TaskResult("failed", event.reason))
-        elif isinstance(event, SessionLost):
-            self._complete(TaskResult(
-                "failed",
-                "The visible Pi session or semantic bridge ended before the voice task "
-                "produced attributable completion evidence.",
-            ))
-        elif isinstance(event, ProcessExited):
-            self._complete(TaskResult(
-                "failed", f"Pi exited unexpectedly with status {event.status}.",
-            ))
-        elif not isinstance(task, RunningTask):
-            return
-        elif isinstance(event, OwnedInput):
-            if task.ownership_confirmed or event.command_id == task.command_id:
-                task.ownership_confirmed = True
-            else:
-                self._complete(TaskResult(
-                    "failed", "Pi reported bridge input that did not match the active voice task.",
-                ))
-        elif isinstance(event, ForeignInput):
-            self._complete(TaskResult(
-                "failed",
-                "Pi received unrelated terminal or extension input while the voice task was "
-                "active, so its outcome cannot be attributed safely.",
-            ))
-        elif isinstance(event, ToolStarted):
-            await self._tool_started(task, event.name, event.args)
-        elif isinstance(event, ApprovalRequested):
-            await self._approval_requested(
-                task, event.approval_id, event.tool_name, event.summary,
-            )
-        elif isinstance(event, MessageFailed):
-            self._task = EndingTask(
-                task.call_id, task.result, TaskResult("failed", event.error),
-            )
-        elif isinstance(event, AssistantMessage):
-            if task.ownership_confirmed and event.text:
-                task.assistant_text = event.text
-        elif isinstance(event, AgentSettled):
-            if task.ownership_confirmed:
-                self._complete(TaskResult(
-                    "succeeded",
-                    task.assistant_text or "The coding task finished without a text summary.",
-                ))
-            else:
-                self._complete(TaskResult(
-                    "failed",
-                    "Pi settled without confirming that the active turn belonged to the voice "
-                    "task, so no outcome can be attributed safely.",
-                ))
-
-    async def _coding_task(self, call_id: str, request: str | None) -> None:
+    async def _pi_request(self, call_id: str, request: str | None) -> None:
         if request is None:
-            await self._result(call_id, "A coding instruction is required.", outcome="failed")
+            await self._error(call_id, "user_request_required")
             return
-        if self._task is not None:
-            await self._result(
-                call_id, "A coding task is already active. Use continue_task.", outcome="failed",
-            )
+        if isinstance(self._turn, (PendingTurn, RunningTurn)):
+            await self._steer(call_id, request)
             return
+        if self._turn is not None:
+            await self._error(call_id, "pi_turn_settling")
+            return
+
         result = asyncio.get_running_loop().create_future()
-        pending = PendingTask(call_id, result)
-        self._task = pending
+        self._turn = PendingTurn(call_id, result)
         try:
             receipt = await self.pi.command("prompt", message=request)
         except PiTUIBridgeError as exc:
-            if isinstance(self._task, EndingTask):
-                self._complete(self._task.outcome)
-                outcome = await result
-                await self._result(call_id, outcome.speak, outcome=outcome.outcome)
-            else:
-                await self._result(call_id, f"Pi rejected the task: {exc}", outcome="failed")
-            self._task = None
+            await self._error(call_id, "pi_rejected_message", reason=str(exc))
+            self._turn = None
             return
-        await self.sender.send_tool_deferred(call_id, self.handle, status_label="Coding task")
-        if isinstance(self._task, PendingTask):
-            early_events = tuple(self._task.events)
-            self._task = RunningTask(call_id, result, receipt.command_id)
+
+        await self.sender.send_tool_deferred(call_id, self.handle, status_label="Pi")
+        if isinstance(self._turn, PendingTurn):
+            early_events = tuple(self._turn.events)
+            self._turn = RunningTurn(call_id, result, receipt.command_id)
             for event in early_events:
                 await self._handle_event(event)
         outcome = await result
-        await self._result(call_id, outcome.speak, outcome=outcome.outcome)
-        self._task = None
-
-    async def _continue_task(self, call_id: str, request: str | None) -> None:
-        if request is None:
-            await self._result(call_id, "A reply or instruction is required.", outcome="failed")
-            return
-        if not isinstance(self._task, (PendingTask, RunningTask)):
-            await self._result(call_id, "There is no active coding task.", outcome="failed")
-            return
-        try:
-            await self.pi.command("steer", message=request)
-        except PiTUIBridgeError as exc:
-            await self._result(call_id, f"Pi rejected the guidance: {exc}", outcome="failed")
-            return
-        await self._result(call_id, "Passed that to the active coding task.", verified=True)
-
-    async def _pi_model(self, call_id: str, request: str | None) -> None:
-        if request is None:
-            await self._result(call_id, "A model is required.", outcome="failed")
-            return
-        if self._task is not None:
-            await self._result(
-                call_id, "Wait for the active coding task to finish before changing model.",
-                outcome="failed",
-            )
-            return
-        try:
-            receipt = await self.pi.command("model_state", request=request)
-        except PiTUIBridgeError as exc:
-            await self._result(call_id, f"Pi could not change model: {exc}", outcome="failed")
-            return
-        provider, model = receipt.data.get("provider"), receipt.data.get("model")
-        changed, available = receipt.data.get("changed"), receipt.data.get("available")
-        if (
-            not isinstance(provider, str) or not provider
-            or not isinstance(model, str) or not model
-            or type(changed) is not bool
-            or not isinstance(available, list)
-            or not all(isinstance(item, str) and item for item in available)
-        ):
-            await self._result(
-                call_id, "Pi acknowledged the request without valid model state.",
-                outcome="failed",
-            )
-            return
-        data = {
-            "provider": provider, "model": model,
-            "changed": changed, "available": available,
+        content = {
+            "event": outcome.event, "pi_response": outcome.message, "handle": self.handle,
         }
-        if not changed:
-            choices = ", ".join(available[:-1]) + (
-                f" and {available[-1]}" if len(available) > 1 else available[0]
-            )
-            await self._result(
-                call_id,
-                f"Pi is using {provider}/{model}. Available models are {choices}. "
-                "Which one would you like?",
-                data=data,
-                verified=True,
-            )
+        await self.sender.send_tool_result(
+            call_id, content, outcome=outcome.outcome, verified=False,
+        )
+        self._turn = None
+
+    async def _steer(self, call_id: str, message: str) -> None:
+        turn = self._turn
+        if isinstance(turn, RunningTurn):
+            for approval_id in tuple(turn.approvals):
+                try:
+                    await self.pi.command(
+                        "approval_response", approvalId=approval_id, decision="block",
+                    )
+                except PiTUIBridgeError as exc:
+                    await self._error(
+                        call_id, "pi_rejected_approval", reason=str(exc),
+                    )
+                    return
+                turn.approvals.remove(approval_id)
+        try:
+            await self.pi.command("steer", message=message)
+        except PiTUIBridgeError as exc:
+            await self._error(call_id, "pi_rejected_message", reason=str(exc))
             return
         await self._result(
-            call_id, f"Pi is now using {provider}/{model}.",
-            data=data, verified=True,
+            call_id,
+            {"event": "pi_message_delivered", "mode": "steer", "task_status": "running"},
+            verified=True,
         )
 
-    async def _approval_requested(
-        self, task: RunningTask, approval_id: str, tool_name: str, summary: str,
-    ) -> None:
-        if approval_id in task.approvals:
-            return
-        task.approvals.add(approval_id)
-        await self.sender.send_tool_partial_result(
-            task.call_id,
-            {
-                "speak": (
-                    f"Pi wants to run {tool_name}: {summary}. Ask the user to allow once, "
-                    "allow for this session, or block it."
-                ),
-                "data": {
-                    "event": "approval_required", "approval_id": approval_id,
-                    "tool": tool_name, "summary": summary,
-                },
-                "handle": self.handle,
-            },
-            reply=True,
-        )
-
-    async def _approval_decision(self, call_id: str, args: dict) -> None:
-        task = self._task
-        approval_id = args.get("approval_id")
-        decision = args.get("decision")
-        choices = {"allow_once", "allow_session", "block"}
+    async def _pi_approval(self, call_id: str, args: dict) -> None:
+        turn = self._turn
+        approval_id, decision = args.get("approval_id"), args.get("decision")
         if (
-            not isinstance(task, RunningTask)
-            or not isinstance(approval_id, str) or approval_id not in task.approvals
-            or not isinstance(decision, str) or decision not in choices
+            not isinstance(turn, RunningTurn)
+            or not isinstance(approval_id, str) or approval_id not in turn.approvals
+            or decision not in DECISIONS
         ):
-            await self._result(
-                call_id, "There is no matching pending approval; nothing was changed.",
-                outcome="failed",
-            )
+            await self._error(call_id, "approval_not_pending")
             return
         try:
             await self.pi.command(
                 "approval_response", approvalId=approval_id, decision=decision,
             )
         except PiTUIBridgeError as exc:
-            await self._result(call_id, f"Pi rejected the approval response: {exc}", outcome="failed")
+            await self._error(call_id, "pi_rejected_approval", reason=str(exc))
             return
         if decision == "allow_session":
-            task.approvals.clear()
+            turn.approvals.clear()
         else:
-            task.approvals.remove(approval_id)
-        labels = {
-            "allow_once": "Allowed that action once.",
-            "allow_session": "Allowed protected actions for this Pi session.",
-            "block": "Blocked that action.",
-        }
-        await self._result(call_id, labels[decision], verified=True)
-
-    async def _tool_started(self, task: RunningTask, name: str, args: dict) -> None:
-        if name in {"edit", "write"}:
-            if task.routine_partials >= self.MAX_ROUTINE_PARTIALS:
-                return
-            path = self._text(args.get("path")) or self._text(args.get("file_path")) or "a file"
-            task.routine_partials += 1
-            await self.sender.send_tool_partial_result(
-                task.call_id,
-                {
-                    "speak": f"Pi is preparing to update {path}.",
-                    "data": {"tool": name, "path": path}, "handle": self.handle,
-                },
-                reply=False,
-            )
-            return
-        command = self._text(args.get("command")) or ""
-        if name == "bash" and self._is_test_command(command):
-            if task.routine_partials >= self.MAX_ROUTINE_PARTIALS:
-                return
-            task.routine_partials += 1
-            await self.sender.send_tool_partial_result(
-                task.call_id,
-                {
-                    "speak": "The coding agent is preparing to run tests.",
-                    "data": {"tool": name, "command": command[:500]}, "handle": self.handle,
-                },
-                reply=True,
-            )
-            return
-        if task.progress_updates >= self.MAX_PROGRESS:
-            return
-        task.progress_updates += 1
-        detail = ""
-        if name == "bash" and command:
-            detail = f": {' '.join(command.split())[:180]}"
-        elif path := self._text(args.get("path")) or self._text(args.get("file_path")):
-            detail = f": {path[:180]}"
-        await self.sender.send_tool_progress(
-            task.call_id, f"Pi is preparing to use {name}{detail}.",
+            turn.approvals.remove(approval_id)
+        await self._result(
+            call_id,
+            {"event": "pi_approval_delivered", "decision": decision, "task_status": "running"},
+            verified=True,
         )
 
-    def _complete(self, outcome: TaskResult) -> None:
-        task = self._task
-        if task is None or isinstance(task, CompletedTask):
+    async def _pi_cancel(self, call_id: str) -> None:
+        if not isinstance(self._turn, (PendingTurn, RunningTurn)):
+            await self._error(call_id, "no_active_pi_turn")
             return
-        task.result.set_result(outcome)
-        self._task = CompletedTask(task.call_id)
+        await self._request_cancel()
+        await self._result(
+            call_id,
+            {"event": "pi_cancel_requested", "task_status": "cancelling"},
+            verified=True,
+        )
 
-    @staticmethod
-    def _request(args: dict) -> str | None:
-        value = args.get("request")
-        if not isinstance(value, str) or not (value := value.strip()):
-            return None
-        return value
+    async def _request_cancel(self) -> None:
+        turn = self._turn
+        if not isinstance(turn, (PendingTurn, RunningTurn)):
+            return
+        self._turn = CancellingTurn(turn.call_id, turn.result)
+        try:
+            await self.pi.command("abort")
+        except PiTUIBridgeError:
+            self._complete(TaskResult("cancelled", "pi_turn_cancelled"))
+
+    async def _handle_event(self, event: PiEvent) -> None:
+        turn = self._turn
+        if turn is None or isinstance(turn, CompletedTurn):
+            return
+        if isinstance(turn, CancellingTurn):
+            if isinstance(event, (AgentSettled, SessionLost, ProcessExited)):
+                self._complete(TaskResult("cancelled", "pi_turn_cancelled"))
+            return
+        if isinstance(event, InvalidPiEvent):
+            self._complete(TaskResult("failed", "invalid_pi_event", event.reason))
+        elif isinstance(event, SessionLost):
+            self._complete(TaskResult("failed", "pi_session_lost"))
+        elif isinstance(event, ProcessExited):
+            self._complete(TaskResult("failed", "pi_process_exited", str(event.status)))
+        elif not isinstance(turn, RunningTurn):
+            return
+        elif isinstance(event, OwnedInput):
+            if turn.owned or event.command_id == turn.command_id:
+                turn.owned = True
+            else:
+                self._complete(TaskResult("failed", "pi_input_mismatch"))
+        elif isinstance(event, ForeignInput):
+            self._complete(TaskResult("failed", "unrelated_pi_input"))
+        elif isinstance(event, ToolStarted):
+            await self.sender.send_tool_partial_result(
+                turn.call_id,
+                {
+                    "event": "pi_tool_started", "tool": event.name,
+                    "arguments": event.arguments, "handle": self.handle,
+                },
+            )
+        elif isinstance(event, ApprovalRequested):
+            if event.approval_id in turn.approvals:
+                return
+            turn.approvals.add(event.approval_id)
+            await self.sender.send_tool_partial_result(
+                turn.call_id,
+                {
+                    "event": "pi_approval_required", "approval_id": event.approval_id,
+                    "tool": event.tool, "summary": event.summary,
+                    "decisions": list(DECISIONS), "handle": self.handle,
+                },
+                interaction={
+                    "prompt": f"Allow Pi to run {event.tool}: {event.summary}?",
+                    "options": list(DECISIONS.values()),
+                },
+            )
+        elif isinstance(event, MessageFailed):
+            self._complete(TaskResult("failed", "pi_message_failed", event.error))
+        elif isinstance(event, AssistantMessage):
+            if turn.owned and event.text:
+                turn.assistant_text = event.text
+        elif isinstance(event, AgentSettled):
+            if turn.owned:
+                self._complete(TaskResult("succeeded", "pi_settled", turn.assistant_text))
+            else:
+                self._complete(TaskResult("failed", "pi_ownership_unconfirmed"))
+
+    def _complete(self, outcome: TaskResult) -> None:
+        turn = self._turn
+        if turn is None or isinstance(turn, CompletedTurn):
+            return
+        if not turn.result.done():
+            turn.result.set_result(outcome)
+        self._turn = CompletedTurn(turn.call_id)
+
+    async def _result(
+        self, call_id: str, content: dict, *, outcome: str = "succeeded",
+        verified: bool = False,
+    ) -> None:
+        await self.sender.send_tool_result(
+            call_id, content, outcome=outcome, verified=verified,
+        )
+
+    async def _error(self, call_id: str, event: str, **data) -> None:
+        await self._result(call_id, {"event": event, **data}, outcome="failed")
 
     @staticmethod
     def _text(value) -> str | None:
-        return value if isinstance(value, str) and value else None
-
-    @staticmethod
-    def _is_test_command(command: str) -> bool:
-        return bool(re.search(r"(?:^|\s)(?:pytest|test|tests|cargo test|go test|npm test)", command))
+        return value.strip() if isinstance(value, str) and value.strip() else None
 
     @classmethod
     def _parse_event(cls, event) -> PiEvent | None:
@@ -521,54 +407,43 @@ class AgentToolRouter:
             return None
         kind = event["type"]
         if kind == "input_seen":
-            owner = event.get("owner")
-            command_id = event.get("commandId")
-            if owner == "bridge" and (not isinstance(command_id, str) or not command_id):
-                return InvalidPiEvent("Pi sent malformed input ownership evidence.")
+            owner, command_id = event.get("owner"), event.get("commandId")
+            if owner == "bridge" and not cls._text(command_id):
+                return InvalidPiEvent("malformed input ownership")
             if owner not in {"bridge", "interactive", "other"}:
-                return InvalidPiEvent("Pi sent malformed input ownership evidence.")
+                return InvalidPiEvent("malformed input ownership")
             return OwnedInput(command_id) if owner == "bridge" else ForeignInput()
         if kind in {"session_shutdown", "bridge_disconnect", "bridge_replaced"}:
             return SessionLost()
         if kind == "process_exit":
             status = event.get("status")
-            return (
-                ProcessExited(status)
-                if type(status) is int
-                else InvalidPiEvent("Pi sent a malformed process exit event.")
-            )
+            return ProcessExited(status) if type(status) is int else InvalidPiEvent("malformed exit")
         if kind == "tool_execution_start":
-            name = cls._text(event.get("toolName"))
-            args = event.get("args")
+            name, arguments = cls._text(event.get("toolName")), event.get("args")
             return (
-                ToolStarted(name, args)
-                if name is not None and isinstance(args, dict)
-                else InvalidPiEvent("Pi sent a malformed tool event.")
+                ToolStarted(name, arguments)
+                if name is not None and isinstance(arguments, dict)
+                else InvalidPiEvent("malformed tool event")
             )
         if kind == "approval_request":
-            values = tuple(
-                cls._text(event.get(key))
-                for key in ("approvalId", "toolName", "summary")
+            values = tuple(cls._text(event.get(key)) for key in ("approvalId", "toolName", "summary"))
+            return (
+                ApprovalRequested(*values)
+                if all(value is not None for value in values)
+                else InvalidPiEvent("malformed approval request")
             )
-            if any(value is None or not value.strip() for value in values):
-                return InvalidPiEvent("Pi sent a malformed approval request.")
-            return ApprovalRequested(*(value.strip() for value in values))
         if kind == "message_end":
             message = event.get("message")
             if not isinstance(message, dict):
-                return InvalidPiEvent("Pi sent a malformed terminal message.")
+                return InvalidPiEvent("malformed terminal message")
             if message.get("stopReason") in {"error", "aborted"}:
-                supplied = message.get("errorMessage")
-                return MessageFailed(
-                    supplied if isinstance(supplied, str) and supplied
-                    else "Pi stopped with an error."
-                )
+                error = cls._text(message.get("errorMessage")) or "Pi stopped with an error."
+                return MessageFailed(error)
             return AssistantMessage(cls._message_text(message))
         if kind == "agent_settled":
             return AgentSettled()
         if kind == "extension_error":
-            error = cls._text(event.get("error")) or "unknown extension error"
-            return InvalidPiEvent(f"The Pi extension failed: {error}")
+            return InvalidPiEvent(cls._text(event.get("error")) or "unknown extension error")
         return None
 
     @staticmethod
@@ -585,13 +460,4 @@ class AgentToolRouter:
             for item in content
             if isinstance(item, dict) and item.get("type") == "text"
             and isinstance(item.get("text"), str) and item["text"].strip()
-        )
-
-    async def _result(
-        self, call_id: str, speak: str, *, data: dict | None = None,
-        outcome: str = "succeeded", verified: bool = False,
-    ) -> None:
-        await self.sender.send_tool_result(
-            call_id, {"speak": speak, "data": data or {}, "handle": self.handle},
-            outcome=outcome, verified=verified,
         )

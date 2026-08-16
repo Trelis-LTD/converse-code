@@ -10,7 +10,7 @@
 header,main,footer{width:min(760px,calc(100% - 2rem));margin:0 auto}header{display:flex;align-items:center;padding:1rem 0;border-bottom:1px solid var(--line)}
 h1{font-size:1rem;margin:0}.badge{margin-left:auto;color:var(--ok);font:12px ui-monospace,monospace}main{height:100%;min-height:0;padding:1rem 0;overflow:auto}.empty{color:var(--muted);text-align:center;margin-top:20vh}
 .entry{max-width:85%;padding:.7rem .85rem;margin:.6rem 0;border:1px solid var(--line);border-radius:.7rem;background:var(--panel);white-space:pre-wrap}.entry::before{content:attr(data-label);display:block;margin-bottom:.3rem;color:var(--muted);font:700 10px/1.2 ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}.user{margin-left:auto;background:var(--user-bg);border-color:var(--user-line)}.user::before{color:#f49a87}.assistant{margin-right:auto;background:var(--assistant-bg);border-color:var(--assistant-line)}.assistant::before{color:#a9cfb7}.activity{max-width:100%;padding:.55rem .7rem;color:var(--muted);background:transparent;text-align:left;border-style:dashed;font:13px/1.45 ui-monospace,monospace}.activity::before{display:inline;margin-right:.7rem;color:#c1b9a8}
-footer{display:flex;align-items:center;justify-content:center;gap:1rem;padding:1rem 0}.hint,#notice{color:var(--muted);margin:0}button{font:inherit;border:1px solid var(--accent);border-radius:.65rem;padding:.8rem 1.2rem;background:var(--accent);color:#1a0c08;font-weight:700;cursor:pointer}button:disabled{opacity:.55}
+footer{display:flex;align-items:center;justify-content:center;gap:1rem;padding:1rem 0}.hint,#notice{color:var(--muted);margin:0}button{font:inherit;border:1px solid var(--accent);border-radius:.65rem;padding:.8rem 1.2rem;background:var(--accent);color:#1a0c08;font-weight:700;cursor:pointer}button.secondary{background:transparent;color:var(--text);border-color:var(--line)}button:disabled{opacity:.55}
 </style>
 </head>
 <body>
@@ -19,29 +19,29 @@ footer{display:flex;align-items:center;justify-content:center;gap:1rem;padding:1
 <footer>
   <p class="hint">Live speech, replies, and coding activity</p>
   <button id="voice" aria-pressed="false">Start voice</button>
+  <button id="end-session" class="secondary">End session</button>
   <p id="notice" role="status"></p>
 </footer>
 <script type="module">
 const token=new URLSearchParams(location.search).get("t")||"";
 const log=document.querySelector("#log"),empty=document.querySelector("#empty");
-const voice=document.querySelector("#voice"),status=document.querySelector("#status"),notice=document.querySelector("#notice");
-let client=null,delivery=null,opening=null,mic=false,flushing=false,seqs=new Map();
+const voice=document.querySelector("#voice"),endSession=document.querySelector("#end-session"),status=document.querySelector("#status"),notice=document.querySelector("#notice");
+let client=null,delivery=null,opening=null,mic=false,micEnabled=false,ended=false,flushing=false,seqs=new Map();
 const userRows=new Map(),assistantRows=new Map(),renderedControls=new Set();
 const deferredIds=new Set();
-const activeReplies=new Set(),replyIdleWaiters=[];
-const instructions=`You are Converse Code, the voice interface to the visible Pi coding agent. The user is speaking to Pi through you, not to a separate assistant. Follow the declared tool descriptions as the authoritative contract and keep spoken replies brief.`;
+const instructions=`You are Converse Code, the voice interface to the visible Pi coding agent. The user is speaking to Pi through you. Use pi_request for every actionable coding, repository, environment, or Pi question. Put the user's request in user_request; never replace it with your own narration, an inferred answer, or a claim that work already happened. Report outcomes only from Pi's returned evidence.`;
 
 const labels={user:"You",assistant:"Converse Code",activity:"Activity"};
 function followBottom(){log.scrollTop=log.scrollHeight}
 function row(kind,text,label=labels[kind]){empty?.remove();const el=document.createElement("div");el.className=`entry ${kind}`;el.dataset.label=label;el.setAttribute("aria-label",label);el.textContent=text;log.append(el);followBottom();return el}
 function activity(text,label="Activity"){if(text)row("activity",text,label)}
-function waitForReplyIdle(){
-  if(!activeReplies.size)return Promise.resolve();
-  return new Promise(resolve=>replyIdleWaiters.push(resolve));
-}
-function releaseReplyIdle(){if(!activeReplies.size)for(const resolve of replyIdleWaiters.splice(0))resolve()}
 function wireSend(frame){if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(frame))}
 function debugTrace(name,data={}){wireSend({type:"local",event:"debug_trace",name,data})}
+function showEnded(){
+  ended=true;mic=false;micEnabled=false;delivery=null;status.textContent="ended";
+  voice.textContent="Session ended";voice.disabled=true;voice.setAttribute("aria-pressed","false");
+  endSession.disabled=true;
+}
 const ws=new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(token)}`);
 ws.onopen=()=>{status.textContent="idle"};
 ws.onmessage=event=>{const frame=JSON.parse(event.data);if(frame.event==="bridge_control"){seqs.set(frame.seq,frame);flush()}};
@@ -64,6 +64,18 @@ async function openClient(){
 
 function handleEvent(event){
   const turnId=event.turn_id||event.message_id||"current";
+  if(["warming_up","recovering","listening","failed"].includes(event.type)){
+    const state=event.type,error=event.error?.message||event.error||"";
+    status.textContent=state.replace("_"," ");
+    debugTrace("mic_state",{
+      state,...(event.code?{code:event.code}:{}),...(error?{error:String(error)}:{}),
+      ...(Number.isInteger(event.attempt)?{attempt:event.attempt}:{}),
+      ...(Number.isInteger(event.next_attempt)?{next_attempt:event.next_attempt}:{}),
+      ...(event.device_id?{device_id:event.device_id}:{}),
+      ...(typeof event.recovered==="boolean"?{recovered:event.recovered}:{}),
+    });
+    if(state==="failed")notice.textContent=error||event.code||"Microphone capture failed";
+  }
   if(event.type==="turn")debugTrace("voice_turn",{type:event.type,turn_id:turnId});
   if(event.type==="asr"){
     const current=userRows.get(turnId)||row("user","");current.textContent=event.text||"";
@@ -71,10 +83,7 @@ function handleEvent(event){
     userRows.set(turnId,current);if(final)userRows.delete(turnId);followBottom();
     if(final)debugTrace("user_transcript",{turn_id:turnId,text:event.text||""});
   }
-  if(event.type==="turn"){
-    activeReplies.add(turnId);
-    if(!assistantRows.has(turnId))assistantRows.set(turnId,row("assistant",""));
-  }
+  if(event.type==="turn"&&!assistantRows.has(turnId))assistantRows.set(turnId,row("assistant",""));
   if(event.type==="text_delta"){
     const current=assistantRows.get(turnId)||row("assistant","");
     current.textContent+=event.delta||"";assistantRows.set(turnId,current);followBottom();
@@ -86,12 +95,9 @@ function handleEvent(event){
   }
   if(event.type==="done"||event.type==="interrupted"||event.type==="canceled"){
     debugTrace("voice_turn",{type:event.type,turn_id:turnId,text:assistantRows.get(turnId)?.textContent||""});
-    activeReplies.delete(turnId);releaseReplyIdle();
   }
   if(event.type==="session_end"){
-    client?.stopMic();mic=false;delivery=null;activeReplies.clear();releaseReplyIdle();
-    status.textContent="ended";voice.textContent="Session ended";voice.disabled=true;
-    voice.setAttribute("aria-pressed","false");
+    client?.stopMic();showEnded();
     debugTrace("session_end",{code:event.code,reason:event.reason||""});
     wireSend({type:"local",event:"session_end",code:event.code,reason:event.reason||""});
   }
@@ -99,7 +105,12 @@ function handleEvent(event){
   if(event.type==="tool_call")debugTrace("tool_call",{id:event.id,name:event.name,args:event.args});
   if(event.type==="tool_call")wireSend({type:"local",event:"tool_call",call:event});
   if(event.type==="tool_cancel"){debugTrace("tool_cancel",{id:event.id});wireSend({type:"local",event:"tool_cancel",call:event})}
-  if(event.type==="reconnecting"){activeReplies.clear();releaseReplyIdle();delivery=null}
+  if(event.type==="tool_job_narration"){
+    debugTrace("tool_job_narration",{state:event.state,job_ids:event.job_ids||[],kind:event.kind||""});
+    const narrationLabels={queued:"Approval prompt queued",started:"Approval prompt started",superseded:"Approval prompt superseded",cancelled:"Approval prompt cancelled",failed:"Approval prompt failed"};
+    activity(narrationLabels[event.state]||`Approval prompt ${event.state||"updated"}`,"Approval");
+  }
+  if(event.type==="reconnecting")delivery=null;
   if(event.type==="reconnected"){delivery={client};wireSend({type:"local",event:"bridge_ready"});flush()}
   if(event.type==="error"){debugTrace("voice_error",{code:event.code,detail:event.detail});notice.textContent=event.detail||event.code||"Voice connection failed"}
 }
@@ -107,13 +118,16 @@ function handleEvent(event){
 function renderControl(frame){
   if(renderedControls.has(frame.seq))return;renderedControls.add(frame.seq);
   if(frame.action==="tool_deferred")activity(`${frame.status_label||"Task"} accepted in the background`,"Background task");
-  else if(frame.action==="tool_progress")activity(frame.note,"Pi activity");
   else if(frame.action==="tool_partial_result"){
-    const data=frame.content?.data||{};
-    if(data.event==="approval_required")activity(`${data.tool||"tool"}: ${data.summary||"protected action"}`,"Approval required");
-    else activity(data.command?`bash: ${data.command}`:data.path?`${data.tool||"file"}: ${data.path}`:frame.content?.speak,"Pi activity");
+    const content=frame.content||{},facts=content.data||content;
+    if(facts.event==="pi_approval_required")activity(`${facts.tool||"tool"}: ${facts.summary||"protected action"}`,"Approval required");
+    else if(facts.event==="pi_tool_started")activity(facts.tool||"Pi tool","Pi activity");
+    else activity(facts.event||"Pi update","Pi activity");
   }
-  else if(frame.action==="tool_result")activity(frame.content?.speak||`Task ${frame.outcome||"finished"}`,frame.verified?"Verified":"Pi reported");
+  else if(frame.action==="tool_result"){
+    const content=frame.content||{},facts=content.data||content;
+    activity(facts.pi_response||facts.message||facts.event||`Task ${frame.outcome||"finished"}`,frame.verified?"Verified":"Pi reported");
+  }
   else if(frame.action==="tool_cancel")activity("Task cancelled","Cancelled");
 }
 
@@ -124,11 +138,10 @@ async function flush(){
       if(delivery!==target)break;
       let accepted=true;
       if(frame.action==="tool_deferred")accepted=target.client.sendToolDeferred(frame.id,{handle:frame.handle,statusLabel:frame.status_label});
-      else if(frame.action==="tool_progress")accepted=target.client.sendToolProgress(frame.id,frame.note);
       else if(frame.action==="tool_partial_result"){
-        if(frame.reply)await waitForReplyIdle();
-        if(delivery!==target)break;
-        accepted=target.client.sendToolPartialResult(frame.id,frame.content,{reply:!!frame.reply});
+        const options={};
+        if(frame.interaction)options.interaction=frame.interaction;
+        accepted=target.client.sendToolPartialResult(frame.id,frame.content,options);
       }
       else if(frame.action==="tool_result")accepted=target.client.sendToolResult(frame.id,frame.content,{outcome:frame.outcome,verified:!!frame.verified});
       else if(frame.action==="tool_cancel")accepted=target.client.sendToolCancel(frame.id);
@@ -149,11 +162,26 @@ voice.onclick=async()=>{
   voice.disabled=true;notice.textContent="";
   try{
     const active=await openClient();
-    if(mic){active.stopMic();mic=false;voice.textContent="Start voice"}
-    else{await active.startMic({workletUrl:"./vendor/converse/mic-worklet.js"});mic=true;voice.textContent="Stop voice"}
-    voice.setAttribute("aria-pressed",String(mic));
-  }catch(error){notice.textContent=`Could not start voice: ${error.message||error}`}
-  finally{voice.disabled=false}
+    if(!mic){
+      await active.startMic({workletUrl:"./vendor/converse/mic-worklet.js"});
+      mic=true;micEnabled=true;voice.textContent="Mute microphone";
+    }else{
+      micEnabled=!micEnabled;active.setMicEnabled(micEnabled);
+      voice.textContent=micEnabled?"Mute microphone":"Unmute microphone";
+      status.textContent=micEnabled?"listening":"muted";
+      debugTrace("mic_state",{state:micEnabled?"listening":"muted"});
+    }
+    voice.setAttribute("aria-pressed",String(micEnabled));
+  }catch(error){const message=String(error.message||error);notice.textContent=`Could not start voice: ${message}`;debugTrace("mic_start_failed",{error:message})}
+  finally{if(!ended)voice.disabled=false}
+};
+endSession.onclick=async()=>{
+  if(ended)return;
+  voice.disabled=true;endSession.disabled=true;notice.textContent="";
+  wireSend({type:"local",event:"end_session"});
+  const active=client;showEnded();
+  try{if(active)await active.closeAndWait()}
+  catch(error){notice.textContent=`Could not close voice cleanly: ${error.message||error}`}
 };
 </script>
 </body>

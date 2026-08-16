@@ -83,6 +83,9 @@ class BrowserBridge:
             if type(code) is int and code == 1000 and isinstance(reason, str):
                 self._trace("session_end", code=code, reason=reason)
                 await on_session_end({"code": code, "reason": reason})
+        elif event == "end_session":
+            self._trace("session_end", source="user")
+            await on_session_end({"source": "user"})
         elif event == "debug_trace":
             name = message.get("name")
             data = message.get("data")
@@ -124,9 +127,6 @@ class BrowserBridge:
             outcome=outcome, verified=verified,
         )
 
-    async def send_tool_progress(self, call_id: str, note: str) -> None:
-        await self._control("tool_progress", id=call_id, note=note[:500])
-
     async def send_tool_deferred(
         self, call_id: str, handle: str, status_label: str | None = None,
     ) -> None:
@@ -136,6 +136,13 @@ class BrowserBridge:
         await self._control("tool_deferred", **fields)
 
     async def send_tool_partial_result(
-        self, call_id: str, content: dict, reply: bool = False,
+        self,
+        call_id: str,
+        content: dict,
+        *,
+        interaction: dict | None = None,
     ) -> None:
-        await self._control("tool_partial_result", id=call_id, content=content, reply=reply)
+        fields = {"id": call_id, "content": content}
+        if interaction is not None:
+            fields["interaction"] = interaction
+        await self._control("tool_partial_result", **fields)

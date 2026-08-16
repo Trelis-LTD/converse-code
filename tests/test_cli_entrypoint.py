@@ -60,7 +60,7 @@ def test_debug_log_retains_failed_startup_session_evidence(tmp_path):
     assert entries[-1]["data"]["exit_code"] == 1
 
 
-async def test_successful_start_launches_pi_with_the_semantic_extension(tmp_path):
+async def test_successful_start_launches_pi_with_continuation_and_semantic_extension(tmp_path):
     async def accept_key(websocket):
         await websocket.recv()
         await websocket.send(json.dumps({"type": "ok"}))
@@ -81,7 +81,7 @@ async def test_successful_start_launches_pi_with_the_semantic_extension(tmp_path
     try:
         process = await asyncio.create_subprocess_exec(
             *ENTRY, "--no-browser", "--port", "0", "--broker-url", broker_url,
-            "--pi", str(fake_pi), env=environment,
+            "--pi", str(fake_pi), "--continue", env=environment,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         _, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
@@ -91,5 +91,6 @@ async def test_successful_start_launches_pi_with_the_semantic_extension(tmp_path
 
     assert process.returncode == 0, stderr.decode()
     launched_args = args_path.read_text().splitlines()
+    assert "--continue" in launched_args
     extension_index = launched_args.index("-e")
     assert launched_args[extension_index + 1].endswith("/pi_bridge.ts")

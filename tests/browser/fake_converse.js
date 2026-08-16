@@ -22,7 +22,14 @@ export class ConverseClient extends EventTarget {
   async connect() {}
 
   async startMic() {
+    this.emit({type: "warming_up", attempt: 1, device_id: null});
+    if (state.startMicError) {
+      const error = new Error(state.startMicError);
+      this.emit({type: "failed", code: "capture_failed", error});
+      throw error;
+    }
     this.stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    this.emit({type: "listening", device_id: "default", recovered: false});
   }
 
   stopMic() {
@@ -30,12 +37,12 @@ export class ConverseClient extends EventTarget {
     this.stream = null;
   }
 
+  setMicEnabled(enabled) {
+    this.micEnabled = enabled;
+  }
+
   sendToolResult(id, content, options) {
     if (state.transportLive) this.bridgeCalls.push({action: "tool_result", id, content, options});
-    return state.transportLive;
-  }
-  sendToolProgress(id, note) {
-    if (state.transportLive) this.bridgeCalls.push({action: "tool_progress", id, note});
     return state.transportLive;
   }
   sendToolDeferred(id, options) {
@@ -45,11 +52,6 @@ export class ConverseClient extends EventTarget {
   sendToolPartialResult(id, content, options) {
     if (state.transportLive) {
       this.bridgeCalls.push({action: "tool_partial_result", id, content, options});
-      if (options.reply) setTimeout(() => {
-        this.emit({type: "turn", turn_id: `partial-${id}`});
-        this.emit({type: "text_delta", delta: content.speak, turn_id: `partial-${id}`});
-        this.emit({type: "done", turn_id: `partial-${id}`});
-      }, 0);
     }
     return state.transportLive;
   }
@@ -58,7 +60,8 @@ export class ConverseClient extends EventTarget {
     return state.transportLive;
   }
 
-  close() { this.stopMic(); }
+  close() { this.closed = true; this.stopMic(); }
+  async closeAndWait() { this.close(); }
 
   emit(detail) {
     this.dispatchEvent(new CustomEvent("event", {detail}));
