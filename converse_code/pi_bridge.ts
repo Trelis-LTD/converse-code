@@ -212,6 +212,7 @@ export default function (pi) {
     const result = await new Promise((resolve) => {
       const timer = setTimeout(() => {
         pendingApprovals.delete(approvalId);
+        send({type: "approval_expired", approvalId});
         resolve({decision: "block", reason: "approval timed out"});
       }, 300000);
       pendingApprovals.set(approvalId, {resolve, timer});

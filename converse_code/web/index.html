@@ -33,7 +33,7 @@ const voice=document.querySelector("#voice"),endSession=document.querySelector("
 // {kind:"live",client,delivery:null|{client},mic:"off"|"listening"|"muted"}
 // {kind:"ended"}
 let session={kind:"idle"};
-let flushing=false;const seqs=new Map();
+let micState="idle",flushing=false;const seqs=new Map();
 const userRows=new Map(),assistantRows=new Map(),renderedControls=new Set();
 const deferredIds=new Set();
 const instructions=`You are Converse Code, the voice interface to the visible Pi coding agent. The user is speaking to Pi through you. Use pi_request for every actionable coding, repository, environment, or Pi question. Put the user's request in user_request; never replace it with your own narration, an inferred answer, or a claim that work already happened. Report outcomes only from Pi's returned evidence.`;
@@ -44,13 +44,20 @@ function row(kind,text,label=labels[kind]){empty?.remove();const el=document.cre
 function activity(text,label="Activity"){if(text)row("activity",text,label)}
 function wireSend(frame){if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(frame))}
 function debugTrace(name,data={}){wireSend({type:"local",event:"debug_trace",name,data})}
+// The badge is a projection of one observation over (session, micState, deferred tasks):
+// ended, else a microphone alert, else working while a deferred task runs, else the mic state.
+function renderStatus(){
+  if(session.kind==="ended"){status.textContent="ended";return}
+  const alert=["warming up","recovering","failed"].includes(micState);
+  status.textContent=alert?micState:deferredIds.size?"working":micState;
+}
 function showEnded(){
-  session={kind:"ended"};status.textContent="ended";
+  session={kind:"ended"};renderStatus();
   voice.textContent="Session ended";voice.disabled=true;voice.setAttribute("aria-pressed","false");
   endSession.disabled=true;
 }
 const ws=new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(token)}`);
-ws.onopen=()=>{status.textContent="idle"};
+ws.onopen=()=>{renderStatus()};
 ws.onmessage=event=>{const frame=JSON.parse(event.data);if(frame.event==="bridge_control"){seqs.set(frame.seq,frame);flush()}};
 
 async function liveSession(){
@@ -88,7 +95,7 @@ function handleEvent(client,event){
   const turnId=event.turn_id||event.message_id||"current";
   if(["warming_up","recovering","listening","failed"].includes(event.type)){
     const state=event.type,error=event.error?.message||event.error||"";
-    status.textContent=state.replace("_"," ");
+    micState=state.replace("_"," ");renderStatus();
     debugTrace("mic_state",{
       state,...(event.code?{code:event.code}:{}),...(error?{error:String(error)}:{}),
       ...(Number.isInteger(event.attempt)?{attempt:event.attempt}:{}),
@@ -144,6 +151,8 @@ function renderControl(frame){
   else if(frame.action==="tool_partial_result"){
     const content=frame.content||{},facts=content.data||content;
     if(facts.event==="pi_approval_required")activity(`${facts.tool||"tool"}: ${facts.summary||"protected action"}`,"Approval required");
+    else if(facts.event==="pi_approval_superseded")activity("Approval superseded by a new request","Approval closed");
+    else if(facts.event==="pi_approval_expired")activity("Approval expired unanswered","Approval closed");
     else if(facts.event==="pi_tool_started")activity(facts.tool||"Pi tool","Pi activity");
     else activity(facts.event||"Pi update","Pi activity");
   }
@@ -171,8 +180,8 @@ async function flush(){
       if(session!==live||live.delivery!==target)break;
       if(accepted!==true){live.delivery=null;break}
       renderControl(frame);
-      if(frame.action==="tool_deferred"){deferredIds.add(frame.id);status.textContent="working"}
-      if(frame.action==="tool_result"&&deferredIds.delete(frame.id))status.textContent=deferredIds.size?"working":"idle";
+      if(frame.action==="tool_deferred"){deferredIds.add(frame.id);renderStatus()}
+      if(frame.action==="tool_result"&&deferredIds.delete(frame.id))renderStatus();
       seqs.delete(seq);wireSend({type:"local",event:"bridge_ack",seq});
     }
   }catch(error){if(session===live&&live.delivery===target)live.delivery=null;notice.textContent=`Voice control delivery failed: ${error.message||error}`}
@@ -191,7 +200,7 @@ voice.onclick=async()=>{
       live.mic=live.mic==="listening"?"muted":"listening";
       live.client.setMicEnabled(live.mic==="listening");
       voice.textContent=live.mic==="listening"?"Mute microphone":"Unmute microphone";
-      status.textContent=live.mic;
+      micState=live.mic;renderStatus();
       debugTrace("mic_state",{state:live.mic});
     }
     voice.setAttribute("aria-pressed",String(live.mic==="listening"));

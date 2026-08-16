@@ -404,7 +404,7 @@ async def test_background_status_tracks_the_deferred_task_not_unrelated_results(
         "outcome": "succeeded", "verified": False,
     })
     await wait_for_frame(frames, lambda frame: frame.get("seq") == 4)
-    assert await page.locator("#status").inner_text() == "idle"
+    assert await page.locator("#status").inner_text() == "listening"
     assert await page.locator(".entry.activity").get_by_text("Finished", exact=True).count() == 1
 
 
@@ -450,6 +450,109 @@ async def test_activity_rows_distinguish_approval_and_unverified_pi_evidence(
         "Opened the airplane game in your default browser."
     )
     assert await page.locator(".entry.activity").last.get_attribute("data-label") == "Pi reported"
+
+
+async def test_superseded_interaction_closes_without_completing_the_deferred_task(
+    browser_page, browser_server,
+):
+    page, _ = browser_page
+    server, _, frames = browser_server
+    await open_session(page)
+
+    await server.send_json_to_tab({
+        "type": "local", "event": "bridge_control", "seq": 1,
+        "action": "tool_deferred", "id": "task-1", "handle": "code-1",
+        "status_label": "Pi",
+    })
+    await server.send_json_to_tab({
+        "type": "local", "event": "bridge_control", "seq": 2,
+        "action": "tool_partial_result", "id": "task-1",
+        "content": {
+            "event": "pi_approval_required", "approval_id": "approval-1",
+            "tool": "bash", "summary": "open index.html",
+            "decisions": ["allow_once", "allow_session", "block"],
+        },
+        "interaction": {
+            "prompt": "Allow Pi to run bash: open index.html?",
+            "options": ["Allow once", "Allow for this session", "Block"],
+        },
+    })
+    await wait_for_frame(frames, lambda frame: frame.get("seq") == 2)
+
+    await page.evaluate("""__fakeConverse.clients[0].emit({
+      type:'tool_job_narration',state:'queued',job_ids:['task-1'],kind:'interaction'
+    });
+    __fakeConverse.clients[0].emit({
+      type:'tool_job_narration',state:'started',job_ids:['task-1'],kind:'interaction'
+    });
+    __fakeConverse.clients[0].emit({type:'turn',turn_id:'ask-1'});
+    __fakeConverse.clients[0].emit({
+      type:'text_delta',delta:'Allow Pi to open index.html?',turn_id:'ask-1'
+    });""")
+
+    await page.evaluate("""__fakeConverse.clients[0].emit({type:'interrupted',turn_id:'ask-1'});
+    __fakeConverse.clients[0].emit({
+      type:'asr',text:'No, use a local server instead',final:true,turn_id:'user-2'
+    });
+    __fakeConverse.clients[0].emit({
+      type:'tool_call',id:'message-2',name:'pi_request',
+      args:{user_request:'Use a local server instead'}
+    });""")
+    await wait_for_frame(
+        frames,
+        lambda frame: frame.get("event") == "tool_call"
+        and frame.get("call", {}).get("id") == "message-2",
+    )
+
+    await server.send_json_to_tab({
+        "type": "local", "event": "bridge_control", "seq": 3,
+        "action": "tool_partial_result", "id": "task-1",
+        "content": {
+            "event": "pi_approval_superseded", "approval_id": "approval-1",
+        },
+    })
+    await server.send_json_to_tab({
+        "type": "local", "event": "bridge_control", "seq": 4,
+        "action": "tool_result", "id": "message-2",
+        "content": {
+            "event": "pi_message_delivered", "mode": "steer", "task_status": "running",
+        },
+        "outcome": "succeeded", "verified": True,
+    })
+    await wait_for_frame(frames, lambda frame: frame.get("seq") == 4)
+    await page.evaluate("""__fakeConverse.clients[0].emit({
+      type:'tool_job_narration',state:'superseded',job_ids:['task-1'],kind:'interaction'
+    })""")
+
+    assert await page.locator(".entry.activity").get_by_text(
+        "Approval superseded by a new request", exact=True,
+    ).count() == 1
+    assert await page.locator(".entry.activity").get_by_text(
+        "Approval prompt superseded", exact=True,
+    ).count() == 1
+    assert await page.locator("#status").inner_text() == "working"
+
+    await server.send_json_to_tab({
+        "type": "local", "event": "bridge_control", "seq": 5,
+        "action": "tool_result", "id": "task-1",
+        "content": {"event": "pi_settled", "message": "Serving on localhost:8000"},
+        "outcome": "succeeded", "verified": False,
+    })
+    await wait_for_frame(frames, lambda frame: frame.get("seq") == 5)
+    assert await page.locator("#status").inner_text() == "listening"
+
+    calls = await page.evaluate("__fakeConverse.clients[0].bridgeCalls")
+    task_events = [
+        call.get("content", {}).get("event")
+        for call in calls if call.get("id") == "task-1" and call.get("content")
+    ]
+    assert task_events == ["pi_approval_required", "pi_approval_superseded", "pi_settled"]
+    superseded = next(
+        call for call in calls
+        if call.get("content", {}).get("event") == "pi_approval_superseded"
+    )
+    assert superseded["content"]["approval_id"] == "approval-1"
+    assert superseded["options"] == {}
 
 
 async def test_sdk_cancellation_reaches_the_local_host(browser_page, browser_server):
