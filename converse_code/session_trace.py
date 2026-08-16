@@ -56,6 +56,7 @@ class NullTrace:
     state, and no caller needs a None-guard before recording."""
 
     path = None
+    session_id = None
 
     def record(self, source: str, event: str, **data: Any) -> None:
         pass
