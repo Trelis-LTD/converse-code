@@ -17,7 +17,7 @@ from .agent_tools import PiControlRouter
 from .bridge import BrowserBridge, ToolCall
 from .localserver import LocalServer, ServerHandlers
 from .pi_tui import PiTUIBridge, PiTUIBridgeError
-from .session_trace import SessionTrace
+from .session_trace import NullTrace, SessionTrace
 
 DEFAULT_PORT = 8737
 DEFAULT_PI_CMD = "pi --provider openai-codex"
@@ -53,13 +53,7 @@ async def _login(url: str) -> int:
     return 1
 
 
-def _no_trace(source: str, event: str, **data) -> None:
-    pass
-
-
-async def _run(args, trace: SessionTrace | None) -> int:
-    trace_event = trace.record if trace is not None else _no_trace
-
+async def _run(args, trace: SessionTrace | NullTrace) -> int:
     api_key = _ensure_api_key()
     if not api_key:
         print("Cannot start without an API key. Run: converse-code login", file=sys.stderr)
@@ -79,7 +73,7 @@ async def _run(args, trace: SessionTrace | None) -> int:
         }
 
     async def spawn_tool(call: ToolCall) -> None:
-        trace_event("host", "tool_call_received", call={
+        trace.record("host", "tool_call_received", call={
             "id": call.call_id, "name": call.name, "args": call.arguments,
         })
         task = asyncio.create_task(router.handle_tool_call(call))
@@ -93,19 +87,19 @@ async def _run(args, trace: SessionTrace | None) -> int:
         )
 
     async def handle_pi_message(frame: dict) -> None:
-        trace_event("pi", "event_received", frame=frame)
+        trace.record("pi", "event_received", frame=frame)
         event = await pi.handle_message(frame)
         if event is not None:
             await router.on_event(event)
 
     async def pi_connected() -> None:
-        trace_event("pi_bridge", "connected")
+        trace.record("pi_bridge", "connected")
         event = pi.connect()
         if event is not None:
             await router.on_event(event)
 
     async def pi_disconnected() -> None:
-        trace_event("pi_bridge", "disconnected")
+        trace.record("pi_bridge", "disconnected")
         await router.on_event(pi.disconnect())
 
     async def bridge_disconnected() -> None:
@@ -119,16 +113,16 @@ async def _run(args, trace: SessionTrace | None) -> int:
         pi_closed=pi_disconnected,
         session_credential=issue_credential,
     ))
-    bridge = BrowserBridge(server.send_json_to_tab, trace=trace_event)
+    bridge = BrowserBridge(server.send_json_to_tab, trace=trace.record)
     async def send_to_pi(frame: dict) -> bool:
-        trace_event("pi_bridge", "command_sent", frame=frame)
+        trace.record("pi_bridge", "command_sent", frame=frame)
         sent = await server.send_json_to_pi(frame)
-        trace_event("pi_bridge", "command_delivery", id=frame.get("id"), sent=sent)
+        trace.record("pi_bridge", "command_delivery", id=frame.get("id"), sent=sent)
         return sent
 
     pi = PiTUIBridge(send_to_pi)
     async def handle_native_session_end() -> None:
-        trace_event("host", "native_session_end")
+        trace.record("host", "native_session_end")
         stopped.set()
 
     router = PiControlRouter(pi, bridge, handle=_session_handle())
@@ -165,7 +159,7 @@ async def _run(args, trace: SessionTrace | None) -> int:
         return 1
 
     print(f"Converse voice control: {server.url}")
-    if trace is not None:
+    if trace.path is not None:
         print(f"Debug trace: {trace.path}")
     if not args.no_browser:
         webbrowser.open(server.url)
@@ -226,21 +220,22 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("login", help="store and validate a Converse API key")
     args = parser.parse_args()
-    trace = SessionTrace(args.debug_log) if args.debug_log else None
+    trace = SessionTrace(args.debug_log) if args.debug_log else NullTrace()
     logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
     exit_code = 1
     try:
-        if trace is not None:
-            trace.record("host", "session_start", cwd=str(Path.cwd()))
+        try:
+            cwd = str(Path.cwd())
+        except OSError:      # the launch directory can vanish under the shell (cleaned worktree)
+            cwd = None
+        trace.record("host", "session_start", cwd=cwd)
         if args.cmd == "login":
             exit_code = asyncio.run(_login(args.broker_url))
         else:
             exit_code = asyncio.run(_run(args, trace))
-        if trace is not None:
-            trace.record("host", "session_end", exit_code=exit_code)
+        trace.record("host", "session_end", exit_code=exit_code)
     finally:
-        if trace is not None:
-            trace.close()
+        trace.close()
     raise SystemExit(exit_code)
 
 

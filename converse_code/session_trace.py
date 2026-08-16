@@ -49,6 +49,22 @@ def _redact(value: Any, *, key: str = "") -> Any:
     return repr(value)
 
 
+class NullTrace:
+    """The disabled trace sink: same surface as SessionTrace, writes nothing.
+
+    A trace sink always exists -- "tracing enabled but sink is None" is not a representable
+    state, and no caller needs a None-guard before recording."""
+
+    path = None
+    session_id = None
+
+    def record(self, source: str, event: str, **data: Any) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
 class SessionTrace:
     """Append trace records immediately so a crashed or interrupted run remains debuggable."""
 
