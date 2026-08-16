@@ -1,14 +1,22 @@
 """Acknowledged controls between the Converse Browser SDK and a local tool host."""
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 
 @dataclass
 class Connected:
     sent: set[int] = field(default_factory=set)
+
+
+class ToolCall(NamedTuple):
+    call_id: str
+    name: str
+    arguments: dict
 
 
 class BrowserBridge:
@@ -38,9 +46,9 @@ class BrowserBridge:
         self,
         message: dict,
         *,
-        on_tool_call: Callable[[dict], Awaitable[None]],
-        on_tool_cancel: Callable[[dict], Awaitable[None]],
-        on_session_end: Callable[[dict], Awaitable[None]],
+        on_tool_call: Callable[[ToolCall], Awaitable[None]],
+        on_tool_cancel: Callable[[str], Awaitable[None]],
+        on_session_end: Callable[[], Awaitable[None]],
     ) -> None:
         if message.get("type") != "local":
             return
@@ -63,25 +71,27 @@ class BrowserBridge:
                         self._delivery.sent.discard(seq)
         elif event == "tool_call":
             call = message.get("call")
-            if (
-                isinstance(call, dict)
-                and isinstance(call.get("id"), str) and call["id"]
-                and isinstance(call.get("name"), str) and call["name"]
-                and isinstance(call.get("args"), dict)
-            ):
-                await on_tool_call(call)
+            if isinstance(call, dict):
+                call_id, name, arguments = call.get("id"), call.get("name"), call.get("args")
+                if (
+                    isinstance(call_id, str) and call_id
+                    and isinstance(name, str) and name
+                    and isinstance(arguments, dict)
+                ):
+                    await on_tool_call(ToolCall(call_id, name, arguments))
         elif event == "tool_cancel":
             call = message.get("call")
-            if isinstance(call, dict) and isinstance(call.get("id"), str) and call["id"]:
-                await on_tool_cancel(call)
+            call_id = call.get("id") if isinstance(call, dict) else None
+            if isinstance(call_id, str) and call_id:
+                await on_tool_cancel(call_id)
         elif event == "session_end":
             code, reason = message.get("code"), message.get("reason")
             if type(code) is int and code == 1000 and isinstance(reason, str):
                 self._trace("session_end", code=code, reason=reason)
-                await on_session_end({"code": code, "reason": reason})
+                await on_session_end()
         elif event == "end_session":
             self._trace("session_end", source="user")
-            await on_session_end({"source": "user"})
+            await on_session_end()
         elif event == "debug_trace":
             name = message.get("name")
             data = message.get("data")

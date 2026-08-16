@@ -1,6 +1,9 @@
 import asyncio
 
-from converse_code.bridge import BrowserBridge
+from converse_code.bridge import (
+    BrowserBridge,
+    ToolCall,
+)
 
 
 async def ignore(_message):
@@ -91,8 +94,8 @@ async def test_browser_tool_calls_and_cancellation_reach_python_handlers():
         "type": "local", "event": "tool_cancel", "call": {"id": "c1"},
     }, on_tool_cancel=on_cancel)
 
-    assert calls[0]["name"] == "pi_request"
-    assert cancels == [{"id": "c1"}]
+    assert calls == [ToolCall("c1", "pi_request", {"user_request": "fix it"})]
+    assert cancels == ["c1"]
 
 
 async def test_native_sdk_session_end_reaches_python_handler():
@@ -102,10 +105,10 @@ async def test_native_sdk_session_end_reaches_python_handler():
     await handle(
         bridge,
         {"type": "local", "event": "session_end", "code": 1000, "reason": "idle"},
-        on_session_end=lambda event: endings.append(event) or asyncio.sleep(0),
+        on_session_end=lambda: endings.append("ended") or asyncio.sleep(0),
     )
 
-    assert endings == [{"code": 1000, "reason": "idle"}]
+    assert endings == ["ended"]
 
 
 async def test_explicit_browser_end_session_reaches_python_handler():
@@ -115,18 +118,18 @@ async def test_explicit_browser_end_session_reaches_python_handler():
     await handle(
         bridge,
         {"type": "local", "event": "end_session"},
-        on_session_end=lambda event: endings.append(event) or asyncio.sleep(0),
+        on_session_end=lambda: endings.append("ended") or asyncio.sleep(0),
     )
 
-    assert endings == [{"source": "user"}]
+    assert endings == ["ended"]
 
 
 async def test_malformed_or_abnormal_session_end_does_not_reach_domain():
     bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True), ignore_trace)
     endings = []
 
-    async def handler(event):
-        endings.append(event)
+    async def handler():
+        endings.append("ended")
 
     for message in (
         {"type": "local", "event": "session_end", "code": 1006, "reason": "lost"},
