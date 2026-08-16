@@ -79,8 +79,9 @@ Converse owns conversational ending. Its intentional transport close is exposed 
 as `session_end`; the page forwards that structured lifecycle event and the host gracefully shuts
 down Pi. Converse Code does not duplicate end intent with a phrase matcher or tool.
 
-The page has microphone control but no text input. One voice state—idle, listening, muted, or
-ended—drives its controls. It mirrors Browser SDK speech, reply, and tool
-lifecycle events; Pi remains the canonical coding transcript. Python holds the persistent Converse
+The page has microphone control but no text input. One tagged session state—idle, opening, live,
+or ended—drives its controls; the delivery epoch and microphone exist only while live, and events
+are accepted only from the instance the session owns. It mirrors Browser SDK speech, reply, and
+tool lifecycle events; Pi remains the canonical coding transcript. Python holds the persistent Converse
 key and mints a short-lived browser credential. Controls are sequenced, acknowledged, retained
 across disconnects, and replayed after reconnect.

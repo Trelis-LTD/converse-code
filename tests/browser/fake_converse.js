@@ -19,7 +19,11 @@ export class ConverseClient extends EventTarget {
 
   async unlockAudio() {}
 
-  async connect() {}
+  async connect() {
+    if (state.connectHold) {
+      await new Promise((resolve) => { state.releaseConnect = resolve; });
+    }
+  }
 
   async startMic() {
     this.emit({type: "warming_up", attempt: 1, device_id: null});
@@ -55,11 +59,6 @@ export class ConverseClient extends EventTarget {
     }
     return state.transportLive;
   }
-  sendToolCancel(id) {
-    if (state.transportLive) this.bridgeCalls.push({action: "tool_cancel", id});
-    return state.transportLive;
-  }
-
   close() { this.closed = true; this.stopMic(); }
   async closeAndWait() { this.close(); }
 

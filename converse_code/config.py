@@ -4,9 +4,7 @@ import json
 import os
 from pathlib import Path
 
-CONFIG_PATH = Path(
-    os.environ.get("CONVERSE_CODE_CONFIG_DIR", "~/.config/converse-code")
-).expanduser() / "config.json"
+CONFIG_PATH = Path("~/.config/converse-code").expanduser() / "config.json"
 
 
 def get_api_key() -> str | None:

@@ -133,13 +133,10 @@ class BrowserBridge:
             outcome=outcome, verified=verified,
         )
 
-    async def send_tool_deferred(
-        self, call_id: str, handle: str, status_label: str | None = None,
-    ) -> None:
-        fields = {"id": call_id, "handle": handle}
-        if status_label:
-            fields["status_label"] = status_label
-        await self._control("tool_deferred", **fields)
+    async def send_tool_deferred(self, call_id: str, handle: str, status_label: str) -> None:
+        await self._control(
+            "tool_deferred", id=call_id, handle=handle, status_label=status_label,
+        )
 
     async def send_tool_partial_result(
         self,

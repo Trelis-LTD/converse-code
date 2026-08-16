@@ -53,10 +53,12 @@ async def _login(url: str) -> int:
     return 1
 
 
+def _no_trace(source: str, event: str, **data) -> None:
+    pass
+
+
 async def _run(args, trace: SessionTrace | None) -> int:
-    def trace_event(source: str, event: str, **data) -> None:
-        if trace is not None:
-            trace.record(source, event, **data)
+    trace_event = trace.record if trace is not None else _no_trace
 
     api_key = _ensure_api_key()
     if not api_key:
