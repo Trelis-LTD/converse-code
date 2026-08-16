@@ -44,6 +44,27 @@ async def test_end_session_closes_voice_and_requests_host_shutdown(
     assert await page.evaluate("__fakeConverse.clients[0].closed") is True
 
 
+async def test_end_session_during_voice_open_cannot_resurrect_the_session(
+    browser_page, browser_server,
+):
+    page, _ = browser_page
+    _, _, frames = browser_server
+    await page.evaluate("__fakeConverse.connectHold=true")
+    await page.locator("#voice").click()
+    await page.wait_for_function("typeof __fakeConverse.releaseConnect==='function'")
+
+    await page.locator("#end-session").click()
+    await wait_for_frame(frames, lambda frame: frame.get("event") == "end_session")
+    await page.evaluate("__fakeConverse.releaseConnect()")
+    await page.wait_for_timeout(100)
+
+    assert await page.locator("#status").inner_text() == "ended"
+    assert await page.locator("#voice").is_disabled()
+    assert await page.evaluate("__fakeConverse.clients[0].closed") is True
+    assert await page.evaluate("__fakeConverse.clients[0].stream") is None
+    assert not any(frame.get("event") == "bridge_ready" for frame in frames)
+
+
 async def test_browser_renders_and_traces_sdk_mic_lifecycle(
     browser_page, browser_server,
 ):

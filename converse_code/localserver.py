@@ -108,8 +108,7 @@ class LocalServer:
     # -- auth --------------------------------------------------------------
 
     def _authorized(self, request: web.Request) -> bool:
-        supplied = request.query.get("t") or request.headers.get("X-Converse-Code-Token", "")
-        return hmac.compare_digest(supplied, self.token)
+        return hmac.compare_digest(request.query.get("t", ""), self.token)
 
     def _same_origin(self, request: web.Request) -> bool:
         """WebSocket upgrades must come from the page we served (or a non-browser

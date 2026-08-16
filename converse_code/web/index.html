@@ -26,7 +26,14 @@ footer{display:flex;align-items:center;justify-content:center;gap:1rem;padding:1
 const token=new URLSearchParams(location.search).get("t")||"";
 const log=document.querySelector("#log"),empty=document.querySelector("#empty");
 const voice=document.querySelector("#voice"),endSession=document.querySelector("#end-session"),status=document.querySelector("#status"),notice=document.querySelector("#notice");
-let client=null,delivery=null,opening=null,mic=false,micEnabled=false,ended=false,flushing=false,seqs=new Map();
+// One tagged voice-session state. The delivery epoch and microphone exist only inside
+// "live", so "ended with a live delivery" or "microphone after end" cannot be represented.
+// {kind:"idle"}
+// {kind:"opening",promise}
+// {kind:"live",client,delivery:null|{client},mic:"off"|"listening"|"muted"}
+// {kind:"ended"}
+let session={kind:"idle"};
+let flushing=false;const seqs=new Map();
 const userRows=new Map(),assistantRows=new Map(),renderedControls=new Set();
 const deferredIds=new Set();
 const instructions=`You are Converse Code, the voice interface to the visible Pi coding agent. The user is speaking to Pi through you. Use pi_request for every actionable coding, repository, environment, or Pi question. Put the user's request in user_request; never replace it with your own narration, an inferred answer, or a claim that work already happened. Report outcomes only from Pi's returned evidence.`;
@@ -38,7 +45,7 @@ function activity(text,label="Activity"){if(text)row("activity",text,label)}
 function wireSend(frame){if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(frame))}
 function debugTrace(name,data={}){wireSend({type:"local",event:"debug_trace",name,data})}
 function showEnded(){
-  ended=true;mic=false;micEnabled=false;delivery=null;status.textContent="ended";
+  session={kind:"ended"};status.textContent="ended";
   voice.textContent="Session ended";voice.disabled=true;voice.setAttribute("aria-pressed","false");
   endSession.disabled=true;
 }
@@ -46,23 +53,30 @@ const ws=new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(token)}`
 ws.onopen=()=>{status.textContent="idle"};
 ws.onmessage=event=>{const frame=JSON.parse(event.data);if(frame.event==="bridge_control"){seqs.set(frame.seq,frame);flush()}};
 
-async function openClient(){
-  if(client)return client;if(opening)return opening;
-  opening=(async()=>{
+async function liveSession(){
+  if(session.kind==="live")return session;
+  if(session.kind==="opening")return session.promise;
+  if(session.kind==="ended")throw new Error("the session has ended");
+  const promise=(async()=>{
     const sdk=await import("./vendor/converse/index.js");
     const sessionId=sdk.createSessionId();
     const response=await fetch(`/session-credential?t=${encodeURIComponent(token)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:sessionId})});
     if(!response.ok)throw new Error(`credential request failed: ${response.status}`);
     const credential=await response.json();
     const instance=new sdk.ConverseClient({url:credential.ws_url,apiKey:credential.api_key,sessionId:credential.session_id,mode:{kind:"converse",voice:"classic",instructions,web_search:false,tools:credential.tools||[]}});
-    instance.addEventListener("event",event=>handleEvent(event.detail||{}));
+    instance.addEventListener("event",event=>handleEvent(instance,event.detail||{}));
     await instance.unlockAudio();await instance.connect({noGreeting:true});
-    client=instance;delivery={client:instance};wireSend({type:"local",event:"bridge_ready"});await flush();return instance;
+    if(session.kind==="ended"){instance.close();throw new Error("the session has ended")}
+    session={kind:"live",client:instance,delivery:{client:instance},mic:"off"};
+    wireSend({type:"local",event:"bridge_ready"});await flush();return session;
   })();
-  try{return await opening}finally{opening=null}
+  session={kind:"opening",promise};
+  try{return await promise}
+  catch(error){if(session.kind==="opening")session={kind:"idle"};throw error}
 }
 
-function handleEvent(event){
+function handleEvent(client,event){
+  if(session.kind==="ended")return;
   const turnId=event.turn_id||event.message_id||"current";
   if(["warming_up","recovering","listening","failed"].includes(event.type)){
     const state=event.type,error=event.error?.message||event.error||"";
@@ -97,9 +111,10 @@ function handleEvent(event){
     debugTrace("voice_turn",{type:event.type,turn_id:turnId,text:assistantRows.get(turnId)?.textContent||""});
   }
   if(event.type==="session_end"){
-    client?.stopMic();showEnded();
+    client.stopMic();
     debugTrace("session_end",{code:event.code,reason:event.reason||""});
     wireSend({type:"local",event:"session_end",code:event.code,reason:event.reason||""});
+    showEnded();
   }
   if(event.type==="tool_call")activity(`Requested ${event.name||"tool"}`,"Voice tool");
   if(event.type==="tool_call")debugTrace("tool_call",{id:event.id,name:event.name,args:event.args});
@@ -110,14 +125,14 @@ function handleEvent(event){
     const narrationLabels={queued:"Approval prompt queued",started:"Approval prompt started",superseded:"Approval prompt superseded",cancelled:"Approval prompt cancelled",failed:"Approval prompt failed"};
     activity(narrationLabels[event.state]||`Approval prompt ${event.state||"updated"}`,"Approval");
   }
-  if(event.type==="reconnecting")delivery=null;
-  if(event.type==="reconnected"){delivery={client};wireSend({type:"local",event:"bridge_ready"});flush()}
+  if(event.type==="reconnecting"&&session.kind==="live")session.delivery=null;
+  if(event.type==="reconnected"&&session.kind==="live"){session.delivery={client:session.client};wireSend({type:"local",event:"bridge_ready"});flush()}
   if(event.type==="error"){debugTrace("voice_error",{code:event.code,detail:event.detail});notice.textContent=event.detail||event.code||"Voice connection failed"}
 }
 
 function renderControl(frame){
   if(renderedControls.has(frame.seq))return;renderedControls.add(frame.seq);
-  if(frame.action==="tool_deferred")activity(`${frame.status_label||"Task"} accepted in the background`,"Background task");
+  if(frame.action==="tool_deferred")activity(`${frame.status_label} accepted in the background`,"Background task");
   else if(frame.action==="tool_partial_result"){
     const content=frame.content||{},facts=content.data||content;
     if(facts.event==="pi_approval_required")activity(`${facts.tool||"tool"}: ${facts.summary||"protected action"}`,"Approval required");
@@ -128,14 +143,14 @@ function renderControl(frame){
     const content=frame.content||{},facts=content.data||content;
     activity(facts.pi_response||facts.message||facts.event||`Task ${frame.outcome||"finished"}`,frame.verified?"Verified":"Pi reported");
   }
-  else if(frame.action==="tool_cancel")activity("Task cancelled","Cancelled");
 }
 
 async function flush(){
-  if(flushing||!delivery)return;flushing=true;const target=delivery;
+  if(flushing||session.kind!=="live"||!session.delivery)return;
+  flushing=true;const live=session,target=session.delivery;
   try{
     for(const [seq,frame]of [...seqs]){
-      if(delivery!==target)break;
+      if(session!==live||live.delivery!==target)break;
       let accepted=true;
       if(frame.action==="tool_deferred")accepted=target.client.sendToolDeferred(frame.id,{handle:frame.handle,statusLabel:frame.status_label});
       else if(frame.action==="tool_partial_result"){
@@ -144,43 +159,50 @@ async function flush(){
         accepted=target.client.sendToolPartialResult(frame.id,frame.content,options);
       }
       else if(frame.action==="tool_result")accepted=target.client.sendToolResult(frame.id,frame.content,{outcome:frame.outcome,verified:!!frame.verified});
-      else if(frame.action==="tool_cancel")accepted=target.client.sendToolCancel(frame.id);
       else{seqs.delete(seq);continue}
-      if(delivery!==target)break;
-      if(accepted!==true){delivery=null;break}
+      if(session!==live||live.delivery!==target)break;
+      if(accepted!==true){live.delivery=null;break}
       renderControl(frame);
       if(frame.action==="tool_deferred"){deferredIds.add(frame.id);status.textContent="working"}
       if(frame.action==="tool_result"&&deferredIds.delete(frame.id))status.textContent=deferredIds.size?"working":"idle";
       seqs.delete(seq);wireSend({type:"local",event:"bridge_ack",seq});
     }
-  }catch(error){if(delivery===target)delivery=null;notice.textContent=`Voice control delivery failed: ${error.message||error}`}
+  }catch(error){if(session===live&&live.delivery===target)live.delivery=null;notice.textContent=`Voice control delivery failed: ${error.message||error}`}
   finally{flushing=false}
-  if(delivery&&seqs.size)queueMicrotask(flush);
+  if(session.kind==="live"&&session.delivery&&seqs.size)queueMicrotask(flush);
 }
 
 voice.onclick=async()=>{
   voice.disabled=true;notice.textContent="";
   try{
-    const active=await openClient();
-    if(!mic){
-      await active.startMic({workletUrl:"./vendor/converse/mic-worklet.js"});
-      mic=true;micEnabled=true;voice.textContent="Mute microphone";
+    const live=await liveSession();
+    if(live.mic==="off"){
+      await live.client.startMic({workletUrl:"./vendor/converse/mic-worklet.js"});
+      live.mic="listening";voice.textContent="Mute microphone";
     }else{
-      micEnabled=!micEnabled;active.setMicEnabled(micEnabled);
-      voice.textContent=micEnabled?"Mute microphone":"Unmute microphone";
-      status.textContent=micEnabled?"listening":"muted";
-      debugTrace("mic_state",{state:micEnabled?"listening":"muted"});
+      live.mic=live.mic==="listening"?"muted":"listening";
+      live.client.setMicEnabled(live.mic==="listening");
+      voice.textContent=live.mic==="listening"?"Mute microphone":"Unmute microphone";
+      status.textContent=live.mic;
+      debugTrace("mic_state",{state:live.mic});
     }
-    voice.setAttribute("aria-pressed",String(micEnabled));
-  }catch(error){const message=String(error.message||error);notice.textContent=`Could not start voice: ${message}`;debugTrace("mic_start_failed",{error:message})}
-  finally{if(!ended)voice.disabled=false}
+    voice.setAttribute("aria-pressed",String(live.mic==="listening"));
+  }catch(error){
+    if(session.kind!=="ended"){
+      const message=String(error.message||error);
+      notice.textContent=`Could not start voice: ${message}`;
+      debugTrace("mic_start_failed",{error:message});
+    }
+  }
+  finally{if(session.kind!=="ended")voice.disabled=false}
 };
 endSession.onclick=async()=>{
-  if(ended)return;
+  if(session.kind==="ended")return;
+  const previous=session;
   voice.disabled=true;endSession.disabled=true;notice.textContent="";
   wireSend({type:"local",event:"end_session"});
-  const active=client;showEnded();
-  try{if(active)await active.closeAndWait()}
+  showEnded();
+  try{if(previous.kind==="live")await previous.client.closeAndWait()}
   catch(error){notice.textContent=`Could not close voice cleanly: ${error.message||error}`}
 };
 </script>

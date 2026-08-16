@@ -38,7 +38,7 @@ infers menu state.
 | Visible Pi extension evidence | Converse control |
 | --- | --- |
 | acknowledged `sendUserMessage` command | `tool_deferred` |
-| ordinary tool start | structured `tool_partial_result`, `reply: false` |
+| ordinary tool start | silent structured `tool_partial_result` |
 | approval request | structured `tool_partial_result` with `interaction` prompt and choices |
 | `message_end` | authoritative final-text candidate |
 | `agent_settled` | one terminal `tool_result` |
