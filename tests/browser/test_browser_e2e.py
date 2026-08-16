@@ -55,6 +55,7 @@ async def test_end_session_during_voice_open_cannot_resurrect_the_session(
 
     await page.locator("#end-session").click()
     await wait_for_frame(frames, lambda frame: frame.get("event") == "end_session")
+    assert await page.evaluate("__fakeConverse.clients[0].closed") is True
     await page.evaluate("__fakeConverse.releaseConnect()")
     await page.wait_for_timeout(100)
 

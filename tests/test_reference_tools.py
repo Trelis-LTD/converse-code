@@ -26,7 +26,7 @@ class FakeSender:
         self.partials = []
         self.results = []
 
-    async def send_tool_deferred(self, call_id, handle, status_label=None):
+    async def send_tool_deferred(self, call_id, handle, status_label):
         self.timeline.append("deferred")
         self.deferred.append((call_id, handle, status_label))
 
