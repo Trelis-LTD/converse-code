@@ -226,7 +226,7 @@ class PiControlRouter:
         result = asyncio.get_running_loop().create_future()
         self._turn = PendingTurn(call_id, result)
         try:
-            receipt = await self.pi.command("prompt", message=request)
+            command_id = await self.pi.command("prompt", message=request)
         except PiTUIBridgeError as exc:
             await self._error(call_id, "pi_rejected_message", reason=str(exc))
             self._turn = None
@@ -235,7 +235,7 @@ class PiControlRouter:
         await self.sender.send_tool_deferred(call_id, self.handle, status_label="Pi")
         if isinstance(self._turn, PendingTurn):
             early_events = tuple(self._turn.events)
-            self._turn = RunningTurn(call_id, result, receipt.command_id)
+            self._turn = RunningTurn(call_id, result, command_id)
             for event in early_events:
                 await self._handle_event(event)
         outcome = await result

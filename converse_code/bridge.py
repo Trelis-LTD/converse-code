@@ -11,17 +11,13 @@ class Connected:
     sent: set[int] = field(default_factory=set)
 
 
-def _ignore_trace(_source: str, _event: str, **_data: Any) -> None:
-    pass
-
-
 class BrowserBridge:
     """Keep outbound controls until browser JavaScript confirms SDK delivery."""
 
     def __init__(
         self,
         send_to_tab: Callable[[dict], Awaitable[bool]],
-        trace: Callable[..., None] = _ignore_trace,
+        trace: Callable[..., None],
     ) -> None:
         self._send_to_tab = send_to_tab
         self._pending: dict[int, dict] = {}
