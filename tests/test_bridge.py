@@ -7,6 +7,7 @@ from converse_code.bridge import (
     InteractionUpdateAck,
     ToolCall,
 )
+from converse_code.session_trace import NullTrace
 
 
 async def ignore(_message):
@@ -185,7 +186,9 @@ async def test_native_sdk_session_end_reaches_python_handler():
 
 
 async def test_explicit_browser_end_session_reaches_python_handler():
-    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True), ignore_trace)
+    bridge = BrowserBridge(
+        lambda _frame: asyncio.sleep(0, result=True), NullTrace().record,
+    )
     endings = []
 
     await handle(
