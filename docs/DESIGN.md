@@ -47,7 +47,7 @@ infers menu state.
 | --- | --- |
 | acknowledged `sendUserMessage` command | `tool_deferred` |
 | ordinary tool start | structured `tool_partial_result` without an interaction |
-| approval request | structured `tool_partial_result` with `interaction` prompt and choices |
+| approval request | structured `tool_partial_result` with a stable, resolver-bound interaction |
 | `message_end` | authoritative final-text candidate |
 | `agent_settled` | one terminal `tool_result` |
 | cancellation | Pi extension `abort()` |
@@ -64,19 +64,24 @@ separate states; only the owned running state can carry assistant output or pend
 
 The bridge extension intercepts `bash`, `edit`, and `write` before execution, creates a unique
 approval ID, and waits without opening a terminal menu. Converse receives the ID, tool, target, and
-valid decisions as a structured background-tool interaction. Converse queues its narration when
-the voice floor is busy and exposes the narration lifecycle. Only an explicit
-`pi_approval` carrying the pending ID can resume the Pi hook. A new `pi_request` first blocks any
-pending approval and then steers the change of course. Stale IDs, malformed decisions, disconnects,
-cancellation, and timeouts fail closed.
+valid decisions as a stable background-tool interaction whose resolver binds `pi_approval`, the
+fixed approval ID, and each spoken option's exact decision argument. Converse queues its narration
+when the voice floor is busy and exposes the narration lifecycle. Once any of the ask was heard,
+Converse constrains the next user turn to an explicit resolve, clarify, supersede, or cancel
+transition. Resolve executes the broker-constructed exact `pi_approval` call; the model never
+constructs its arguments. A new `pi_request` first blocks any pending approval and then steers the
+change of course. Stale IDs, malformed decisions, disconnects, cancellation, and timeouts fail
+closed.
 
 An approval that closes without a user decision is retracted, not abandoned: the extension reports
-its own timeout (`approval_expired`), and the router sends a structured partial on the parent
-deferred call (`pi_approval_expired`, or `pi_approval_superseded` on a change of course) carrying
-the same `approval_id`. That partial reaches the model's context and supersedes any queued
-narration for that job, so a dead question is never asked or answered. A decision arriving for a
+its own timeout (`approval_expired`), and the router sends an acknowledged
+`tool_interaction_update` on the parent deferred call. A change of course similarly blocks Pi
+before closing the matching interaction as superseded. A broker-side cancel is reflected to the
+host by its stable interaction ID and blocks the matching Pi hook. A decision arriving for a
 closed approval fails deterministically with `approval_not_pending`, and an extension-side
-rejection of a blocking command never blocks the steer it was clearing the way for.
+rejection of a blocking command never blocks the steer it was clearing the way for. Converse
+closes open interactions on reconnect; `tool_deferred_resume` therefore causes the router to
+re-raise every still-pending Pi approval from its retained typed request.
 
 ## Evidence and outcomes
 

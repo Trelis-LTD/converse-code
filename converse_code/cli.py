@@ -83,6 +83,8 @@ async def _run(args, trace: SessionTrace | NullTrace) -> int:
     async def handle_tab_message(frame: dict) -> None:
         await bridge.handle_browser_message(
             frame, on_tool_call=spawn_tool, on_tool_cancel=router.handle_tool_cancel,
+            on_deferred_resume=router.handle_deferred_resume,
+            on_cancelled_interactions=router.handle_cancelled_interactions,
             on_session_end=handle_native_session_end,
         )
 

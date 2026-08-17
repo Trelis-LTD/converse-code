@@ -18,6 +18,24 @@ class Decision(Enum):
     BLOCK = "block"
 
 
+class InteractionClosure(Enum):
+    SUPERSEDED = (
+        "superseded", "The user changed course; the Pi approval was blocked.",
+    )
+    EXPIRED = ("cancelled", "The Pi approval expired unanswered.")
+    RESOLVED_FOR_SESSION = (
+        "resolved", "Pi allowed protected actions for this session.",
+    )
+
+    @property
+    def state(self) -> str:
+        return self.value[0]
+
+    @property
+    def note(self) -> str:
+        return self.value[1]
+
+
 DECISION_LABELS = {
     Decision.ALLOW_ONCE: "Allow once",
     Decision.ALLOW_SESSION: "Allow for this session",
@@ -170,7 +188,7 @@ class RunningTurn:
     call_id: str
     result: asyncio.Future[TerminalResult]
     assistant_text: str = ""
-    approvals: set[str] = field(default_factory=set)
+    approvals: dict[str, ApprovalRequested] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -238,6 +256,30 @@ class PiControlRouter:
             return
         await self._request_cancel()
 
+    async def handle_deferred_resume(self, handle: str) -> None:
+        turn = self._turn
+        if not isinstance(turn, RunningTurn) or handle != self.handle:
+            return
+        for approval in tuple(turn.approvals.values()):
+            if turn.approvals.get(approval.approval_id) is not approval:
+                continue
+            await self._send_approval(turn, approval)
+
+    async def handle_cancelled_interactions(self, interaction_ids: tuple[str, ...]) -> None:
+        turn = self._turn
+        if not isinstance(turn, RunningTurn):
+            return
+        for approval_id in interaction_ids:
+            if approval_id not in turn.approvals:
+                continue
+            turn.approvals.pop(approval_id)
+            try:
+                await self.pi.command(
+                    "approval_response", approvalId=approval_id, decision="block",
+                )
+            except PiTUIBridgeError:
+                pass
+
     async def on_event(self, event: dict) -> None:
         try:
             parsed = self._parse_event(event)
@@ -295,6 +337,8 @@ class PiControlRouter:
         turn = self._turn
         if isinstance(turn, RunningTurn):
             for approval_id in tuple(turn.approvals):
+                if turn.approvals.pop(approval_id, None) is None:
+                    continue
                 try:
                     await self.pi.command(
                         "approval_response", approvalId=approval_id, decision="block",
@@ -303,9 +347,8 @@ class PiControlRouter:
                     # The extension already resolved it (timeout, session grant, loss).
                     # Either way it no longer gates Pi; the steer decides the outcome.
                     pass
-                turn.approvals.discard(approval_id)
                 await self._close_interaction(
-                    turn.call_id, "pi_approval_superseded", approval_id,
+                    turn.call_id, approval_id, InteractionClosure.SUPERSEDED,
                 )
         try:
             await self.pi.command("steer", message=message)
@@ -325,18 +368,26 @@ class PiControlRouter:
         if not isinstance(turn, RunningTurn) or approval_id not in turn.approvals:
             await self._error(call_id, "approval_not_pending")
             return
+        turn.approvals.pop(approval_id)
         try:
             await self.pi.command(
                 "approval_response", approvalId=approval_id, decision=decision.value,
             )
         except PiTUIBridgeError as exc:
-            turn.approvals.discard(approval_id)
+            await self._close_interaction(
+                turn.call_id, approval_id, InteractionClosure.EXPIRED,
+            )
             await self._error(call_id, "pi_rejected_approval", reason=str(exc))
             return
         if decision is Decision.ALLOW_SESSION:
+            other_approvals = tuple(
+                pending_id for pending_id in turn.approvals if pending_id != approval_id
+            )
             turn.approvals.clear()
-        else:
-            turn.approvals.remove(approval_id)
+            for pending_id in other_approvals:
+                await self._close_interaction(
+                    turn.call_id, pending_id, InteractionClosure.RESOLVED_FOR_SESSION,
+                )
         await self._result(
             call_id,
             {
@@ -413,24 +464,13 @@ class PiControlRouter:
         elif isinstance(event, ApprovalRequested):
             if event.approval_id in turn.approvals:
                 return
-            turn.approvals.add(event.approval_id)
-            await self.sender.send_tool_partial_result(
-                turn.call_id,
-                {
-                    "event": "pi_approval_required", "approval_id": event.approval_id,
-                    "tool": event.tool, "summary": event.summary,
-                    "decisions": [item.value for item in Decision], "handle": self.handle,
-                },
-                interaction={
-                    "prompt": f"Allow Pi to run {event.tool}: {event.summary}?",
-                    "options": list(DECISION_LABELS.values()),
-                },
-            )
+            turn.approvals[event.approval_id] = event
+            await self._send_approval(turn, event)
         elif isinstance(event, ApprovalExpired):
             if event.approval_id in turn.approvals:
-                turn.approvals.remove(event.approval_id)
+                turn.approvals.pop(event.approval_id)
                 await self._close_interaction(
-                    turn.call_id, "pi_approval_expired", event.approval_id,
+                    turn.call_id, event.approval_id, InteractionClosure.EXPIRED,
                 )
         elif isinstance(event, MessageFailed):
             self._complete(Failed(Failure.MESSAGE_FAILED, event.error))
@@ -440,15 +480,40 @@ class PiControlRouter:
         elif event is Signal.AGENT_SETTLED:
             self._complete(Succeeded(turn.assistant_text))
 
-    async def _close_interaction(self, task_call_id: str, event: str, approval_id: str) -> None:
-        """Retract a still-open approval interaction on its parent deferred call.
-
-        A partial on the same call ID reaches the model's context and supersedes any
-        queued narration for that job, so a stale question is never asked or acted on.
-        """
+    async def _send_approval(
+        self, turn: RunningTurn, approval: ApprovalRequested,
+    ) -> None:
+        options = list(DECISION_LABELS.values())
         await self.sender.send_tool_partial_result(
-            task_call_id,
-            {"event": event, "approval_id": approval_id, "handle": self.handle},
+            turn.call_id,
+            {
+                "event": "pi_approval_required", "approval_id": approval.approval_id,
+                "tool": approval.tool, "summary": approval.summary,
+                "decisions": [item.value for item in Decision], "handle": self.handle,
+            },
+            interaction={
+                "id": approval.approval_id,
+                "prompt": f"Allow Pi to run {approval.tool}: {approval.summary}?",
+                "options": options,
+                "resolver": {
+                    "tool": "pi_approval",
+                    "args": {"approval_id": approval.approval_id},
+                    "option_args": {
+                        label: {"decision": decision.value}
+                        for decision, label in DECISION_LABELS.items()
+                    },
+                },
+            },
+        )
+
+    async def _close_interaction(
+        self,
+        task_call_id: str,
+        approval_id: str,
+        closure: InteractionClosure,
+    ) -> None:
+        await self.sender.send_tool_interaction_update(
+            task_call_id, approval_id, closure.state, note=closure.note,
         )
 
     def _complete(self, outcome: TerminalResult) -> None:

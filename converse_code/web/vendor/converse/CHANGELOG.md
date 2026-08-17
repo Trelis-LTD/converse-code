@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.16.0 - 2026-08-16
+
+- Interactions accept a `resolver` binding (`{tool, args, option_args, answer_arg}`): once the ask
+  has been voiced, subsequent user turns are constrained to an explicit transition
+  (resolve / clarify / supersede / cancel) via the broker-managed `interaction_transition` tool,
+  and `resolve` executes the bound client tool with host-declared arguments — the model picks the
+  option, never the arguments. See docs/client-tool-protocol.md §3a.
+
+## 0.15.0 - 2026-08-16
+
+- `tool_choice` lands in `ConverseMode` and as `setToolChoice(choice, { oneShot })` — the familiar
+  OpenAI/Gemini restriction vocabulary (`"auto"` | `"none"` | `"required"` | `{allowed: [...]}` |
+  `{tool: "..."}`). `required`/`allowed`/`tool` constrain the first planning round of each user
+  turn; `none` withholds declared client tools while broker protocol tools stay available;
+  `oneShot` reverts after the next user turn. Unknown names are rejected server-side with the new
+  `invalid_tool_choice` error code; `setTools` resets the choice to `"auto"`.
+## 0.14.1 - 2026-08-16
+
+- `sendToolInteractionUpdate` normalizes whitespace-padded interaction ids the same way the server
+  does, so the ack (which echoes the stripped id) correlates instead of surfacing as a timeout;
+  ack correlation is additionally state-matched, so a server answer arriving after a client-side
+  timeout can no longer be handed to the next same-id caller.
+
+## 0.14.0 - 2026-08-16
+
+- Interactions now carry a stable identity: pass `interaction.id` in `sendToolPartialResult` (or
+  read the broker-derived id from `tool_job_narration.interaction_ids`), then close an ask without
+  completing its parent call via `sendToolInteractionUpdate(id, interactionId, state, { note })`
+  (`state`: `resolved` | `cancelled` | `superseded`). Queued or actively-speaking narration for it
+  stops, the model is told not to act on it, and the returned promise resolves with the server's
+  deterministic `tool_interaction_update_ack` (late/duplicate/unknown updates come back
+  `applied: false` with a stable `reason`). Add `interactionState(interactionId)`; narration and
+  interaction state caches now reset on connection loss (a resumed session implicitly supersedes
+  any open interaction — re-raise it if still needed).
+
 ## 0.13.1 - 2026-08-15
 
 - `sendToolPartialResult(id, content, { interaction })` marks a partial as needing a user decision

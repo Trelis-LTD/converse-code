@@ -19,6 +19,11 @@ class ToolCall(NamedTuple):
     arguments: dict
 
 
+class InteractionUpdateAck(NamedTuple):
+    applied: bool
+    reason: str | None
+
+
 class BrowserBridge:
     """Keep outbound controls until browser JavaScript confirms SDK delivery."""
 
@@ -29,6 +34,7 @@ class BrowserBridge:
     ) -> None:
         self._send_to_tab = send_to_tab
         self._pending: dict[int, dict] = {}
+        self._interaction_waiters: dict[int, asyncio.Future[InteractionUpdateAck]] = {}
         self._next_seq = 1
         self._delivery: Connected | None = None
         self._lock = asyncio.Lock()
@@ -48,6 +54,8 @@ class BrowserBridge:
         *,
         on_tool_call: Callable[[ToolCall], Awaitable[None]],
         on_tool_cancel: Callable[[str], Awaitable[None]],
+        on_deferred_resume: Callable[[str], Awaitable[None]],
+        on_cancelled_interactions: Callable[[tuple[str, ...]], Awaitable[None]],
         on_session_end: Callable[[], Awaitable[None]],
     ) -> None:
         if message.get("type") != "local":
@@ -62,6 +70,12 @@ class BrowserBridge:
             seq = message.get("seq")
             if isinstance(seq, int):
                 frame = self._pending.get(seq, {})
+                interaction_ack = None
+                if frame.get("action") == "tool_interaction_update":
+                    interaction_ack = self._parse_interaction_ack(message.get("detail"), frame)
+                    if interaction_ack is None:
+                        self._trace("invalid_interaction_ack", seq=seq)
+                        return
                 self._trace(
                     "control_acknowledged", seq=seq, action=frame.get("action"),
                 )
@@ -69,6 +83,9 @@ class BrowserBridge:
                     self._pending.pop(seq, None)
                     if self._delivery is not None:
                         self._delivery.sent.discard(seq)
+                    waiter = self._interaction_waiters.pop(seq, None)
+                if waiter is not None and interaction_ack is not None and not waiter.done():
+                    waiter.set_result(interaction_ack)
         elif event == "tool_call":
             call = message.get("call")
             if isinstance(call, dict):
@@ -84,6 +101,17 @@ class BrowserBridge:
             call_id = call.get("id") if isinstance(call, dict) else None
             if isinstance(call_id, str) and call_id:
                 await on_tool_cancel(call_id)
+        elif event == "tool_deferred_resume":
+            handle = message.get("handle")
+            if isinstance(handle, str) and handle:
+                await on_deferred_resume(handle)
+        elif event == "interaction_cancelled":
+            interaction_ids = message.get("interaction_ids")
+            if (
+                isinstance(interaction_ids, list) and interaction_ids
+                and all(isinstance(item, str) and item for item in interaction_ids)
+            ):
+                await on_cancelled_interactions(tuple(interaction_ids))
         elif event == "session_end":
             code, reason = message.get("code"), message.get("reason")
             if type(code) is int and code == 1000 and isinstance(reason, str):
@@ -98,7 +126,13 @@ class BrowserBridge:
             if isinstance(name, str) and isinstance(data, dict):
                 self._trace_callback("browser", name, **data)
 
-    async def _control(self, action: str, **fields) -> None:
+    async def _control(
+        self,
+        action: str,
+        *,
+        interaction_waiter: asyncio.Future[InteractionUpdateAck] | None = None,
+        **fields,
+    ) -> int:
         async with self._lock:
             seq = self._next_seq
             self._next_seq += 1
@@ -106,8 +140,27 @@ class BrowserBridge:
                 "type": "local", "event": "bridge_control",
                 "seq": seq, "action": action, **fields,
             }
+            if interaction_waiter is not None:
+                self._interaction_waiters[seq] = interaction_waiter
             self._trace("control_queued", seq=seq, action=action, fields=fields)
         await self._flush()
+        return seq
+
+    @staticmethod
+    def _parse_interaction_ack(detail: object, frame: dict) -> InteractionUpdateAck | None:
+        if not isinstance(detail, dict):
+            return None
+        reason = detail.get("reason")
+        if not (
+            detail.get("type") == "tool_interaction_update_ack"
+            and detail.get("id") == frame.get("id")
+            and detail.get("interaction_id") == frame.get("interaction_id")
+            and detail.get("state") == frame.get("state")
+            and isinstance(detail.get("applied"), bool)
+            and (reason is None or isinstance(reason, str))
+        ):
+            return None
+        return InteractionUpdateAck(detail["applied"], reason)
 
     async def _flush(self) -> None:
         async with self._lock:
@@ -149,3 +202,29 @@ class BrowserBridge:
         if interaction is not None:
             fields["interaction"] = interaction
         await self._control("tool_partial_result", **fields)
+
+    async def send_tool_interaction_update(
+        self,
+        call_id: str,
+        interaction_id: str,
+        state: str,
+        *,
+        note: str | None = None,
+    ) -> InteractionUpdateAck:
+        waiter = asyncio.get_running_loop().create_future()
+        fields = {
+            "id": call_id, "interaction_id": interaction_id, "state": state,
+        }
+        if note is not None:
+            fields["note"] = note
+        seq = await self._control(
+            "tool_interaction_update", interaction_waiter=waiter, **fields,
+        )
+        try:
+            async with asyncio.timeout(15):
+                return await waiter
+        except TimeoutError:
+            async with self._lock:
+                self._interaction_waiters.pop(seq, None)
+            self._trace("interaction_ack_timeout", seq=seq, interaction_id=interaction_id)
+            return InteractionUpdateAck(False, "ack_timeout")

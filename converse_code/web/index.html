@@ -135,10 +135,18 @@ function handleEvent(client,event){
   if(event.type==="tool_call")debugTrace("tool_call",{id:event.id,name:event.name,args:event.args});
   if(event.type==="tool_call")wireSend({type:"local",event:"tool_call",call:event});
   if(event.type==="tool_cancel"){debugTrace("tool_cancel",{id:event.id});wireSend({type:"local",event:"tool_cancel",call:event})}
+  if(event.type==="tool_deferred_resume"&&event.handle){
+    debugTrace("tool_deferred_resume",{id:event.id||"",handle:event.handle});
+    wireSend({type:"local",event:"tool_deferred_resume",handle:event.handle});
+  }
   if(event.type==="tool_job_narration"){
-    debugTrace("tool_job_narration",{state:event.state,job_ids:event.job_ids||[],kind:event.kind||""});
+    const interactionIds=Array.isArray(event.interaction_ids)?event.interaction_ids:[];
+    debugTrace("tool_job_narration",{state:event.state,job_ids:event.job_ids||[],interaction_ids:interactionIds,kind:event.kind||""});
     const narrationLabels={queued:"Question narration queued",started:"Question narration started",superseded:"Question narration interrupted",cancelled:"Question narration cancelled",failed:"Question narration failed"};
     activity(narrationLabels[event.state]||`Question narration ${event.state||"updated"}`,"Interaction");
+    if(event.kind==="interaction"&&event.state==="cancelled"&&interactionIds.length){
+      wireSend({type:"local",event:"interaction_cancelled",interaction_ids:interactionIds});
+    }
   }
   if(event.type==="reconnecting"&&session.kind==="live")session.delivery=null;
   if(event.type==="reconnected"&&session.kind==="live"){session.delivery={client:session.client};wireSend({type:"local",event:"bridge_ready"});flush()}
@@ -160,6 +168,9 @@ function renderControl(frame){
     const content=frame.content||{},facts=content.data||content;
     activity(facts.pi_response||facts.message||facts.event||`Task ${frame.outcome||"finished"}`,frame.verified?"Verified":"Pi reported");
   }
+  else if(frame.action==="tool_interaction_update"){
+    activity(frame.note||`Approval ${frame.state||"closed"}`,"Approval closed");
+  }
 }
 
 async function flush(){
@@ -168,7 +179,7 @@ async function flush(){
   try{
     for(const [seq,frame]of [...seqs]){
       if(session!==live||live.delivery!==target)break;
-      let accepted=true;
+      let accepted=true,detail=null;
       if(frame.action==="tool_deferred")accepted=target.client.sendToolDeferred(frame.id,{handle:frame.handle,statusLabel:frame.status_label});
       else if(frame.action==="tool_partial_result"){
         const options={};
@@ -176,13 +187,16 @@ async function flush(){
         accepted=target.client.sendToolPartialResult(frame.id,frame.content,options);
       }
       else if(frame.action==="tool_result")accepted=target.client.sendToolResult(frame.id,frame.content,{outcome:frame.outcome,verified:!!frame.verified});
+      else if(frame.action==="tool_interaction_update"){
+        detail=await target.client.sendToolInteractionUpdate(frame.id,frame.interaction_id,frame.state,frame.note?{note:frame.note}:{});
+      }
       else{seqs.delete(seq);continue}
       if(session!==live||live.delivery!==target)break;
       if(accepted!==true){live.delivery=null;break}
       renderControl(frame);
       if(frame.action==="tool_deferred"){deferredIds.add(frame.id);renderStatus()}
       if(frame.action==="tool_result"&&deferredIds.delete(frame.id))renderStatus();
-      seqs.delete(seq);wireSend({type:"local",event:"bridge_ack",seq});
+      seqs.delete(seq);wireSend({type:"local",event:"bridge_ack",seq,...(detail?{detail}:{})});
     }
   }catch(error){if(session===live&&live.delivery===target)live.delivery=null;notice.textContent=`Voice control delivery failed: ${error.message||error}`}
   finally{flushing=false}

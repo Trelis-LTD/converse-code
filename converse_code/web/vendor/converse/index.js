@@ -110,8 +110,24 @@ export function sendClientError({ url, sessionId, detail, context, apiKey,
 
 const CONVERSE_MODE_FIELDS = new Set([
   'kind', 'voice', 'instructions', 'tools', 'web_search', 'flow', 'greeting', 'temperature',
-  'silence_nudge_s', 'silence_end_s',
+  'silence_nudge_s', 'silence_end_s', 'tool_choice',
 ]);
+
+// OpenAI/Gemini-style generation restriction. Structural validation only — tool-name membership
+// is the server's call (it errors with `invalid_tool_choice` and changes nothing).
+function validatedToolChoice(value) {
+  if (value === 'auto' || value === 'none' || value === 'required') return value;
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const keys = Object.keys(value);
+    if (keys.length === 1 && keys[0] === 'tool' && typeof value.tool === 'string'
+        && value.tool.trim()) return value;
+    if (keys.length === 1 && keys[0] === 'allowed' && Array.isArray(value.allowed)
+        && value.allowed.length
+        && value.allowed.every((name) => typeof name === 'string' && name.trim())) return value;
+  }
+  throw new TypeError(
+    'tool_choice must be "auto", "none", "required", {allowed: [...]}, or {tool: "..."}');
+}
 const RELAY_MODE_FIELDS = new Set(['kind', 'provider', 'model', 'voice', 'web_search']);
 
 function validatedMode(value = { kind: 'converse' }) {
@@ -145,6 +161,12 @@ function validatedMode(value = { kind: 'converse' }) {
     optionalBoolean('flow');
     if (Object.hasOwn(mode, 'tools') && !Array.isArray(mode.tools)) {
       throw new TypeError('converse tools must be an array');
+    }
+    if (Object.hasOwn(mode, 'tool_choice')) {
+      if (!Array.isArray(mode.tools) || !mode.tools.length) {
+        throw new TypeError('converse tool_choice requires a non-empty tools list');
+      }
+      mode.tool_choice = validatedToolChoice(mode.tool_choice);
     }
     if (mode.greeting != null && mode.greeting !== false && typeof mode.greeting !== 'string') {
       throw new TypeError('converse greeting must be a string or false');
@@ -270,6 +292,11 @@ export class ConverseClient extends EventTarget {
     this._injectionSeq = 0;
     this._narrationStates = new Map();   // job_id -> last known tool_job_narration state
     this._narrationWaiters = new Map();  // job_id -> [{ states, resolve, reject, timer }]
+    this._interactionStates = new Map(); // interaction_id -> last known narration state
+    // interaction_id -> FIFO [{ resolve, reject, timer }]: the server answers every update in
+    // order, so per-id queues keep concurrent duplicate updates (the documented
+    // first-close-wins flow) from cross-wiring or dropping each other's acks.
+    this._pendingInteractionUpdates = new Map();
     this._live = false;         // true only while a socket is open AND past `ready`
     this._closedByUser = false; // set by close() so a clean shutdown doesn't trigger reconnect
     this._resumeToken = resumeTokenFromState(resumeState);
@@ -786,6 +813,11 @@ export class ConverseClient extends EventTarget {
           this._live = false;
           this._rejectPendingInjections(
             new Error('connection closed before injection acknowledgement'));
+          // Narration/interaction lifecycle is connection-scoped: a resumed session restores
+          // deferred jobs but implicitly supersedes any open interaction (re-raise it with a
+          // fresh partial if still needed), so cached states would be stale, not history.
+          this._narrationStates.clear();
+          this._interactionStates.clear();
         }
         if (!liveReady) {
           if (!settled) fail(new Error('Converse WebSocket closed before ready'));
@@ -1285,7 +1317,7 @@ export class ConverseClient extends EventTarget {
 
   /** Deliver a structured segment of an in-flight call's eventual answer
    *  (docs/client-tool-protocol.md §3a): capped like a result envelope, and `reply: true` asks
-   *  the broker to proactively narrate it now. `interaction: { prompt, options }` marks this
+   *  the broker to proactively narrate it now. `interaction: { id, prompt, options, resolver }` marks this
    *  partial as needing a user decision rather than a routine milestone: unlike `reply: true`
    *  alone, it is never silently dropped when the floor is busy — it falls back to the same job
    *  queue tool completions use, preempting them, and gets a far more persistent delivery retry.
@@ -1328,9 +1360,81 @@ export class ConverseClient extends EventTarget {
     });
   }
 
+  /** Last known narration state for a stable interaction id (host-chosen `interaction.id`, or
+   *  the broker-derived id echoed in tool_job_narration's `interaction_ids`), or undefined. */
+  interactionState(interactionId) {
+    return this._interactionStates.get(interactionId);
+  }
+
+  /** Close an open interaction without completing its parent call
+   *  (docs/client-tool-protocol.md §3a): the decision was `resolved` out-of-band, `cancelled`,
+   *  or `superseded` by newer intent. Queued or actively-speaking narration for it stops and the
+   *  model is told not to act on it. Resolves with the server's deterministic
+   *  `tool_interaction_update_ack` (`applied: false` carries a stable `reason` for
+   *  late/duplicate/unknown updates); rejects on timeout or a dead connection. */
+  sendToolInteractionUpdate(id, interactionId, state, { note, timeoutMs = 10000 } = {}) {
+    const states = new Set(['resolved', 'cancelled', 'superseded']);
+    if (!states.has(state)) throw new TypeError('invalid interaction update state');
+    if (typeof interactionId !== 'string' || !interactionId.trim()) {
+      throw new TypeError('interactionId must be a non-empty string');
+    }
+    // The server normalizes ids by stripping whitespace and echoes the STRIPPED form in the
+    // ack — key and send the same form, or a padded id's applied ack surfaces as a timeout.
+    interactionId = interactionId.trim();
+    let pending;
+    const acknowledgement = new Promise((resolve, reject) => {
+      pending = { resolve, reject, timer: null, state };
+      pending.timer = setTimeout(() => {
+        this._removePendingInteractionUpdate(interactionId, pending);
+        reject(new Error(`interaction update ack timed out for ${interactionId}`));
+      }, timeoutMs);
+    });
+    const queue = this._pendingInteractionUpdates.get(interactionId) || [];
+    queue.push(pending);
+    this._pendingInteractionUpdates.set(interactionId, queue);
+    const frame = { type: 'tool_interaction_update', id, interaction_id: interactionId, state };
+    if (note) frame.note = note;
+    if (!this._sendControl(frame)) {
+      this._removePendingInteractionUpdate(interactionId, pending);
+      clearTimeout(pending.timer);
+      pending.reject(new Error('cannot update an interaction without a live connection'));
+    }
+    return acknowledgement;
+  }
+
+  _removePendingInteractionUpdate(interactionId, pending) {
+    const queue = this._pendingInteractionUpdates.get(interactionId);
+    if (!queue) return;
+    const remaining = queue.filter((entry) => entry !== pending);
+    if (remaining.length) this._pendingInteractionUpdates.set(interactionId, remaining);
+    else this._pendingInteractionUpdates.delete(interactionId);
+  }
+
   /** Cancel an in-flight tool call. */
   sendToolCancel(id) {
     return this._sendControl({ type: 'tool_cancel', id });
+  }
+
+  /** Restrict (or free) tool use mid-session — the familiar OpenAI/Gemini vocabulary:
+   *  `"auto"` | `"none"` | `"required"` | `{allowed: [names]}` | `{tool: name}`. Applies from
+   *  the next reply; `required`/`allowed`/`tool` constrain the first planning round of each
+   *  user turn, `none` withholds declared client tools (broker-managed protocol tools stay
+   *  available). `oneShot: true` reverts to the previous choice after the next user turn
+   *  consumes it. An invalid value is rejected by the server with `invalid_tool_choice` and
+   *  changes nothing; a mid-session `setTools` resets tool_choice to `"auto"`. */
+  setToolChoice(toolChoice, { oneShot = false } = {}) {
+    const validated = validatedToolChoice(toolChoice);
+    if (!oneShot && this._mode.kind === 'converse'
+        && Array.isArray(this._mode.tools) && this._mode.tools.length) {
+      // Durable restrictions fold into the replayed mode (like setVoice) so an auto-reconnect
+      // re-applies them; a one-shot is turn-scoped and deliberately does not survive. A mode
+      // with no constructor tools cannot carry one (a reconnect would have no tools either) --
+      // the server's resume stash covers that case.
+      this._mode = Object.freeze(validatedMode({ ...this._mode, tool_choice: validated }));
+    }
+    const frame = { type: 'set_tool_choice', tool_choice: validated };
+    if (oneShot) frame.one_shot = true;
+    return this._sendControl(frame);
   }
 
   /** Switch character voice mid-session. Applies from the next reply; Converse mode only. */
@@ -1397,9 +1501,20 @@ export class ConverseClient extends EventTarget {
       }
     }
     this._narrationWaiters.clear();
+    for (const queue of this._pendingInteractionUpdates.values()) {
+      for (const pending of queue) {
+        clearTimeout(pending.timer);
+        pending.reject(error);
+      }
+    }
+    this._pendingInteractionUpdates.clear();
   }
 
   _applyNarrationAck(event) {
+    const interactionIds = Array.isArray(event.interaction_ids) ? event.interaction_ids : [];
+    for (const interactionId of interactionIds) {
+      this._interactionStates.set(interactionId, event.state);
+    }
     const jobIds = Array.isArray(event.job_ids) ? event.job_ids : [];
     for (const jobId of jobIds) {
       this._narrationStates.set(jobId, event.state);
@@ -1553,6 +1668,23 @@ export class ConverseClient extends EventTarget {
         }
       }
       if (event.type === 'tool_job_narration') this._applyNarrationAck(event);
+      if (event.type === 'tool_interaction_update_ack'
+          && typeof event.interaction_id === 'string') {
+        const queue = this._pendingInteractionUpdates.get(event.interaction_id);
+        if (queue && queue.length) {
+          // The oldest pending whose REQUESTED state matches the ack's echo: the server
+          // always echoes the requested state, so every live caller's ack state-matches. A
+          // client-side timeout removes its queue entry but not the server's eventual answer
+          // -- that orphaned, unmatched ack is dropped rather than handed to the next caller.
+          const index = queue.findIndex((entry) => entry.state === event.state);
+          if (index !== -1) {
+            const [pending] = queue.splice(index, 1);
+            if (!queue.length) this._pendingInteractionUpdates.delete(event.interaction_id);
+            clearTimeout(pending.timer);
+            pending.resolve(event);
+          }
+        }
+      }
       this._applyReflex(event);
       this.dispatchEvent(new CustomEvent(event.type, { detail: event }));
       this.dispatchEvent(new CustomEvent('event', { detail: event }));
