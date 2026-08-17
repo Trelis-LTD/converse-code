@@ -13,6 +13,10 @@ approvals, interruptions, steering, cancellation, ownership failures, and sessio
 - `pi_approval(approval_id, decision)` resolves only a matching pending approval.
 - `pi_cancel()` calls Pi's documented extension `abort()` API without ending voice.
 
+Ordinary committed user turns cannot bypass Pi: while idle, Converse is constrained to
+`pi_request`; while a Pi turn is active, it must choose `pi_request` (steer) or `pi_cancel`.
+Resolver-bound approval interactions temporarily provide their narrower decision constraint.
+
 ## Boundary
 
 ```text
@@ -57,6 +61,9 @@ active at a time because Pi's visible-TUI extension API does not attach a caller
 events. The extension therefore emits an ownership event for each matched `sendUserMessage()`
 input. Manual terminal input, another extension's input, session replacement, or bridge loss while
 a voice task is active fails that Converse tool closed instead of attributing unrelated output.
+Each root Pi turn owns a fresh host handle. Converse Code waits for the correlated
+`tool_deferred_ack`; a rejected or missing acknowledgement aborts Pi and fails the parent call
+instead of pretending the ordinary tool deadline was replaced.
 The router represents acknowledgement, ownership, running, cancellation, and settlement as
 separate states; only the owned running state can carry assistant output or pending approvals.
 
@@ -73,6 +80,9 @@ constructs its arguments. A new `pi_request` first blocks any pending approval a
 change of course. Stale IDs, malformed decisions, disconnects, cancellation, and timeouts fail
 closed.
 
+Approval scope is part of Converse Code's interaction contract: an unqualified affirmative permits
+only the pending action, while session-wide approval requires an explicit request from the user.
+
 An approval that closes without a user decision is retracted, not abandoned: the extension reports
 its own timeout (`approval_expired`), and the router sends an acknowledged
 `tool_interaction_update` on the parent deferred call. A change of course similarly blocks Pi
@@ -85,9 +95,10 @@ re-raise every still-pending Pi approval from its retained typed request.
 
 ## Evidence and outcomes
 
-Prompt acknowledgement proves only that Pi accepted the user message. `agent_settled` proves Pi
-will not continue automatically. It does not independently verify claims about files, tests,
-browsers, or external systems, so ordinary completion remains `verified: false`.
+Prompt acknowledgement proves only that Pi accepted the user message. A successful settled Pi
+turn is the authoritative result of `pi_request`, so Converse receives `outcome: succeeded` and
+`verified: true` and may report Pi's answer. Failed and cancelled turns remain unverified and may
+not be narrated as successful work.
 
 ## Browser boundary
 

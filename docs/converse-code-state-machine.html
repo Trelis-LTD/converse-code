@@ -290,7 +290,7 @@
     <section class="notes" aria-label="Important distinctions">
       <article class="note"><h3>Deferred is not completed</h3><p><code>tool_deferred</code> means Pi accepted a long-running call. Only <code>agent_settled</code> produces its terminal result.</p></article>
       <article class="note"><h3>Two different queues</h3><p>Early Pi events are briefly buffered until deferred delivery. Browser control frames persist across reconnects. A second request before ownership is rejected, not silently queued.</p></article>
-      <article class="note"><h3>Evidence stays honest</h3><p>Pi’s final text is reported, but ordinary completion remains <code>verified: false</code>; settlement does not independently prove an external effect.</p></article>
+      <article class="note"><h3>Evidence stays honest</h3><p>A successful settled Pi turn is the authoritative <code>pi_request</code> result and is verified. Failed and cancelled turns remain unverified and cannot be narrated as successful work.</p></article>
     </section>
   </main>
 

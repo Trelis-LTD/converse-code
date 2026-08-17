@@ -36,6 +36,7 @@ let session={kind:"idle"};
 let micState="idle",flushing=false;const seqs=new Map();
 const userRows=new Map(),assistantRows=new Map(),renderedControls=new Set();
 const deferredIds=new Set();
+const deferredAcks=new Map();
 const instructions=`You are Converse Code, the voice interface to Pi. Pi is the authoritative source for its coding session. For every request or question concerning Pi or that session, call pi_request; never answer it yourself. Put the user's request in user_request; never replace it with your own narration, an inferred answer, or a claim that work already happened. Report outcomes only from Pi's returned evidence.`;
 
 const labels={user:"You",assistant:"Converse Code",activity:"Activity"};
@@ -73,7 +74,7 @@ async function liveSession(){
     const response=await fetch(`/session-credential?t=${encodeURIComponent(token)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:sessionId})});
     if(!response.ok)throw new Error(`credential request failed: ${response.status}`);
     const credential=await response.json();
-    const instance=new sdk.ConverseClient({url:credential.ws_url,apiKey:credential.api_key,sessionId:credential.session_id,mode:{kind:"converse",voice:"classic",instructions,web_search:false,silence_nudge_s:30,silence_end_s:90,tools:credential.tools||[]}});
+    const instance=new sdk.ConverseClient({url:credential.ws_url,apiKey:credential.api_key,sessionId:credential.session_id,mode:{kind:"converse",voice:"classic",instructions,web_search:false,silence_nudge_s:30,silence_end_s:90,tools:credential.tools||[],tool_choice:{tool:"pi_request"}}});
     opening.instance=instance;
     instance.addEventListener("event",event=>handleEvent(instance,event.detail||{}));
     if(session.kind==="ended"){instance.close();throw new Error("the session has ended")}
@@ -87,6 +88,7 @@ async function liveSession(){
   catch(error){if(session===opening)session={kind:"idle"};throw error}
 }
 
+function setPiRouting(client,busy){client.setToolChoice(busy?{allowed:["pi_request","pi_cancel"]}:{tool:"pi_request"})}
 function handleEvent(client,event){
   // Exactly one instance owns the event stream: the live client, or the one
   // being opened. Anything else (stale, post-end) is dropped.
@@ -135,8 +137,20 @@ function handleEvent(client,event){
   if(event.type==="tool_call")debugTrace("tool_call",{id:event.id,name:event.name,args:event.args});
   if(event.type==="tool_call")wireSend({type:"local",event:"tool_call",call:event});
   if(event.type==="tool_cancel"){debugTrace("tool_cancel",{id:event.id});wireSend({type:"local",event:"tool_cancel",call:event})}
+  if(event.type==="tool_deferred_ack"){
+    const pending=deferredAcks.get(event.id);
+    const valid=pending&&typeof event.accepted==="boolean"&&(!event.accepted||event.handle===pending.handle);
+    debugTrace("tool_deferred_ack",{id:event.id||"",accepted:event.accepted===true,reason:event.reason||"",valid:!!valid});
+    if(valid){
+      deferredAcks.delete(event.id);
+      if(event.accepted){renderControl(pending.frame);deferredIds.add(event.id);setPiRouting(client,true);renderStatus()}
+      else activity(`Pi background task rejected: ${event.reason||"unknown reason"}`,"Background task");
+      wireSend({type:"local",event:"bridge_ack",seq:pending.seq,detail:event});
+    }
+  }
   if(event.type==="tool_deferred_resume"&&event.handle){
     debugTrace("tool_deferred_resume",{id:event.id||"",handle:event.handle});
+    if(event.id){deferredIds.add(event.id);setPiRouting(client,true);renderStatus()}
     wireSend({type:"local",event:"tool_deferred_resume",handle:event.handle});
   }
   if(event.type==="tool_job_narration"){
@@ -180,7 +194,10 @@ async function flush(){
     for(const [seq,frame]of [...seqs]){
       if(session!==live||live.delivery!==target)break;
       let accepted=true,detail=null;
-      if(frame.action==="tool_deferred")accepted=target.client.sendToolDeferred(frame.id,{handle:frame.handle,statusLabel:frame.status_label});
+      if(frame.action==="tool_deferred"){
+        accepted=target.client.sendToolDeferred(frame.id,{handle:frame.handle,statusLabel:frame.status_label});
+        if(accepted===true){deferredAcks.set(frame.id,{seq,handle:frame.handle,frame});seqs.delete(seq);continue}
+      }
       else if(frame.action==="tool_partial_result"){
         const options={};
         if(frame.interaction)options.interaction=frame.interaction;
@@ -194,8 +211,7 @@ async function flush(){
       if(session!==live||live.delivery!==target)break;
       if(accepted!==true){live.delivery=null;break}
       renderControl(frame);
-      if(frame.action==="tool_deferred"){deferredIds.add(frame.id);renderStatus()}
-      if(frame.action==="tool_result"&&deferredIds.delete(frame.id))renderStatus();
+      if(frame.action==="tool_result"&&deferredIds.delete(frame.id)){setPiRouting(target.client,false);renderStatus()}
       seqs.delete(seq);wireSend({type:"local",event:"bridge_ack",seq,...(detail?{detail}:{})});
     }
   }catch(error){if(session===live&&live.delivery===target)live.delivery=null;notice.textContent=`Voice control delivery failed: ${error.message||error}`}
