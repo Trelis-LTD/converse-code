@@ -100,11 +100,13 @@ def manifest() -> list[dict]:
             },
             ["approval_id", "decision"],
             timeout=15,
+            wait_for_tool=True,
         ),
         tool(
             "pi_cancel",
             "Cancel Pi's current turn without ending the voice session.",
             timeout=15,
+            wait_for_tool=True,
         ),
     ]
 
@@ -391,8 +393,9 @@ class PiControlRouter:
         await self._result(
             call_id,
             {
-                "event": "pi_approval_delivered", "approval_id": approval_id,
-                "decision": decision.value, "task_status": "running",
+                "control": "approval", "status": "applied",
+                "approval_id": approval_id, "decision": decision.value,
+                "pi_task_status": "running", "task_result_available": False,
             },
             verified=True,
         )
@@ -406,7 +409,10 @@ class PiControlRouter:
         await self._request_cancel()
         await self._result(
             call_id,
-            {"event": "pi_cancel_requested", "task_status": "cancelling"},
+            {
+                "control": "cancellation", "status": "requested",
+                "pi_task_status": "cancelling", "task_result_available": False,
+            },
             verified=True,
         )
 

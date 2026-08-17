@@ -76,6 +76,8 @@ def test_manifest_exposes_only_human_equivalent_pi_controls():
     assert tools["pi_request"]["deferred"] is True
     assert tools["pi_request"]["notify_on_complete"] is True
     assert set(tools["pi_request"]["parameters"]["properties"]) == {"user_request"}
+    assert tools["pi_approval"]["wait_for_tool"] is True
+    assert tools["pi_cancel"]["wait_for_tool"] is True
     assert tools["pi_approval"]["parameters"]["properties"]["decision"]["enum"] == [
         "allow_once", "allow_session", "block",
     ]
@@ -191,8 +193,9 @@ async def test_approval_surfaces_as_a_queued_user_interaction():
     assert sender.results[-1] == (
         "approval-call",
         {
-            "event": "pi_approval_delivered", "approval_id": "approval-7",
-            "decision": "allow_once", "task_status": "running",
+            "control": "approval", "status": "applied",
+            "approval_id": "approval-7", "decision": "allow_once",
+            "pi_task_status": "running", "task_result_available": False,
         },
         {"outcome": "succeeded", "verified": True},
     )
@@ -380,8 +383,9 @@ async def test_expiry_during_an_acknowledged_approval_command_cannot_drop_its_re
     assert sender.results[-1] == (
         "approval-call",
         {
-            "event": "pi_approval_delivered", "approval_id": "approval-1",
-            "decision": "allow_once", "task_status": "running",
+            "control": "approval", "status": "applied",
+            "approval_id": "approval-1", "decision": "allow_once",
+            "pi_task_status": "running", "task_result_available": False,
         },
         {"outcome": "succeeded", "verified": True},
     )
@@ -501,7 +505,10 @@ async def test_pi_cancel_aborts_only_the_active_pi_turn():
 
     assert pi.commands[-1] == ("abort", {})
     assert sender.results[-1] == (
-        "cancel-1", {"event": "pi_cancel_requested", "task_status": "cancelling"},
+        "cancel-1", {
+            "control": "cancellation", "status": "requested",
+            "pi_task_status": "cancelling", "task_result_available": False,
+        },
         {"outcome": "succeeded", "verified": True},
     )
     await pi.emit({"type": "agent_settled"})
