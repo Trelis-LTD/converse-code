@@ -59,6 +59,19 @@ export class ConverseClient extends EventTarget {
     }
     return state.transportLive;
   }
+  async sendToolInteractionUpdate(id, interactionId, stateName, options) {
+    if (!state.transportLive) throw new Error("transport unavailable");
+    this.bridgeCalls.push({
+      action: "tool_interaction_update", id, interactionId, state: stateName, options,
+    });
+    if (state.interactionUpdateHold) {
+      await new Promise((resolve) => { state.releaseInteractionUpdate = resolve; });
+    }
+    return state.interactionUpdateAck || {
+      type: "tool_interaction_update_ack", id, interaction_id: interactionId,
+      state: stateName, applied: true, reason: null,
+    };
+  }
   close() { this.closed = true; this.stopMic(); }
   async closeAndWait() { this.close(); }
 

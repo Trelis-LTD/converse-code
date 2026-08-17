@@ -1,7 +1,10 @@
 import asyncio
 
+from support import wait_until
+
 from converse_code.bridge import (
     BrowserBridge,
+    InteractionUpdateAck,
     ToolCall,
 )
 
@@ -15,10 +18,13 @@ def ignore_trace(_source, _event, **_data):
 
 
 async def handle(
-    bridge, message, *, on_tool_call=ignore, on_tool_cancel=ignore, on_session_end=ignore,
+    bridge, message, *, on_tool_call=ignore, on_tool_cancel=ignore,
+    on_deferred_resume=ignore, on_cancelled_interactions=ignore, on_session_end=ignore,
 ):
     await bridge.handle_browser_message(
         message, on_tool_call=on_tool_call, on_tool_cancel=on_tool_cancel,
+        on_deferred_resume=on_deferred_resume,
+        on_cancelled_interactions=on_cancelled_interactions,
         on_session_end=on_session_end,
     )
 
@@ -74,6 +80,73 @@ async def test_controls_wait_for_ready_and_remain_until_browser_ack():
     assert [frame["action"] for frame in tab.frames] == [
         "tool_deferred", "tool_partial_result", "tool_partial_result",
     ]
+
+
+async def test_interaction_close_waits_for_the_sdk_ack_and_returns_its_outcome():
+    tab = FakeTab()
+    tab.connected = True
+    bridge = BrowserBridge(tab.send, ignore_trace)
+    await handle(bridge, {"type": "local", "event": "bridge_ready"})
+
+    closing = asyncio.create_task(bridge.send_tool_interaction_update(
+        "task-1", "approval-1", "superseded", note="The user changed course.",
+    ))
+    await wait_until(
+        lambda: bool(tab.frames), describe=lambda: "the close never reached the browser",
+    )
+    frame = tab.frames[-1]
+    assert frame == {
+        "type": "local", "event": "bridge_control", "seq": frame["seq"],
+        "action": "tool_interaction_update", "id": "task-1",
+        "interaction_id": "approval-1", "state": "superseded",
+        "note": "The user changed course.",
+    }
+    assert not closing.done()
+
+    await handle(bridge, {
+        "type": "local", "event": "bridge_ack", "seq": frame["seq"],
+        "detail": {
+            "type": "tool_interaction_update_ack", "id": "task-1",
+            "interaction_id": "approval-1", "state": "cancelled",
+            "applied": True, "reason": None,
+        },
+    })
+    assert not closing.done()
+
+    await handle(bridge, {
+        "type": "local", "event": "bridge_ack", "seq": frame["seq"],
+        "detail": {
+            "type": "tool_interaction_update_ack", "id": "task-1",
+            "interaction_id": "approval-1", "state": "superseded",
+            "applied": True, "reason": None,
+        },
+    })
+
+    assert await closing == InteractionUpdateAck(True, None)
+
+
+async def test_browser_interaction_and_resume_events_reach_typed_handlers():
+    bridge = BrowserBridge(lambda _frame: asyncio.sleep(0, result=True), ignore_trace)
+    resumed, cancelled = [], []
+
+    await handle(
+        bridge,
+        {"type": "local", "event": "tool_deferred_resume", "handle": "pi-turn"},
+        on_deferred_resume=lambda handle: resumed.append(handle) or asyncio.sleep(0),
+    )
+    await handle(
+        bridge,
+        {
+            "type": "local", "event": "interaction_cancelled",
+            "interaction_ids": ["approval-1", "approval-2"],
+        },
+        on_cancelled_interactions=(
+            lambda ids: cancelled.append(ids) or asyncio.sleep(0)
+        ),
+    )
+
+    assert resumed == ["pi-turn"]
+    assert cancelled == [("approval-1", "approval-2")]
 
 
 async def test_browser_tool_calls_and_cancellation_reach_python_handlers():

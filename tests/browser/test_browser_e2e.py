@@ -287,8 +287,17 @@ async def test_interaction_partial_is_sent_while_a_voice_turn_is_active(
         "type": "local", "event": "bridge_control", "seq": 20,
         "action": "tool_partial_result", "id": "task-1",
         "interaction": {
+            "id": "approval-1",
             "prompt": "Allow Pi to run bash: pwd?",
             "options": ["Allow once", "Allow for this session", "Block"],
+            "resolver": {
+                "tool": "pi_approval", "args": {"approval_id": "approval-1"},
+                "option_args": {
+                    "Allow once": {"decision": "allow_once"},
+                    "Allow for this session": {"decision": "allow_session"},
+                    "Block": {"decision": "block"},
+                },
+            },
         },
         "content": {
             "event": "pi_approval_required", "approval_id": "approval-1",
@@ -306,8 +315,17 @@ async def test_interaction_partial_is_sent_while_a_voice_turn_is_active(
             "decisions": ["allow_once", "allow_session", "block"],
         },
         "options": {"interaction": {
+            "id": "approval-1",
             "prompt": "Allow Pi to run bash: pwd?",
             "options": ["Allow once", "Allow for this session", "Block"],
+            "resolver": {
+                "tool": "pi_approval", "args": {"approval_id": "approval-1"},
+                "option_args": {
+                    "Allow once": {"decision": "allow_once"},
+                    "Allow for this session": {"decision": "allow_session"},
+                    "Block": {"decision": "block"},
+                },
+            },
         }},
     }]
 
@@ -335,6 +353,92 @@ async def test_interaction_narration_lifecycle_is_visible_and_traced(
     assert await page.locator(".entry.activity").all_text_contents() == [
         "Question narration queued", "Question narration started",
     ]
+
+
+async def test_interaction_close_is_acknowledged_by_the_sdk_before_host_delivery_ack(
+    browser_page, browser_server,
+):
+    page, _ = browser_page
+    server, _, frames = browser_server
+    await open_session(page)
+    await page.evaluate("__fakeConverse.interactionUpdateHold=true")
+
+    await server.send_json_to_tab({
+        "type": "local", "event": "bridge_control", "seq": 21,
+        "action": "tool_interaction_update", "id": "task-1",
+        "interaction_id": "approval-1", "state": "cancelled",
+        "note": "The Pi approval expired unanswered.",
+    })
+    await page.wait_for_function(
+        "typeof __fakeConverse.releaseInteractionUpdate === 'function'",
+    )
+    assert not any(frame.get("seq") == 21 for frame in frames)
+
+    await page.evaluate("__fakeConverse.releaseInteractionUpdate()")
+    await wait_for_frame(frames, lambda frame: frame.get("seq") == 21)
+    acknowledgement = next(frame for frame in frames if frame.get("seq") == 21)
+    assert acknowledgement["detail"] == {
+        "type": "tool_interaction_update_ack", "id": "task-1",
+        "interaction_id": "approval-1", "state": "cancelled",
+        "applied": True, "reason": None,
+    }
+
+
+async def test_deferred_resume_and_cancelled_interaction_reach_the_local_host(
+    browser_page, browser_server,
+):
+    page, _ = browser_page
+    _, _, frames = browser_server
+    await open_session(page)
+
+    await page.evaluate("""__fakeConverse.clients[0].emit({
+      type:'tool_deferred_resume',id:'task-1',handle:'pi-turn',name:'pi_request'
+    });
+    __fakeConverse.clients[0].emit({
+      type:'tool_job_narration',state:'cancelled',job_ids:['task-1'],
+      interaction_ids:['approval-1'],kind:'interaction'
+    });""")
+
+    await wait_for_frame(
+        frames,
+        lambda frame: frame.get("event") == "tool_deferred_resume"
+        and frame.get("handle") == "pi-turn",
+    )
+    await wait_for_frame(
+        frames,
+        lambda frame: frame.get("event") == "interaction_cancelled"
+        and frame.get("interaction_ids") == ["approval-1"],
+    )
+
+
+async def test_barge_supersedes_only_narration_not_the_pending_interaction(
+    browser_page, browser_server,
+):
+    page, _ = browser_page
+    _, _, frames = browser_server
+    await open_session(page)
+
+    await page.evaluate("""__fakeConverse.clients[0].emit({
+      type:'tool_job_narration',state:'started',job_ids:['task-1'],
+      interaction_ids:['approval-1'],kind:'interaction'
+    });
+    __fakeConverse.clients[0].emit({type:'turn',turn_id:'approval-ask'});
+    __fakeConverse.clients[0].emit({
+      type:'text_delta',delta:'Allow Pi to run that?',turn_id:'approval-ask'
+    });
+    __fakeConverse.clients[0].emit({type:'interrupted',turn_id:'approval-ask'});
+    __fakeConverse.clients[0].emit({
+      type:'tool_job_narration',state:'superseded',job_ids:['task-1'],
+      interaction_ids:['approval-1'],kind:'interaction'
+    });""")
+    await wait_for_frame(
+        frames,
+        lambda frame: frame.get("event") == "debug_trace"
+        and frame.get("name") == "tool_job_narration"
+        and frame.get("data", {}).get("state") == "superseded",
+    )
+
+    assert not any(frame.get("event") == "interaction_cancelled" for frame in frames)
 
 
 async def test_trace_captures_assistant_text_at_interruption(browser_page, browser_server):
@@ -483,8 +587,17 @@ async def test_superseded_interaction_closes_without_completing_the_deferred_tas
             "decisions": ["allow_once", "allow_session", "block"],
         },
         "interaction": {
+            "id": "approval-1",
             "prompt": "Allow Pi to run bash: open index.html?",
             "options": ["Allow once", "Allow for this session", "Block"],
+            "resolver": {
+                "tool": "pi_approval", "args": {"approval_id": "approval-1"},
+                "option_args": {
+                    "Allow once": {"decision": "allow_once"},
+                    "Allow for this session": {"decision": "allow_session"},
+                    "Block": {"decision": "block"},
+                },
+            },
         },
     })
     await wait_for_frame(frames, lambda frame: frame.get("seq") == 2)
@@ -516,10 +629,9 @@ async def test_superseded_interaction_closes_without_completing_the_deferred_tas
 
     await server.send_json_to_tab({
         "type": "local", "event": "bridge_control", "seq": 3,
-        "action": "tool_partial_result", "id": "task-1",
-        "content": {
-            "event": "pi_approval_superseded", "approval_id": "approval-1",
-        },
+        "action": "tool_interaction_update", "id": "task-1",
+        "interaction_id": "approval-1", "state": "superseded",
+        "note": "The user changed course; the Pi approval was blocked.",
     })
     await server.send_json_to_tab({
         "type": "local", "event": "bridge_control", "seq": 4,
@@ -535,7 +647,7 @@ async def test_superseded_interaction_closes_without_completing_the_deferred_tas
     })""")
 
     assert await page.locator(".entry.activity").get_by_text(
-        "Approval superseded by a new request", exact=True,
+        "The user changed course; the Pi approval was blocked.", exact=True,
     ).count() == 1
     assert await page.locator(".entry.activity").get_by_text(
         "Question narration interrupted", exact=True,
@@ -552,17 +664,19 @@ async def test_superseded_interaction_closes_without_completing_the_deferred_tas
     assert await page.locator("#status").inner_text() == "listening"
 
     calls = await page.evaluate("__fakeConverse.clients[0].bridgeCalls")
-    task_events = [
-        call.get("content", {}).get("event")
-        for call in calls if call.get("id") == "task-1" and call.get("content")
+    task_events = [call["action"] for call in calls if call.get("id") == "task-1"]
+    assert task_events == [
+        "tool_deferred", "tool_partial_result", "tool_interaction_update", "tool_result",
     ]
-    assert task_events == ["pi_approval_required", "pi_approval_superseded", "pi_settled"]
     superseded = next(
         call for call in calls
-        if call.get("content", {}).get("event") == "pi_approval_superseded"
+        if call.get("action") == "tool_interaction_update"
     )
-    assert superseded["content"]["approval_id"] == "approval-1"
-    assert superseded["options"] == {}
+    assert superseded == {
+        "action": "tool_interaction_update", "id": "task-1",
+        "interactionId": "approval-1", "state": "superseded",
+        "options": {"note": "The user changed course; the Pi approval was blocked."},
+    }
 
 
 async def test_sdk_cancellation_reaches_the_local_host(browser_page, browser_server):

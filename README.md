@@ -10,8 +10,8 @@ The example exposes the same small controls a person has over Pi:
    receives immediate steering.
 2. `pi_approval` delivers an explicit decision for a pending approval ID.
 3. `pi_cancel` aborts Pi's current turn without ending the voice session.
-4. Pi tool events become structured, silent partials. A blocking approval becomes a queued Converse
-   `interaction` with a question and explicit choices.
+4. Pi tool events become structured, silent partials. A blocking approval becomes a persistent,
+   ID-correlated Converse `interaction` bound to the exact `pi_approval` resolver and choices.
 5. Pi's `agent_settled` event resolves the one deferred turn exactly once.
 
 The browser remains voice-only but mirrors the live speech transcript, assistant replies, and
@@ -24,7 +24,11 @@ That same extension gates `bash`, `edit`, and `write` with ID-correlated semanti
 requests. Converse receives the approval ID, tool, target, and valid decisions as structured facts;
 Pi accepts only an explicit response for the pending ID. Converse owns the interaction's queued,
 started, superseded, cancelled, or failed narration lifecycle, including when the voice floor is
-busy. No terminal selection menu is opened or navigated.
+busy. Once the user has heard the ask, Converse constrains subsequent turns to resolve, clarify,
+supersede, or cancel it; on resolution the broker constructs the exact approval call from the
+host-declared mapping. Expiry and host-side supersession use acknowledged interaction updates, and
+pending approvals are re-raised after a deferred-job reconnect. No terminal selection menu is
+opened or navigated.
 
 ## Install
 

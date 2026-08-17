@@ -28,6 +28,7 @@ class FakeSender:
         self.timeline = []
         self.deferred = []
         self.partials = []
+        self.interaction_updates = []
         self.results = []
 
     async def send_tool_deferred(self, call_id, handle, status_label):
@@ -37,6 +38,13 @@ class FakeSender:
     async def send_tool_partial_result(self, call_id, content, *, interaction=None):
         self.timeline.append("partial")
         self.partials.append((call_id, content, interaction))
+
+    async def send_tool_interaction_update(
+        self, call_id, interaction_id, state, *, note=None,
+    ):
+        self.timeline.append("interaction_update")
+        self.interaction_updates.append((call_id, interaction_id, state, note))
+        return {"applied": True, "reason": None}
 
     async def send_tool_result(self, call_id, content, **metadata):
         self.timeline.append("result")
@@ -157,8 +165,18 @@ async def test_approval_surfaces_as_a_queued_user_interaction():
             "handle": "pi-turn",
         },
         {
+            "id": "approval-7",
             "prompt": "Allow Pi to run bash: uv run pytest -q?",
             "options": ["Allow once", "Allow for this session", "Block"],
+            "resolver": {
+                "tool": "pi_approval",
+                "args": {"approval_id": "approval-7"},
+                "option_args": {
+                    "Allow once": {"decision": "allow_once"},
+                    "Allow for this session": {"decision": "allow_session"},
+                    "Block": {"decision": "block"},
+                },
+            },
         },
     )
     assert "speak" not in sender.partials[-1][1]
@@ -197,14 +215,10 @@ async def test_change_of_course_blocks_pending_approval_before_steering():
         ("approval_response", {"approvalId": "approval-1", "decision": "block"}),
         ("steer", {"message": "Use a local server instead"}),
     ]
-    assert sender.partials[-1] == (
-        "message-1",
-        {
-            "event": "pi_approval_superseded", "approval_id": "approval-1",
-            "handle": "pi-turn",
-        },
-        None,
-    )
+    assert sender.interaction_updates == [(
+        "message-1", "approval-1", "superseded",
+        "The user changed course; the Pi approval was blocked.",
+    )]
     await router.handle_tool_call(ToolCall(
         "stale", "pi_approval",
         {"approval_id": "approval-1", "decision": "allow_once"},
@@ -232,7 +246,7 @@ async def test_steer_survives_an_approval_the_extension_already_resolved():
     await router.handle_tool_call(task_call("message-2", "Use a local server instead"))
 
     assert pi.commands[-1] == ("steer", {"message": "Use a local server instead"})
-    assert sender.partials[-1][1]["event"] == "pi_approval_superseded"
+    assert sender.interaction_updates[-1][2] == "superseded"
     assert sender.results[-1] == (
         "message-2",
         {"event": "pi_message_delivered", "mode": "steer", "task_status": "running"},
@@ -253,11 +267,10 @@ async def test_expired_approval_is_retracted_and_cannot_be_answered():
 
     await pi.emit({"type": "approval_expired", "approvalId": "approval-1"})
 
-    assert sender.partials[-1] == (
-        "message-1",
-        {"event": "pi_approval_expired", "approval_id": "approval-1", "handle": "pi-turn"},
-        None,
-    )
+    assert sender.interaction_updates == [(
+        "message-1", "approval-1", "cancelled",
+        "The Pi approval expired unanswered.",
+    )]
 
     await router.handle_tool_call(ToolCall(
         "late-answer", "pi_approval",
@@ -270,6 +283,212 @@ async def test_expired_approval_is_retracted_and_cannot_be_answered():
     await router.handle_tool_call(task_call("message-2", "Try lint instead"))
     assert pi.commands[-1] == ("steer", {"message": "Try lint instead"})
     await pi.emit({"type": "message_end", "message": {"role": "assistant", "content": "Done"}})
+    await pi.emit({"type": "agent_settled"})
+    await running
+
+
+async def test_deferred_resume_re_raises_each_still_pending_bound_approval():
+    pi, sender = FakePi(), FakeSender()
+    router, running = await start_task(pi, sender)
+    await pi.emit({
+        "type": "approval_request", "approvalId": "approval-1",
+        "toolName": "bash", "summary": "uv run pytest -q",
+    })
+    sender.partials.clear()
+
+    await router.handle_deferred_resume("pi-turn")
+
+    assert sender.partials == [(
+        "message-1",
+        {
+            "event": "pi_approval_required", "approval_id": "approval-1",
+            "tool": "bash", "summary": "uv run pytest -q",
+            "decisions": ["allow_once", "allow_session", "block"],
+            "handle": "pi-turn",
+        },
+        {
+            "id": "approval-1",
+            "prompt": "Allow Pi to run bash: uv run pytest -q?",
+            "options": ["Allow once", "Allow for this session", "Block"],
+            "resolver": {
+                "tool": "pi_approval",
+                "args": {"approval_id": "approval-1"},
+                "option_args": {
+                    "Allow once": {"decision": "allow_once"},
+                    "Allow for this session": {"decision": "allow_session"},
+                    "Block": {"decision": "block"},
+                },
+            },
+        },
+    )]
+    await pi.emit({"type": "agent_settled"})
+    await running
+
+
+async def test_cancelled_bound_interaction_blocks_the_matching_pi_approval():
+    pi, sender = FakePi(), FakeSender()
+    router, running = await start_task(pi, sender)
+    await pi.emit({
+        "type": "approval_request", "approvalId": "approval-1",
+        "toolName": "bash", "summary": "open index.html",
+    })
+
+    await router.handle_cancelled_interactions(("approval-1",))
+
+    assert pi.commands[-1] == (
+        "approval_response", {"approvalId": "approval-1", "decision": "block"},
+    )
+    await router.handle_tool_call(ToolCall(
+        "late-answer", "pi_approval",
+        {"approval_id": "approval-1", "decision": "allow_once"},
+    ))
+    assert sender.results[-1][1]["event"] == "approval_not_pending"
+    await pi.emit({"type": "agent_settled"})
+    await running
+
+
+async def test_expiry_during_an_acknowledged_approval_command_cannot_drop_its_result():
+    class HeldApprovalPi(FakePi):
+        def __init__(self):
+            super().__init__()
+            self.approval_started = asyncio.Event()
+            self.release_approval = asyncio.Event()
+
+        async def command(self, kind, **fields):
+            response = await super().command(kind, **fields)
+            if kind == "approval_response":
+                self.approval_started.set()
+                await self.release_approval.wait()
+            return response
+
+    pi, sender = HeldApprovalPi(), FakeSender()
+    router, running = await start_task(pi, sender)
+    await pi.emit({
+        "type": "approval_request", "approvalId": "approval-1",
+        "toolName": "bash", "summary": "pwd",
+    })
+    approving = asyncio.create_task(router.handle_tool_call(ToolCall(
+        "approval-call", "pi_approval",
+        {"approval_id": "approval-1", "decision": "allow_once"},
+    )))
+    await pi.approval_started.wait()
+
+    await pi.emit({"type": "approval_expired", "approvalId": "approval-1"})
+    pi.release_approval.set()
+    await approving
+
+    assert sender.results[-1] == (
+        "approval-call",
+        {
+            "event": "pi_approval_delivered", "approval_id": "approval-1",
+            "decision": "allow_once", "task_status": "running",
+        },
+        {"outcome": "succeeded", "verified": True},
+    )
+    await pi.emit({"type": "agent_settled"})
+    await running
+
+
+async def test_expiry_during_approval_block_for_steer_cannot_drop_the_steer_result():
+    class HeldBlockPi(FakePi):
+        def __init__(self):
+            super().__init__()
+            self.block_started = asyncio.Event()
+            self.release_block = asyncio.Event()
+
+        async def command(self, kind, **fields):
+            response = await super().command(kind, **fields)
+            if kind == "approval_response":
+                self.block_started.set()
+                await self.release_block.wait()
+            return response
+
+    pi, sender = HeldBlockPi(), FakeSender()
+    router, running = await start_task(pi, sender)
+    await pi.emit({
+        "type": "approval_request", "approvalId": "approval-1",
+        "toolName": "bash", "summary": "pwd",
+    })
+    steering = asyncio.create_task(
+        router.handle_tool_call(task_call("steer-call", "Use a different approach")),
+    )
+    await pi.block_started.wait()
+
+    await pi.emit({"type": "approval_expired", "approvalId": "approval-1"})
+    pi.release_block.set()
+    await steering
+
+    assert sender.results[-1] == (
+        "steer-call",
+        {"event": "pi_message_delivered", "mode": "steer", "task_status": "running"},
+        {"outcome": "succeeded", "verified": True},
+    )
+    await pi.emit({"type": "agent_settled"})
+    await running
+
+
+async def test_approval_expiry_during_deferred_resume_does_not_mutate_iteration():
+    class ExpiringSender(FakeSender):
+        def __init__(self):
+            super().__init__()
+            self.router = None
+            self.expired = False
+
+        async def send_tool_partial_result(self, call_id, content, *, interaction=None):
+            await super().send_tool_partial_result(
+                call_id, content, interaction=interaction,
+            )
+            if self.expired or content.get("event") != "pi_approval_required":
+                return
+            self.expired = True
+            await self.router.on_event({
+                "type": "approval_expired", "approvalId": content["approval_id"],
+            })
+
+    pi, sender = FakePi(), ExpiringSender()
+    router, running = await start_task(pi, sender)
+    sender.router = router
+    for approval_id in ("approval-1", "approval-2"):
+        await pi.emit({
+            "type": "approval_request", "approvalId": approval_id,
+            "toolName": "bash", "summary": approval_id,
+        })
+    sender.expired = False
+    sender.partials.clear()
+
+    await router.handle_deferred_resume("pi-turn")
+
+    assert any(
+        interaction and interaction["id"] == "approval-2"
+        for _call_id, _content, interaction in sender.partials
+    )
+    await pi.emit({"type": "agent_settled"})
+    await running
+
+
+async def test_allow_for_session_closes_other_approvals_resolved_out_of_band():
+    pi, sender = FakePi(), FakeSender()
+    router, running = await start_task(pi, sender)
+    for approval_id, summary in (("approval-1", "pwd"), ("approval-2", "git status")):
+        await pi.emit({
+            "type": "approval_request", "approvalId": approval_id,
+            "toolName": "bash", "summary": summary,
+        })
+
+    await router.handle_tool_call(ToolCall(
+        "approval-call", "pi_approval",
+        {"approval_id": "approval-1", "decision": "allow_session"},
+    ))
+
+    assert sender.interaction_updates == [(
+        "message-1", "approval-2", "resolved",
+        "Pi allowed protected actions for this session.",
+    )]
+    await router.handle_tool_call(ToolCall(
+        "late-answer", "pi_approval",
+        {"approval_id": "approval-2", "decision": "block"},
+    ))
+    assert sender.results[-1][1]["event"] == "approval_not_pending"
     await pi.emit({"type": "agent_settled"})
     await running
 
