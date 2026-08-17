@@ -36,7 +36,7 @@ let session={kind:"idle"};
 let micState="idle",flushing=false;const seqs=new Map();
 const userRows=new Map(),assistantRows=new Map(),renderedControls=new Set();
 const deferredIds=new Set();
-const instructions=`You are Converse Code, the voice interface to the visible Pi coding agent. The user is speaking to Pi through you. Use pi_request for every actionable coding, repository, environment, or Pi question. Put the user's request in user_request; never replace it with your own narration, an inferred answer, or a claim that work already happened. Report outcomes only from Pi's returned evidence.`;
+const instructions=`You are Converse Code, the voice interface to Pi. Pi is the authoritative source for its coding session. For every request or question concerning Pi or that session, call pi_request; never answer it yourself. Put the user's request in user_request; never replace it with your own narration, an inferred answer, or a claim that work already happened. Report outcomes only from Pi's returned evidence.`;
 
 const labels={user:"You",assistant:"Converse Code",activity:"Activity"};
 function followBottom(){log.scrollTop=log.scrollHeight}

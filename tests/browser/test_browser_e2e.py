@@ -38,6 +38,19 @@ async def test_voice_session_uses_coding_friendly_idle_timing(browser_page):
     assert mode["silence_end_s"] == 90
 
 
+async def test_voice_session_routes_all_pi_session_questions_to_pi(browser_page):
+    page, _ = browser_page
+    await open_session(page)
+
+    instructions = await page.evaluate(
+        "__fakeConverse.clients[0].options.mode.instructions",
+    )
+
+    assert "Pi is the authoritative source for its coding session" in instructions
+    assert "every request or question concerning Pi or that session" in instructions
+    assert "never answer it yourself" in instructions
+
+
 async def test_end_session_closes_voice_and_requests_host_shutdown(
     browser_page, browser_server,
 ):
