@@ -118,7 +118,7 @@ class BrowserBridge:
                 self._trace("session_end", code=code, reason=reason)
                 await on_session_end()
         elif event == "end_session":
-            self._trace("session_end", source="user")
+            self._trace("session_end", initiator="user")
             await on_session_end()
         elif event == "debug_trace":
             name = message.get("name")
