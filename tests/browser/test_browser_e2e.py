@@ -492,8 +492,8 @@ async def test_background_status_tracks_the_deferred_task_not_unrelated_results(
         "type": "local", "event": "bridge_control", "seq": 10,
         "action": "tool_result", "id": "approval-call-1",
         "content": {
-            "event": "pi_approval_delivered", "decision": "allow_once",
-            "task_status": "running",
+            "control": "approval", "status": "applied", "decision": "allow_once",
+            "pi_task_status": "running", "task_result_available": False,
         },
         "outcome": "succeeded", "verified": True,
     })
