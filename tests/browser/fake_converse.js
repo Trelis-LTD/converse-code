@@ -13,6 +13,7 @@ export class ConverseClient extends EventTarget {
     this.options = options;
     this.sessionId = options.sessionId;
     this.bridgeCalls = [];
+    this.toolChoices = [];
     this.stream = null;
     state.clients.push(this);
   }
@@ -43,6 +44,10 @@ export class ConverseClient extends EventTarget {
 
   setMicEnabled(enabled) {
     this.micEnabled = enabled;
+  }
+
+  setToolChoice(choice) {
+    this.toolChoices.push(choice);
   }
 
   sendToolResult(id, content, options) {

@@ -20,7 +20,6 @@ const TICK_MS = 25;
 // the waveform mid-sample and pops audibly (canceled/reset/reconnect). Must stay well under
 // JITTER_LEAD so audio enqueued right after a clear starts at full gain.
 const CLEAR_FADE = 0.025;
-const PAUSE_FADE = 0.02;
 
 // Streaming PCM player for gapless assistant audio.
 //
@@ -51,8 +50,6 @@ export class StreamingPlayer {
     this.nextTime = 0;       // ctx time of the next sample to schedule
     this.sources = new Set(); // scheduled/playing BufferSources
     this.timer = null;
-    this.paused = false;      // reversible server-side backchannel hold
-    this.pauseGen = 0;        // invalidates a fade overtaken by clear/stop/resume
     this._onVisibility = () => this._schedule();
   }
 
@@ -67,7 +64,7 @@ export class StreamingPlayer {
       this.fadeEnd = 0;
       this.nextTime = this.context.currentTime;
     }
-    if (this.context.state === 'suspended' && !this.paused) await this.context.resume();
+    if (this.context.state === 'suspended') await this.context.resume();
   }
 
   // Continuous linear resample of a 16 kHz chunk up to the context's native rate, carrying the
@@ -107,7 +104,7 @@ export class StreamingPlayer {
   // Schedule queued PCM up to SCHEDULE_AHEAD past the playhead. Each call drains whole chunks
   // off the front of the queue into a BufferSource.
   _schedule() {
-    if (!this.context || this.paused) return;
+    if (!this.context) return;
     const now = this.context.currentTime;
     // Re-buffer JITTER_LEAD when the queue had drained (first chunk or underrun) — and never
     // start inside a clear()'s fade, however the two constants are tuned relative to each other.
@@ -174,59 +171,6 @@ export class StreamingPlayer {
     }
   }
 
-  // Freeze the output clock exactly where it is. AudioContext suspension preserves scheduled
-  // BufferSource positions and lets incoming reply audio accumulate in `queue`; resume() continues
-  // from the same sample instead of skipping the decision window or rebuilding source offsets.
-  async pause() {
-    if (!this.context || this.paused) return;
-    const ctx = this.context;
-    const gen = ++this.pauseGen;
-    this.paused = true;
-    try {
-      const now = ctx.currentTime;
-      const gain = this.master?.gain;
-      if (gain) {
-        gain.cancelScheduledValues(now);
-        gain.setValueAtTime(gain.value, now);
-        gain.linearRampToValueAtTime(0, now + PAUSE_FADE);
-        await new Promise((resolve) => setTimeout(resolve, PAUSE_FADE * 1000));
-      }
-      if (this.context !== ctx || !this.paused || this.pauseGen !== gen) return;
-      if (ctx.state === 'running' && typeof ctx.suspend === 'function') {
-        await ctx.suspend();
-        if (this.context !== ctx || !this.paused || this.pauseGen !== gen) {
-          // clear()/resume() may have invalidated this pause while the browser was suspending.
-          // Undo only our stale suspension; a newer pause generation still owns a paused context.
-          if (this.context === ctx && !this.paused && ctx.state === 'suspended') {
-            await ctx.resume();
-          }
-          return;
-        }
-      }
-    } catch (error) {
-      if (this.context === ctx && this.pauseGen === gen) {
-        this.paused = false;
-        throw error;
-      }
-    }
-  }
-
-  async resume() {
-    if (!this.context || !this.paused) return;
-    this.pauseGen++;
-    this.paused = false;
-    if (this.context.state === 'suspended') await this.context.resume();
-    const now = this.context.currentTime;
-    const gain = this.master?.gain;
-    if (gain) {
-      gain.cancelScheduledValues(now);
-      gain.setValueAtTime(0, now);
-      gain.linearRampToValueAtTime(1, now + PAUSE_FADE);
-    }
-    this._ensureTimer();
-    this._schedule();
-  }
-
   // Discard queued audio (barge/interrupt) and stop playing — via a short master-bus fade, so
   // the cut lands on silence instead of popping mid-waveform. `fadeS` overrides the fade for a
   // barge hard-clear (~150 ms reads as a yield, not a glitch); the default stays pop-guard short.
@@ -235,15 +179,9 @@ export class StreamingPlayer {
     this.phase = 0;
     this.carry = 0;
     const ctx = this.context;
-    const wasPaused = this.paused;
-    this.pauseGen++;
-    this.paused = false;
-    // A suspended context is already silent. Stop its sources at the frozen playhead and resume
-    // only to apply that stop; fading would add no audible benefit and would overstate played audio.
-    if (wasPaused && ctx?.state === 'suspended') ctx.resume().catch(() => {});
     if (ctx && this.sources.size) {
       const now = ctx.currentTime;
-      const stopAt = now + (wasPaused ? 0 : fadeS);
+      const stopAt = now + fadeS;
       const gain = this.master.gain;
       gain.cancelScheduledValues(now);
       gain.setValueAtTime(gain.value, now);

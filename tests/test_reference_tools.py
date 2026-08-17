@@ -3,7 +3,7 @@ import asyncio
 from support import wait_until
 
 from converse_code.agent_tools import PiControlRouter, manifest
-from converse_code.bridge import ToolCall
+from converse_code.bridge import DeferredAck, ToolCall
 from converse_code.pi_tui import PiTUIBridgeError
 
 
@@ -30,10 +30,12 @@ class FakeSender:
         self.partials = []
         self.interaction_updates = []
         self.results = []
+        self.deferred_ack = DeferredAck(True, None)
 
     async def send_tool_deferred(self, call_id, handle, status_label):
         self.timeline.append("deferred")
         self.deferred.append((call_id, handle, status_label))
+        return self.deferred_ack
 
     async def send_tool_partial_result(self, call_id, content, *, interaction=None):
         self.timeline.append("partial")
@@ -81,6 +83,14 @@ def test_manifest_exposes_only_human_equivalent_pi_controls():
     assert tools["pi_approval"]["parameters"]["properties"]["decision"]["enum"] == [
         "allow_once", "allow_session", "block",
     ]
+    approval_help = " ".join([
+        tools["pi_approval"]["description"],
+        tools["pi_approval"]["parameters"]["properties"]["decision"]["description"],
+    ]).lower()
+    assert "unqualified" in approval_help
+    assert "allow_once" in approval_help
+    assert "explicit" in approval_help
+    assert "allow_session" in approval_help
 
 
 async def test_idle_pi_message_owns_one_deferred_pi_episode_until_settlement():
@@ -99,7 +109,54 @@ async def test_idle_pi_message_owns_one_deferred_pi_episode_until_settlement():
     assert sender.results == [(
         "message-1",
         {"event": "pi_settled", "pi_response": "Opened the game.", "handle": "pi-turn"},
-        {"outcome": "succeeded", "verified": False},
+        {"outcome": "succeeded", "verified": True},
+    )]
+    assert router.active_call_id is None
+
+
+async def test_each_root_pi_episode_has_a_fresh_deferred_handle():
+    pi, sender = FakePi(), FakeSender()
+    router, first = await start_task(pi, sender, "First task")
+    await pi.emit({"type": "message_end", "message": {
+        "role": "assistant", "content": [{"type": "text", "text": "First done"}],
+    }})
+    await pi.emit({"type": "agent_settled"})
+    await first
+
+    second = asyncio.create_task(router.handle_tool_call(task_call("message-2", "Second task")))
+    await wait_until(
+        lambda: len(pi.commands) == 2,
+        describe=lambda: "the second prompt never reached Pi",
+    )
+    await pi.emit({"type": "input_seen", "owner": "bridge", "commandId": "fake-2"})
+    await pi.emit({"type": "message_end", "message": {
+        "role": "assistant", "content": [{"type": "text", "text": "Second done"}],
+    }})
+    await pi.emit({"type": "agent_settled"})
+    await second
+
+    first_handle = sender.deferred[0][1]
+    second_handle = sender.deferred[1][1]
+    assert first_handle != second_handle
+    assert sender.results[0][1]["handle"] == first_handle
+    assert sender.results[1][1]["handle"] == second_handle
+
+
+async def test_rejected_defer_aborts_pi_and_fails_the_parent_call():
+    pi, sender = FakePi(), FakeSender()
+    sender.deferred_ack = DeferredAck(False, "handle_in_use")
+    router = make_router(pi, sender)
+
+    await router.handle_tool_call(task_call())
+
+    assert pi.commands == [
+        ("prompt", {"message": "Fix it"}),
+        ("abort", {}),
+    ]
+    assert sender.results == [(
+        "message-1",
+        {"event": "pi_defer_rejected", "reason": "handle_in_use"},
+        {"outcome": "failed", "verified": False},
     )]
     assert router.active_call_id is None
 
@@ -168,7 +225,11 @@ async def test_approval_surfaces_as_a_queued_user_interaction():
         },
         {
             "id": "approval-7",
-            "prompt": "Allow Pi to run bash: uv run pytest -q?",
+            "prompt": (
+                "Pi wants to run bash: uv run pytest -q. Ask the user to allow once, "
+                "allow for this session, or block. An unqualified approval means allow once; "
+                "session-wide approval must be explicit."
+            ),
             "options": ["Allow once", "Allow for this session", "Block"],
             "resolver": {
                 "tool": "pi_approval",
@@ -311,7 +372,11 @@ async def test_deferred_resume_re_raises_each_still_pending_bound_approval():
         },
         {
             "id": "approval-1",
-            "prompt": "Allow Pi to run bash: uv run pytest -q?",
+            "prompt": (
+                "Pi wants to run bash: uv run pytest -q. Ask the user to allow once, "
+                "allow for this session, or block. An unqualified approval means allow once; "
+                "session-wide approval must be explicit."
+            ),
             "options": ["Allow once", "Allow for this session", "Block"],
             "resolver": {
                 "tool": "pi_approval",
@@ -514,7 +579,7 @@ async def test_pi_cancel_aborts_only_the_active_pi_turn():
     await pi.emit({"type": "agent_settled"})
     await running
     assert sender.results[-1][0] == "message-1"
-    assert sender.results[-1][2]["outcome"] == "cancelled"
+    assert sender.results[-1][2] == {"outcome": "cancelled", "verified": False}
 
 
 async def test_tool_activity_is_forwarded_as_generic_structured_partial():

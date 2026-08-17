@@ -24,6 +24,11 @@ class InteractionUpdateAck(NamedTuple):
     reason: str | None
 
 
+class DeferredAck(NamedTuple):
+    accepted: bool
+    reason: str | None
+
+
 class BrowserBridge:
     """Keep outbound controls until browser JavaScript confirms SDK delivery."""
 
@@ -34,6 +39,7 @@ class BrowserBridge:
     ) -> None:
         self._send_to_tab = send_to_tab
         self._pending: dict[int, dict] = {}
+        self._deferred_waiters: dict[int, asyncio.Future[DeferredAck]] = {}
         self._interaction_waiters: dict[int, asyncio.Future[InteractionUpdateAck]] = {}
         self._next_seq = 1
         self._delivery: Connected | None = None
@@ -71,10 +77,16 @@ class BrowserBridge:
             if isinstance(seq, int):
                 frame = self._pending.get(seq, {})
                 interaction_ack = None
+                deferred_ack = None
                 if frame.get("action") == "tool_interaction_update":
                     interaction_ack = self._parse_interaction_ack(message.get("detail"), frame)
                     if interaction_ack is None:
                         self._trace("invalid_interaction_ack", seq=seq)
+                        return
+                elif frame.get("action") == "tool_deferred":
+                    deferred_ack = self._parse_deferred_ack(message.get("detail"), frame)
+                    if deferred_ack is None:
+                        self._trace("invalid_deferred_ack", seq=seq)
                         return
                 self._trace(
                     "control_acknowledged", seq=seq, action=frame.get("action"),
@@ -83,7 +95,13 @@ class BrowserBridge:
                     self._pending.pop(seq, None)
                     if self._delivery is not None:
                         self._delivery.sent.discard(seq)
+                    deferred_waiter = self._deferred_waiters.pop(seq, None)
                     waiter = self._interaction_waiters.pop(seq, None)
+                if (
+                    deferred_waiter is not None and deferred_ack is not None
+                    and not deferred_waiter.done()
+                ):
+                    deferred_waiter.set_result(deferred_ack)
                 if waiter is not None and interaction_ack is not None and not waiter.done():
                     waiter.set_result(interaction_ack)
         elif event == "tool_call":
@@ -130,6 +148,7 @@ class BrowserBridge:
         self,
         action: str,
         *,
+        deferred_waiter: asyncio.Future[DeferredAck] | None = None,
         interaction_waiter: asyncio.Future[InteractionUpdateAck] | None = None,
         **fields,
     ) -> int:
@@ -142,9 +161,27 @@ class BrowserBridge:
             }
             if interaction_waiter is not None:
                 self._interaction_waiters[seq] = interaction_waiter
+            if deferred_waiter is not None:
+                self._deferred_waiters[seq] = deferred_waiter
             self._trace("control_queued", seq=seq, action=action, fields=fields)
         await self._flush()
         return seq
+
+    @staticmethod
+    def _parse_deferred_ack(detail: object, frame: dict) -> DeferredAck | None:
+        if not isinstance(detail, dict):
+            return None
+        reason = detail.get("reason")
+        accepted = detail.get("accepted")
+        if not (
+            detail.get("type") == "tool_deferred_ack"
+            and detail.get("id") == frame.get("id")
+            and isinstance(accepted, bool)
+            and (reason is None or isinstance(reason, str))
+            and (not accepted or detail.get("handle") == frame.get("handle"))
+        ):
+            return None
+        return DeferredAck(accepted, reason)
 
     @staticmethod
     def _parse_interaction_ack(detail: object, frame: dict) -> InteractionUpdateAck | None:
@@ -186,10 +223,22 @@ class BrowserBridge:
             outcome=outcome, verified=verified,
         )
 
-    async def send_tool_deferred(self, call_id: str, handle: str, status_label: str) -> None:
-        await self._control(
-            "tool_deferred", id=call_id, handle=handle, status_label=status_label,
+    async def send_tool_deferred(
+        self, call_id: str, handle: str, status_label: str,
+    ) -> DeferredAck:
+        waiter = asyncio.get_running_loop().create_future()
+        seq = await self._control(
+            "tool_deferred", deferred_waiter=waiter,
+            id=call_id, handle=handle, status_label=status_label,
         )
+        try:
+            async with asyncio.timeout(15):
+                return await waiter
+        except TimeoutError:
+            async with self._lock:
+                self._deferred_waiters.pop(seq, None)
+            self._trace("deferred_ack_timeout", seq=seq, id=call_id, handle=handle)
+            return DeferredAck(False, "ack_timeout")
 
     async def send_tool_partial_result(
         self,

@@ -4,6 +4,7 @@ from support import wait_until
 
 from converse_code.bridge import (
     BrowserBridge,
+    DeferredAck,
     InteractionUpdateAck,
     ToolCall,
 )
@@ -49,7 +50,10 @@ async def test_controls_wait_for_ready_and_remain_until_browser_ack():
         tab.send, trace=lambda source, event, **data: records.append((source, event, data)),
     )
 
-    await bridge.send_tool_deferred("c1", "code-c1", status_label="Pi")
+    deferring = asyncio.create_task(
+        bridge.send_tool_deferred("c1", "code-c1", status_label="Pi"),
+    )
+    await asyncio.sleep(0)
     await bridge.send_tool_partial_result(
         "c1",
         {"event": "pi_approval_required"},
@@ -70,7 +74,12 @@ async def test_controls_wait_for_ready_and_remain_until_browser_ack():
 
     await handle(bridge, {
         "type": "local", "event": "bridge_ack", "seq": tab.frames[0]["seq"],
+        "detail": {
+            "type": "tool_deferred_ack", "id": "c1", "handle": "code-c1",
+            "accepted": True, "reason": None,
+        },
     })
+    assert await deferring == DeferredAck(True, None)
     acknowledged = [
         data for source, event, data in records
         if source == "browser_bridge" and event == "control_acknowledged"
@@ -124,6 +133,32 @@ async def test_interaction_close_waits_for_the_sdk_ack_and_returns_its_outcome()
     })
 
     assert await closing == InteractionUpdateAck(True, None)
+
+
+async def test_defer_waits_for_and_returns_the_broker_acknowledgement():
+    tab = FakeTab()
+    tab.connected = True
+    bridge = BrowserBridge(tab.send, ignore_trace)
+    await handle(bridge, {"type": "local", "event": "bridge_ready"})
+
+    deferring = asyncio.create_task(
+        bridge.send_tool_deferred("task-1", "pi-turn-1", status_label="Pi"),
+    )
+    await wait_until(
+        lambda: bool(tab.frames), describe=lambda: "the defer never reached the browser",
+    )
+    frame = tab.frames[-1]
+    assert not deferring.done()
+
+    await handle(bridge, {
+        "type": "local", "event": "bridge_ack", "seq": frame["seq"],
+        "detail": {
+            "type": "tool_deferred_ack", "id": "task-1",
+            "accepted": False, "reason": "handle_in_use",
+        },
+    })
+
+    assert await deferring == DeferredAck(False, "handle_in_use")
 
 
 async def test_browser_interaction_and_resume_events_reach_typed_handlers():

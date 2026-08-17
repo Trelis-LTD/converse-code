@@ -42,6 +42,11 @@ DECISION_LABELS = {
     Decision.BLOCK: "Block",
 }
 
+APPROVAL_SCOPE_RULE = (
+    "An unqualified approval means allow_once; allow_session requires an explicit "
+    "request for session-wide approval."
+)
+
 
 class Failure(Enum):
     INVALID_EVENT = "invalid_pi_event"
@@ -51,6 +56,7 @@ class Failure(Enum):
     UNRELATED_INPUT = "unrelated_pi_input"
     MESSAGE_FAILED = "pi_message_failed"
     OWNERSHIP_UNCONFIRMED = "pi_ownership_unconfirmed"
+    DEFER_REJECTED = "pi_defer_rejected"
 
 
 def manifest() -> list[dict]:
@@ -93,10 +99,17 @@ def manifest() -> list[dict]:
         ),
         tool(
             "pi_approval",
-            "Submit the user's explicit decision for a pending Pi approval using its supplied ID.",
+            (
+                "Submit the user's explicit decision for a pending Pi approval using its "
+                f"supplied ID. {APPROVAL_SCOPE_RULE}"
+            ),
             {
                 "approval_id": {"type": "string", "description": "The pending approval ID."},
-                "decision": {"type": "string", "enum": [item.value for item in Decision]},
+                "decision": {
+                    "type": "string",
+                    "enum": [item.value for item in Decision],
+                    "description": APPROVAL_SCOPE_RULE,
+                },
             },
             ["approval_id", "decision"],
             timeout=15,
@@ -175,6 +188,7 @@ PiEvent = (
 class AwaitingAcknowledgement:
     call_id: str
     result: asyncio.Future[TerminalResult]
+    handle: str
     events: list[PiEvent] = field(default_factory=list)
 
 
@@ -183,12 +197,14 @@ class AwaitingOwnership:
     call_id: str
     result: asyncio.Future[TerminalResult]
     command_id: str
+    handle: str
 
 
 @dataclass
 class RunningTurn:
     call_id: str
     result: asyncio.Future[TerminalResult]
+    handle: str
     assistant_text: str = ""
     approvals: dict[str, ApprovalRequested] = field(default_factory=dict)
 
@@ -197,6 +213,7 @@ class RunningTurn:
 class CancellingTurn:
     call_id: str
     result: asyncio.Future[TerminalResult]
+    handle: str
 
 
 @dataclass(frozen=True)
@@ -217,8 +234,15 @@ class PiControlRouter:
     def __init__(self, pi, sender, *, handle: str) -> None:
         self.pi = pi
         self.sender = sender
-        self.handle = handle
+        self._handle_prefix = handle
+        self._handle_sequence = 0
         self._turn: ActiveTurn | None = None
+
+    def _next_handle(self) -> str:
+        self._handle_sequence += 1
+        if self._handle_sequence == 1:
+            return self._handle_prefix
+        return f"{self._handle_prefix}-{self._handle_sequence}"
 
     @property
     def active_call_id(self) -> str | None:
@@ -260,7 +284,7 @@ class PiControlRouter:
 
     async def handle_deferred_resume(self, handle: str) -> None:
         turn = self._turn
-        if not isinstance(turn, RunningTurn) or handle != self.handle:
+        if not isinstance(turn, RunningTurn) or handle != turn.handle:
             return
         for approval in tuple(turn.approvals.values()):
             if turn.approvals.get(approval.approval_id) is not approval:
@@ -308,7 +332,8 @@ class PiControlRouter:
             return
 
         result = asyncio.get_running_loop().create_future()
-        self._turn = AwaitingAcknowledgement(call_id, result)
+        handle = self._next_handle()
+        self._turn = AwaitingAcknowledgement(call_id, result, handle)
         try:
             command_id = await self.pi.command("prompt", message=request)
         except PiTUIBridgeError as exc:
@@ -316,10 +341,23 @@ class PiControlRouter:
             self._turn = None
             return
 
-        await self.sender.send_tool_deferred(call_id, self.handle, status_label="Pi")
+        deferred = await self.sender.send_tool_deferred(
+            call_id, handle, status_label="Pi",
+        )
+        if not deferred.accepted:
+            self._turn = None
+            try:
+                await self.pi.command("abort")
+            except PiTUIBridgeError:
+                pass
+            await self._error(
+                call_id, Failure.DEFER_REJECTED.value,
+                reason=deferred.reason or "rejected",
+            )
+            return
         if isinstance(self._turn, AwaitingAcknowledgement):
             early_events = tuple(self._turn.events)
-            self._turn = AwaitingOwnership(call_id, result, command_id)
+            self._turn = AwaitingOwnership(call_id, result, command_id, handle)
             for event in early_events:
                 await self._handle_event(event)
         outcome = await result
@@ -329,9 +367,9 @@ class PiControlRouter:
             result_name, event, message = "failed", outcome.event.value, outcome.message
         else:
             result_name, event, message = "cancelled", "pi_turn_cancelled", ""
-        content = {"event": event, "pi_response": message, "handle": self.handle}
+        content = {"event": event, "pi_response": message, "handle": handle}
         await self.sender.send_tool_result(
-            call_id, content, outcome=result_name, verified=False,
+            call_id, content, outcome=result_name, verified=isinstance(outcome, Succeeded),
         )
         self._turn = None
 
@@ -420,7 +458,7 @@ class PiControlRouter:
         turn = self._turn
         if not isinstance(turn, (AwaitingAcknowledgement, AwaitingOwnership, RunningTurn)):
             return
-        self._turn = CancellingTurn(turn.call_id, turn.result)
+        self._turn = CancellingTurn(turn.call_id, turn.result, turn.handle)
         try:
             await self.pi.command("abort")
         except PiTUIBridgeError:
@@ -445,7 +483,7 @@ class PiControlRouter:
             return
         if isinstance(turn, AwaitingOwnership):
             if isinstance(event, OwnedInput) and event.command_id == turn.command_id:
-                self._turn = RunningTurn(turn.call_id, turn.result)
+                self._turn = RunningTurn(turn.call_id, turn.result, turn.handle)
             elif isinstance(event, OwnedInput):
                 self._complete(Failed(Failure.INPUT_MISMATCH))
             elif event is Signal.FOREIGN_INPUT:
@@ -464,7 +502,7 @@ class PiControlRouter:
                 turn.call_id,
                 {
                     "event": "pi_tool_started", "tool": event.name,
-                    "arguments": event.arguments, "handle": self.handle,
+                    "arguments": event.arguments, "handle": turn.handle,
                 },
             )
         elif isinstance(event, ApprovalRequested):
@@ -495,11 +533,15 @@ class PiControlRouter:
             {
                 "event": "pi_approval_required", "approval_id": approval.approval_id,
                 "tool": approval.tool, "summary": approval.summary,
-                "decisions": [item.value for item in Decision], "handle": self.handle,
+                "decisions": [item.value for item in Decision], "handle": turn.handle,
             },
             interaction={
                 "id": approval.approval_id,
-                "prompt": f"Allow Pi to run {approval.tool}: {approval.summary}?",
+                "prompt": (
+                    f"Pi wants to run {approval.tool}: {approval.summary}. Ask the user to "
+                    "allow once, allow for this session, or block. An unqualified approval "
+                    "means allow once; session-wide approval must be explicit."
+                ),
                 "options": options,
                 "resolver": {
                     "tool": "pi_approval",

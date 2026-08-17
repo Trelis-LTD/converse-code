@@ -38,8 +38,8 @@ const captureClockMs = () => {
 // every client (browser, native, phone) identical, and there's no onnxruntime-web to load.
 //
 // Server events: `turn` (reply starting), `asr`/`utterance` (transcripts), `done` (reply finished),
-// `playback_pause`/`playback_resume` (reversible backchannel arbitration), `interrupted` (a final
-// barge — the server stopped sending), and `canceled` (eager speculation retracted).
+// `interrupted` (a final barge — the server stopped sending), and `canceled` (eager speculation
+// retracted).
 // One short-lived authorized control frame (feedback, client_error): open a fresh socket — the
 // session's own socket is usually closed by the time these fire — send the frame, resolve on the
 // server's ok. `kind` only labels the errors.
@@ -287,7 +287,6 @@ export class ConverseClient extends EventTarget {
     this._responding = false;   // between `turn` and `done`/`interrupted`/`canceled`
     this._ackFrames = 0;        // binary frames armed by an `ack` event (playable outside a reply)
     this._ackGen = 0;           // bumped when ack credit is invalidated: guards in-flight ack enqueues
-    this._playbackPauseSeq = null; // reversible hold; sequence rejects late resume events
     this._pendingInjections = new Map(); // message_id -> authoritative broker ack promise
     this._injectionSeq = 0;
     this._narrationStates = new Map();   // job_id -> last known tool_job_narration state
@@ -744,11 +743,7 @@ export class ConverseClient extends EventTarget {
     this._dispatch({ type: 'resume_state', state: this.exportResumeState() });
   }
 
-  // Shared start-frame construction (mode/temperature/greeting/capabilities/rawAssist) for both
-  // transports. webrtc mode-kind capability advertising: reversible playback_pause/resume needs a
-  // player the client can actually pause on command, which the remote-track path doesn't implement
-  // yet (see _applyReflex's transport guards) — so webrtc never advertises playback_pause_v1
-  // regardless of the configured player (TODO once/if reversible pause targets the <audio> element).
+  // Shared start-frame construction (mode/temperature/greeting/rawAssist) for both transports.
   _buildStartFrame() {
     let mode = validatedMode(this._mode);
     if (mode.kind === 'converse') {
@@ -765,8 +760,7 @@ export class ConverseClient extends EventTarget {
     if (this.apiKey) start.api_key = this.apiKey;
     if (this._resumeToken) start.resume_token = this._resumeToken;
     const client = {};
-    client.capabilities = (this.transport !== 'webrtc' && this._supportsReversiblePlayback())
-      ? ['playback_pause_v1'] : [];
+    client.capabilities = [];
     client.audio_frontend = this._audioFrontend || 'unknown';
     if (this.user) client.user = this.user;
     if (this.timezone) client.timezone = this.timezone;
@@ -1105,10 +1099,6 @@ export class ConverseClient extends EventTarget {
   _dispatch(event) {
     this.dispatchEvent(new CustomEvent(event.type, { detail: event }));
     this.dispatchEvent(new CustomEvent('event', { detail: event }));
-  }
-
-  _supportsReversiblePlayback() {
-    return typeof this.player?.pause === 'function' && typeof this.player?.resume === 'function';
   }
 
   // The one primitive every caller uses to send protocol JSON, so index.js has exactly one place
@@ -1540,7 +1530,6 @@ export class ConverseClient extends EventTarget {
     switch (event.type) {
       case 'turn':
         this._responding = true;
-        this._playbackPauseSeq = null;
         this._dropAck();
         if (webrtc) {
           // No per-chunk binary audio frames arrive over webrtc (assistant audio is a remote RTP
@@ -1552,52 +1541,7 @@ export class ConverseClient extends EventTarget {
           this._dispatch({ type: 'audio', sr: SAMPLE_RATE, samples: null, synthetic: true });
         }
         break;
-      case 'playback_pause': {
-        if (webrtc) break;   // not advertised as a capability over webrtc (see _buildStartFrame) — TODO
-        const seq = Number.isInteger(event.pause_seq) ? event.pause_seq : 0;
-        this._playbackPauseSeq = seq;
-        this.audioQueue = this.audioQueue.catch(() => {}).then(async () => {
-          if (!this._responding || this._playbackPauseSeq !== seq) return;
-          try {
-            if (!this._supportsReversiblePlayback()) {
-              throw new Error('player does not implement reversible pause and resume');
-            }
-            await this.player.pause();
-          } catch (error) {
-            if (this.ws?.readyState === 1 && this._playbackPauseSeq === seq) {
-              this.ws.send(JSON.stringify({
-                type: 'client_event', event: 'playback_pause_failed', pause_seq: seq,
-                detail: String(error?.message || error).slice(0, 160),
-              }));
-            }
-            return;
-          }
-          if (this.ws?.readyState === 1 && this._playbackPauseSeq === seq) {
-            this.ws.send(JSON.stringify({
-              type: 'client_event', event: 'playback_paused', pause_seq: seq,
-              pending_ms: Math.round(this.player?.pendingMs?.() ?? 0),
-            }));
-          }
-        });
-        break;
-      }
-      case 'playback_resume': {
-        if (webrtc) break;
-        const seq = Number.isInteger(event.pause_seq) ? event.pause_seq : 0;
-        if (this._playbackPauseSeq !== seq) break;
-        this._playbackPauseSeq = null;
-        this.audioQueue = this.audioQueue.catch(() => {}).then(async () => {
-          await this.player?.resume?.();
-          if (this.ws?.readyState === 1) {
-            this.ws.send(JSON.stringify({
-              type: 'client_event', event: 'playback_resumed', pause_seq: seq,
-            }));
-          }
-        });
-        break;
-      }
       case 'canceled':    // eager speculation retracted — the audio was a mistake, clear it
-        this._playbackPauseSeq = null;
         // Over webrtc the server owns playout and already stopped sending on its own retraction —
         // there is no local queue for this client to clear.
         if (!webrtc) this.player?.clear?.();
@@ -1605,7 +1549,6 @@ export class ConverseClient extends EventTarget {
         this._dropAck();
         break;
       case 'interrupted': // barged — stop the reply (fade-clear if the server asks, else drain).
-        this._playbackPauseSeq = null;
         this._responding = false;
         this._dropAck();
         // Over webrtc the server measures and reports its own discarded audio on a hard-clear barge
@@ -1624,9 +1567,8 @@ export class ConverseClient extends EventTarget {
           let remaining = pending + device;
           let discarded = 0;
           if (event.clear) {
-            const wasPaused = !!this.player?.paused;
             this.player?.clear?.(BARGE_CLEAR_FADE_S);
-            const fadeMs = wasPaused ? 0 : BARGE_CLEAR_FADE_S * 1000;
+            const fadeMs = BARGE_CLEAR_FADE_S * 1000;
             discarded = Math.max(0, pending - fadeMs);
             remaining = Math.min(pending, fadeMs) + device;
           }
@@ -1641,10 +1583,6 @@ export class ConverseClient extends EventTarget {
         break;
       case 'done':
         this._responding = false;
-        if (this._playbackPauseSeq !== null) {
-          this._playbackPauseSeq = null;
-          this.audioQueue = this.audioQueue.catch(() => {}).then(() => this.player?.resume?.());
-        }
         break;
       case 'ack':
         // Assistant backchannel clip ("mm-hmm") sent OUTSIDE a reply: the next

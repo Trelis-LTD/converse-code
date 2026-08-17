@@ -49,6 +49,8 @@ async def test_voice_session_routes_all_pi_session_questions_to_pi(browser_page)
     assert "Pi is the authoritative source for its coding session" in instructions
     assert "every request or question concerning Pi or that session" in instructions
     assert "never answer it yourself" in instructions
+    mode = await page.evaluate("__fakeConverse.clients[0].options.mode")
+    assert mode["tool_choice"] == {"tool": "pi_request"}
 
 
 async def test_end_session_closes_voice_and_requests_host_shutdown(
@@ -495,8 +497,18 @@ async def test_background_status_tracks_the_deferred_task_not_unrelated_results(
         "action": "tool_deferred", "id": "task-1", "handle": "code-1",
         "status_label": "Pi",
     })
+    await page.wait_for_function(
+        "__fakeConverse.clients[0].bridgeCalls.some(call => call.action==='tool_deferred')",
+    )
+    assert not any(frame.get("seq") == 1 for frame in frames)
+    await page.evaluate("""__fakeConverse.clients[0].emit({
+      type:'tool_deferred_ack',id:'task-1',handle:'code-1',accepted:true,reason:null
+    })""")
     await wait_for_frame(frames, lambda frame: frame.get("seq") == 1)
     assert await page.locator("#status").inner_text() == "working"
+    assert await page.evaluate("__fakeConverse.clients[0].toolChoices.at(-1)") == {
+        "allowed": ["pi_request", "pi_cancel"],
+    }
     assert await page.locator(".entry.activity").get_by_text(
         "Pi accepted in the background", exact=True,
     ).count() == 1
@@ -528,11 +540,51 @@ async def test_background_status_tracks_the_deferred_task_not_unrelated_results(
         "type": "local", "event": "bridge_control", "seq": 4,
         "action": "tool_result", "id": "task-1",
         "content": {"event": "pi_settled", "message": "Finished"},
-        "outcome": "succeeded", "verified": False,
+        "outcome": "succeeded", "verified": True,
     })
     await wait_for_frame(frames, lambda frame: frame.get("seq") == 4)
     assert await page.locator("#status").inner_text() == "listening"
+    assert await page.evaluate("__fakeConverse.clients[0].toolChoices.at(-1)") == {
+        "tool": "pi_request",
+    }
     assert await page.locator(".entry.activity").get_by_text("Finished", exact=True).count() == 1
+    calls = await page.evaluate("__fakeConverse.clients[0].bridgeCalls")
+    result = next(
+        call for call in calls
+        if call.get("action") == "tool_result" and call.get("id") == "task-1"
+    )
+    assert result["options"] == {"outcome": "succeeded", "verified": True}
+
+
+async def test_rejected_defer_ack_is_forwarded_without_marking_pi_working(
+    browser_page, browser_server,
+):
+    page, _ = browser_page
+    server, _, frames = browser_server
+    await open_session(page)
+
+    await server.send_json_to_tab({
+        "type": "local", "event": "bridge_control", "seq": 1,
+        "action": "tool_deferred", "id": "task-1", "handle": "code-1",
+        "status_label": "Pi",
+    })
+    await page.wait_for_function(
+        "__fakeConverse.clients[0].bridgeCalls.some(call => call.action==='tool_deferred')",
+    )
+    await page.evaluate("""__fakeConverse.clients[0].emit({
+      type:'tool_deferred_ack',id:'task-1',accepted:false,reason:'handle_in_use'
+    })""")
+    await wait_for_frame(frames, lambda frame: frame.get("seq") == 1)
+
+    acknowledgement = next(frame for frame in frames if frame.get("seq") == 1)
+    assert acknowledgement["detail"] == {
+        "type": "tool_deferred_ack", "id": "task-1",
+        "accepted": False, "reason": "handle_in_use",
+    }
+    assert await page.locator("#status").inner_text() == "listening"
+    assert await page.locator(".entry.activity").get_by_text(
+        "Pi background task rejected: handle_in_use", exact=True,
+    ).count() == 1
 
 
 async def test_activity_rows_distinguish_approval_and_unverified_pi_evidence(
@@ -591,6 +643,13 @@ async def test_superseded_interaction_closes_without_completing_the_deferred_tas
         "action": "tool_deferred", "id": "task-1", "handle": "code-1",
         "status_label": "Pi",
     })
+    await page.wait_for_function(
+        "__fakeConverse.clients[0].bridgeCalls.some(call => call.action==='tool_deferred')",
+    )
+    await page.evaluate("""__fakeConverse.clients[0].emit({
+      type:'tool_deferred_ack',id:'task-1',handle:'code-1',accepted:true,reason:null
+    })""")
+    await wait_for_frame(frames, lambda frame: frame.get("seq") == 1)
     await server.send_json_to_tab({
         "type": "local", "event": "bridge_control", "seq": 2,
         "action": "tool_partial_result", "id": "task-1",

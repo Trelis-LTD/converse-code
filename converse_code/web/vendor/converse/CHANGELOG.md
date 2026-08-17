@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.17.0 - 2026-08-17
+
+- **Breaking (inert):** removed the reversible-playback protocol. The broker stopped sending
+  `playback_pause`/`playback_resume` when the ink-decider barge fallback was deleted, so this
+  client half has been dead code since. `StreamingPlayer.pause()`, `.resume()` and `.paused` are
+  gone, custom players no longer need them, and start frames no longer advertise
+  `playback_pause_v1` (`client.capabilities` is now always `[]`). Barge handling is unchanged:
+  `interrupted` still fade-clears and reports `discarded_ms`/`remaining_ms`.
+
 ## 0.16.0 - 2026-08-16
 
 - Interactions accept a `resolver` binding (`{tool, args, option_args, answer_arg}`): once the ask
