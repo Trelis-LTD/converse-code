@@ -34,6 +34,7 @@ const voice=document.querySelector("#voice"),endSession=document.querySelector("
 // {kind:"ended"}
 let session={kind:"idle"};
 let micState="idle",flushing=false;const seqs=new Map();
+let audioDiagnostics=false,audioCapture=null;
 const userRows=new Map(),assistantRows=new Map(),renderedControls=new Set();
 const deferredIds=new Set();
 const deferredAcks=new Map();
@@ -45,6 +46,53 @@ function row(kind,text,label=labels[kind]){empty?.remove();const el=document.cre
 function activity(text,label="Activity"){if(text)row("activity",text,label)}
 function wireSend(frame){if(ws.readyState===WebSocket.OPEN)ws.send(JSON.stringify(frame))}
 function debugTrace(name,data={}){wireSend({type:"local",event:"debug_trace",name,data})}
+function beginAudioCapture(turnId){
+  if(!audioDiagnostics)return;
+  audioCapture={turnId,sampleRate:16000,sampleCount:0,startedAt:performance.now(),last:null,parts:[],chunks:[]};
+}
+function captureAudio(client,event){
+  const capture=audioCapture,samples=event.samples;
+  if(!capture||!samples||!samples.length)return;
+  const receivedAt=performance.now(),pcm=new Int16Array(samples.length);
+  let peak=0,hash=2166136261;
+  for(let index=0;index<samples.length;index++){
+    const sample=Math.max(-1,Math.min(1,samples[index]));
+    const value=sample<0?Math.round(sample*32768):Math.round(sample*32767);
+    pcm[index]=value;peak=Math.max(peak,Math.abs(sample));
+    hash=Math.imul(hash^(value&0xffff),16777619)>>>0;
+  }
+  const context=client.player?.context;
+  capture.sampleRate=event.sr||capture.sampleRate;
+  capture.parts.push(pcm);capture.sampleCount+=pcm.length;
+  capture.chunks.push({
+    sequence:capture.chunks.length,
+    received_ms:Math.round((receivedAt-capture.startedAt)*1000)/1000,
+    samples:pcm.length,hash,
+    boundary_jump:capture.last===null?null:Math.abs(samples[0]-capture.last),
+    peak,
+    pending_ms:Math.round((client.player?.pendingMs?.()||0)*1000)/1000,
+    context_state:context?.state||null,
+    context_time:context?Math.round(context.currentTime*1000000)/1000000:null,
+  });
+  capture.last=samples[samples.length-1];
+}
+function finishAudioCapture(turnId){
+  const capture=audioCapture;
+  if(!capture||capture.turnId!==turnId)return Promise.resolve();
+  audioCapture=null;
+  debugTrace("assistant_audio",{
+    turn_id:capture.turnId,sample_rate:capture.sampleRate,
+    sample_count:capture.sampleCount,chunks:capture.chunks,
+  });
+  if(!capture.sampleCount)return Promise.resolve();
+  const pcm=new Int16Array(capture.sampleCount);let offset=0;
+  for(const part of capture.parts){pcm.set(part,offset);offset+=part.length}
+  const upload=fetch(`/audio-diagnostic?t=${encodeURIComponent(token)}`,{
+    method:"POST",headers:{"Content-Type":"application/octet-stream","X-Turn-Id":capture.turnId},body:pcm.buffer,
+  }).then(response=>{if(!response.ok)throw new Error(`audio diagnostic upload failed: ${response.status}`)})
+    .catch(error=>debugTrace("assistant_audio_save_failed",{turn_id:capture.turnId,error:String(error.message||error)}));
+  return upload;
+}
 // The badge is a projection of one observation over (session, micState, deferred tasks):
 // ended, else a microphone alert, else working while a deferred task runs, else the mic state.
 function renderStatus(){
@@ -74,6 +122,7 @@ async function liveSession(){
     const response=await fetch(`/session-credential?t=${encodeURIComponent(token)}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:sessionId})});
     if(!response.ok)throw new Error(`credential request failed: ${response.status}`);
     const credential=await response.json();
+    audioDiagnostics=credential.audio_diagnostics===true;
     const instance=new sdk.ConverseClient({url:credential.ws_url,apiKey:credential.api_key,sessionId:credential.session_id,mode:{kind:"converse",voice:"classic",instructions,web_search:false,silence_nudge_s:30,silence_end_s:90,tools:credential.tools||[],tool_choice:{tool:"pi_request"}}});
     opening.instance=instance;
     instance.addEventListener("event",event=>handleEvent(instance,event.detail||{}));
@@ -107,7 +156,8 @@ function handleEvent(client,event){
     });
     if(state==="failed")notice.textContent=error||event.code||"Microphone capture failed";
   }
-  if(event.type==="turn")debugTrace("voice_turn",{type:event.type,turn_id:turnId});
+  if(event.type==="turn"){beginAudioCapture(turnId);debugTrace("voice_turn",{type:event.type,turn_id:turnId})}
+  if(event.type==="audio")captureAudio(client,event);
   if(event.type==="asr"){
     const current=userRows.get(turnId)||row("user","");current.textContent=event.text||"";
     const final=event.final!==false;
@@ -126,12 +176,13 @@ function handleEvent(client,event){
   }
   if(event.type==="done"||event.type==="interrupted"||event.type==="canceled"){
     debugTrace("voice_turn",{type:event.type,turn_id:turnId,text:assistantRows.get(turnId)?.textContent||""});
+    void finishAudioCapture(turnId);
   }
   if(event.type==="session_end"){
     client.stopMic();
     debugTrace("session_end",{code:event.code,reason:event.reason||""});
-    wireSend({type:"local",event:"session_end",code:event.code,reason:event.reason||""});
     showEnded();
+    wireSend({type:"local",event:"session_end",code:event.code,reason:event.reason||""});
   }
   if(event.type==="tool_call")activity(`Requested ${event.name||"tool"}`,"Voice tool");
   if(event.type==="tool_call")debugTrace("tool_call",{id:event.id,name:event.name,args:event.args});
@@ -247,8 +298,11 @@ endSession.onclick=async()=>{
   if(session.kind==="ended")return;
   const previous=session;
   voice.disabled=true;endSession.disabled=true;notice.textContent="";
-  wireSend({type:"local",event:"end_session"});
+  // Diagnostics are evidence, never part of the lifecycle: a slow capture upload must not
+  // delay the visible end state or the semantic shutdown request.
+  if(audioCapture)void finishAudioCapture(audioCapture.turnId);
   showEnded();
+  wireSend({type:"local",event:"end_session"});
   try{
     if(previous.kind==="live")await previous.client.closeAndWait();
     else if(previous.kind==="opening")previous.instance?.close();

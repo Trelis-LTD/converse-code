@@ -9,7 +9,7 @@ from converse_code.localserver import LocalServer, ServerHandlers
 
 @pytest.fixture
 async def server():
-    received = {"tab": [], "pi": [], "credentials": []}
+    received = {"tab": [], "pi": [], "credentials": [], "audio": []}
 
     async def ignore():
         pass
@@ -26,10 +26,13 @@ async def server():
             "api_key": "scoped", "session_id": session_id, "expires_in": 600, "tools": [],
         }
 
+    async def audio_capture(turn_id, pcm16):
+        received["audio"].append((turn_id, pcm16))
+
     instance = LocalServer(ServerHandlers(
         tab_message=tab_message, tab_closed=ignore,
         pi_message=pi_message, pi_connected=ignore, pi_closed=ignore,
-        session_credential=credential,
+        session_credential=credential, audio_capture=audio_capture,
     ))
     await instance.start(port=0)
     try:
@@ -88,6 +91,25 @@ async def test_websocket_is_gated_and_relays_both_directions(server):
             assert received["tab"][-1]["event"] == "bridge_ready"
             assert await server.send_json_to_tab({"type": "local", "event": "ping"})
             assert json.loads((await websocket.receive()).data)["event"] == "ping"
+
+
+async def test_audio_diagnostic_endpoint_is_gated_and_delegated(server):
+    server, received = server
+    url = f"{base(server)}/audio-diagnostic?t={server.token}"
+    origin = f"http://127.0.0.1:{server.port}"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            url, data=b"\x01\x00",
+            headers={"Origin": "https://evil.example", "X-Turn-Id": "reply-1"},
+        ) as denied:
+            assert denied.status == 403
+        async with session.post(
+            url,
+            data=b"\x01\x00\x02\x00",
+            headers={"Origin": origin, "X-Turn-Id": "reply-1"},
+        ) as response:
+            assert response.status == 201
+    assert received["audio"] == [("reply-1", b"\x01\x00\x02\x00")]
 
 async def test_pi_extension_socket_is_separate_authenticated_and_bidirectional(server):
     server, received = server

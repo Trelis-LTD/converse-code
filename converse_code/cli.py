@@ -70,7 +70,11 @@ async def _run(args, trace: SessionTrace | NullTrace) -> int:
             **credential.as_payload(),
             "ws_url": args.broker_url,
             "tools": agent_tools.manifest(),
+            "audio_diagnostics": trace.path is not None,
         }
+
+    async def save_audio(turn_id: str, pcm16: bytes) -> None:
+        trace.record_audio(turn_id, pcm16, sample_rate=16000)
 
     async def spawn_tool(call: ToolCall) -> None:
         trace.record("host", "tool_call_received", call={
@@ -114,6 +118,7 @@ async def _run(args, trace: SessionTrace | NullTrace) -> int:
         pi_connected=pi_connected,
         pi_closed=pi_disconnected,
         session_credential=issue_credential,
+        audio_capture=save_audio,
     ))
     bridge = BrowserBridge(server.send_json_to_tab, trace=trace.record)
     async def send_to_pi(frame: dict) -> bool:
@@ -163,6 +168,7 @@ async def _run(args, trace: SessionTrace | NullTrace) -> int:
     print(f"Converse voice control: {server.url}")
     if trace.path is not None:
         print(f"Debug trace: {trace.path}")
+        print(f"Debug audio: {trace.path.with_suffix('.audio')}")
     if not args.no_browser:
         webbrowser.open(server.url)
     process_wait = asyncio.create_task(process.wait())

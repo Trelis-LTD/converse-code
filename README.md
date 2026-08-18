@@ -72,13 +72,16 @@ For a recording or a session you may need to diagnose later, append an opt-in lo
 uvx converse-code --debug-log ./converse-session.jsonl
 ```
 
-The JSONL trace timestamps browser voice turns, background-tool controls and acknowledgements,
-and Pi semantic events. It excludes audio and CLI arguments, uses
-owner-only permissions for new files, and applies targeted redaction to structured credential
+The JSONL trace timestamps browser voice turns, received-audio chunk timing and continuity,
+background-tool controls and acknowledgements, and Pi semantic events. Assistant audio received
+by the browser is saved as per-turn WAV files in the sibling `converse-session.audio/` directory;
+this lets a playback glitch be separated from an upstream TTS defect. It excludes microphone audio
+and CLI arguments, uses owner-only permissions for new files, and applies targeted redaction to structured credential
 fields, Converse and common provider keys, bearer headers, inline secret assignments and flags,
 and local session tokens. It intentionally retains spoken transcripts, tool arguments, paths, and
 command summaries because those are needed to reconstruct a failure. Redaction cannot recognize
-every possible secret format, so treat the file as project-sensitive and share it deliberately.
+every possible secret format, so treat the trace and audio directory as project-sensitive and share
+them deliberately.
 
 ## Reference architecture
 
