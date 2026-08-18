@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import wave
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -61,6 +62,11 @@ class NullTrace:
     def record(self, source: str, event: str, **data: Any) -> None:
         pass
 
+    def record_audio(
+        self, turn_id: str, pcm16: bytes, *, sample_rate: int,
+    ) -> None:
+        pass
+
     def close(self) -> None:
         pass
 
@@ -72,6 +78,7 @@ class SessionTrace:
         self.path = Path(path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.session_id = secrets.token_hex(8)
+        self._audio_sequence = 0
         descriptor = os.open(self.path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
         self._file = os.fdopen(descriptor, "a", encoding="utf-8", buffering=1)
 
@@ -88,6 +95,34 @@ class SessionTrace:
         }
         self._file.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
         self._file.flush()
+
+    def record_audio(
+        self, turn_id: str, pcm16: bytes, *, sample_rate: int,
+    ) -> Path:
+        if len(pcm16) % 2:
+            raise ValueError("PCM16 audio must contain complete samples")
+        if sample_rate <= 0:
+            raise ValueError("sample rate must be positive")
+        directory = self.path.with_suffix(".audio")
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.chmod(0o700)
+        self._audio_sequence += 1
+        safe_turn = re.sub(r"[^A-Za-z0-9_.-]+", "-", turn_id).strip("-.") or "turn"
+        audio_path = directory / (
+            f"{self.session_id}-{self._audio_sequence:03d}-{safe_turn[:80]}.wav"
+        )
+        descriptor = os.open(audio_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "wb") as raw:
+            with wave.open(raw, "wb") as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(sample_rate)
+                audio.writeframes(pcm16)
+        self.record(
+            "browser", "assistant_audio_saved", turn_id=turn_id,
+            path=str(audio_path), sample_rate=sample_rate, sample_count=len(pcm16) // 2,
+        )
+        return audio_path
 
     def close(self) -> None:
         if not self._file.closed:

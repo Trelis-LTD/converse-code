@@ -69,6 +69,27 @@ async def test_end_session_closes_voice_and_requests_host_shutdown(
     assert await page.evaluate("__fakeConverse.clients[0].closed") is True
 
 
+async def test_end_session_never_waits_for_an_audio_diagnostic_upload(
+    browser_page, browser_server,
+):
+    page, _ = browser_page
+    _, _, frames = browser_server
+    await open_session(page)
+    await page.evaluate("""const realFetch=window.fetch.bind(window);
+      window.fetch=(url,options)=>String(url).startsWith('/audio-diagnostic')
+        ? new Promise(()=>{}) : realFetch(url,options);
+      __fakeConverse.clients[0].emit({type:'turn',turn_id:'reply-pending'});
+      __fakeConverse.clients[0].emit({
+        type:'audio',sr:16000,samples:new Float32Array([0,0.25,-0.25])
+      });""")
+
+    await page.locator("#end-session").click()
+
+    await wait_for_frame(frames, lambda frame: frame.get("event") == "end_session")
+    assert await page.locator("#status").inner_text() == "ended"
+    assert await page.locator("#voice").is_disabled()
+
+
 async def test_end_session_during_voice_open_cannot_resurrect_the_session(
     browser_page, browser_server,
 ):
@@ -120,6 +141,43 @@ async def test_browser_renders_and_traces_sdk_mic_lifecycle(
     )
     await page.locator("#voice").click()
     assert await page.evaluate("__fakeConverse.clients[0].micEnabled") is True
+
+
+async def test_debug_session_captures_received_assistant_audio_with_chunk_evidence(
+    browser_page, browser_server,
+):
+    page, _ = browser_page
+    _, _, frames = browser_server
+    await open_session(page)
+
+    await page.evaluate("""__fakeConverse.clients[0].emit({type:'turn',turn_id:'reply-audio'});
+      __fakeConverse.clients[0].emit({
+        type:'audio',turn_id:'reply-audio',sr:16000,
+        samples:new Float32Array([0,0.25,-0.25,0.5])
+      });
+      __fakeConverse.clients[0].emit({
+        type:'audio',turn_id:'reply-audio',sr:16000,
+        samples:new Float32Array([0.5,-0.5,0])
+      });
+      __fakeConverse.clients[0].emit({type:'done',turn_id:'reply-audio'});""")
+
+    await wait_for_frame(
+        frames,
+        lambda frame: frame.get("event") == "audio_capture"
+        and frame.get("turn_id") == "reply-audio",
+    )
+    capture = next(frame for frame in frames if frame.get("event") == "audio_capture")
+    assert len(capture["pcm16"]) == 14
+    trace = next(
+        frame for frame in frames
+        if frame.get("event") == "debug_trace"
+        and frame.get("name") == "assistant_audio"
+    )
+    assert trace["data"]["turn_id"] == "reply-audio"
+    assert trace["data"]["sample_rate"] == 16000
+    assert trace["data"]["sample_count"] == 7
+    assert len(trace["data"]["chunks"]) == 2
+    assert trace["data"]["chunks"][1]["boundary_jump"] == pytest.approx(0)
 
 
 async def test_browser_renders_sdk_mic_recovery_without_owning_retry(

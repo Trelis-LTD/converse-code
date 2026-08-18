@@ -31,6 +31,7 @@ WEB_DIR = Path(__file__).parent / "web"
 JsonHandler = Callable[[dict], Awaitable[None]]
 ClosedHandler = Callable[[], Awaitable[None]]
 CredentialHandler = Callable[[str], Awaitable[dict]]
+AudioHandler = Callable[[str, bytes], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class ServerHandlers:
     pi_connected: ClosedHandler
     pi_closed: ClosedHandler
     session_credential: CredentialHandler
+    audio_capture: AudioHandler
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,7 @@ class LocalServer:
         app.router.add_get("/ws", self._ws)
         app.router.add_get("/pi", self._pi_ws)
         app.router.add_post("/session-credential", self._session_credential)
+        app.router.add_post("/audio-diagnostic", self._audio_diagnostic)
         app.router.add_get("/vendor/converse/{name}", self._vendor)
         if isinstance(self._runtime, RunningServer):
             raise RuntimeError("local server is already running")
@@ -250,3 +253,19 @@ class LocalServer:
             log.exception("could not mint browser session credential")
             return web.json_response({"error": "could not reach Converse"}, status=502)
         return web.json_response(credential, status=201)
+
+    async def _audio_diagnostic(self, request: web.Request) -> web.Response:
+        if not self._authorized(request) or not self._same_origin(request):
+            return web.json_response({"error": "forbidden"}, status=403)
+        turn_id = request.headers.get("X-Turn-Id", "")
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", turn_id):
+            return web.json_response({"error": "invalid turn id"}, status=400)
+        body = bytearray()
+        async for chunk in request.content.iter_chunked(64 * 1024):
+            body.extend(chunk)
+            if len(body) > 16 * 1024 * 1024:
+                return web.json_response({"error": "audio capture too large"}, status=413)
+        if not body or len(body) % 2:
+            return web.json_response({"error": "invalid PCM16 payload"}, status=400)
+        await self.handlers.audio_capture(turn_id, bytes(body))
+        return web.json_response({"saved": True}, status=201)

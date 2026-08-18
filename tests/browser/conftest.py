@@ -36,10 +36,16 @@ async def browser_server():
             "session_id": session_id,
             "ws_url": "wss://invalid.browser-e2e.test/ws",
             "tools": [],
+            "audio_diagnostics": True,
         }
 
     async def tab_frame(frame):
         tab_frames.append(frame)
+
+    async def audio_capture(turn_id, pcm16):
+        tab_frames.append({
+            "event": "audio_capture", "turn_id": turn_id, "pcm16": pcm16,
+        })
 
     async def ignore(*_args):
         pass
@@ -47,7 +53,7 @@ async def browser_server():
     server = LocalServer(ServerHandlers(
         tab_message=tab_frame, tab_closed=ignore,
         pi_message=ignore, pi_connected=ignore, pi_closed=ignore,
-        session_credential=credential,
+        session_credential=credential, audio_capture=audio_capture,
     ))
     await server.start(port=0)
     try:

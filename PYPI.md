@@ -24,5 +24,6 @@ Documentation: https://github.com/Trelis-LTD/converse-code
 
 Record an opt-in, locally redacted diagnostic trace with
 `converse-code --debug-log ./converse-session.jsonl`. The trace retains transcripts, paths, tool
-arguments, and command summaries. Redaction cannot recognize every possible secret format, so the
-file should be treated as project-sensitive.
+arguments, command summaries, received-audio timing, and per-turn assistant WAV files in
+`converse-session.audio/`. It never captures microphone audio. Redaction cannot recognize every
+possible secret format, so the trace and audio directory should be treated as project-sensitive.
