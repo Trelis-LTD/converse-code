@@ -84,7 +84,9 @@ def manifest() -> list[dict]:
         tool(
             "pi_request",
             (
-                "Hand an actionable coding, repository, environment, or Pi question to Pi. "
+                "Interact with the user's connected Pi coding session: hand it any actionable "
+                "coding, repository, or environment request, and ask it anything you need to know "
+                "about the session itself, including what model and configuration it is running. "
                 "Forward the user's request faithfully and let Pi inspect or act; never substitute "
                 "your own progress narration or unsupported answer. While Pi is working, this "
                 "steers that same turn and supersedes any pending approval."
